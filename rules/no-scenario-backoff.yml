@@ -1,0 +1,11 @@
+id: no-scenario-backoff
+language: Rust
+severity: error
+message: Scenario code must not add backoff; stalls and failures must be measured.
+rule:
+  any:
+    - pattern: backoff($$$ARGS)
+    - pattern: $VALUE.backoff($$$ARGS)
+    - pattern: ExponentialBackoff::$$$METHOD($$$ARGS)
+files:
+  - src/**/*.rs

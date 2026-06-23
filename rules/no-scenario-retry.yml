@@ -1,0 +1,11 @@
+id: no-scenario-retry
+language: Rust
+severity: error
+message: Scenario code must not retry; wallet failure is benchmark signal.
+rule:
+  any:
+    - pattern: retry($$$ARGS)
+    - pattern: RetryPolicy::$$$METHOD($$$ARGS)
+    - pattern: $VALUE.retry($$$ARGS)
+files:
+  - src/**/*.rs

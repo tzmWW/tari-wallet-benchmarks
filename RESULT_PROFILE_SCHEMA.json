@@ -1,0 +1,23 @@
+{
+  "cell_status_values": [
+    "pending_funding",
+    "ready_for_live_run",
+    "ok",
+    "failed",
+    "blocked_upstream",
+    "not_applicable"
+  ],
+  "required_top_level_keys": [
+    "schema_version",
+    "generated_at",
+    "network",
+    "environment",
+    "versions",
+    "config",
+    "modes",
+    "findings",
+    "chain_verification"
+  ],
+  "schema_version": 1,
+  "tx_mined_confirmed_status_value": 6
+}

@@ -1,0 +1,3 @@
+pub const MINOTARI_CLI_REV: &str = "360c4848a54d65fd710266233cc9277b0f785e74";
+pub const PAYMENT_PROCESSOR_REV: &str = "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c";
+pub const TX_MINED_CONFIRMED_STATUS: u32 = 6;

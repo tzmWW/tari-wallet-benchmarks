@@ -1,0 +1,8 @@
+ruleDirs:
+  - rules
+ignores:
+  - target
+  - .bench-cache
+  - .bench-data
+  - .git
+  - Cargo.lock

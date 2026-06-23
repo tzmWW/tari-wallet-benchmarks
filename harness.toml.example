@@ -1,0 +1,45 @@
+[network]
+name = "esmeralda"
+base_node_http_url = "https://rpc.esmeralda.tari.com"
+
+[benchmark]
+a_fund = "10000 T"
+c_min = 3
+volume_target = 512
+doubling_rounds = 6
+fanout_outputs_per_tx = 8
+concurrent_batches = [8, 16, 32, 64, 128]
+s4_t_budget_secs = 900
+s5_m = 100
+s5_k = 10
+fee_rate = "5 uT"
+repetitions = 3
+
+[paths]
+data_dir = ".bench-data"
+cache_dir = ".bench-cache"
+minotari_console_wallet = "tools/minotari_console_wallet"
+minotari_binary = "tools/minotari"
+payment_processor_binary = ".bench-cache/minotari_payment_processor/target/release/minotari_payment_processor"
+
+[seeds]
+old_wallet_env = "HARNESS_SEED_OLD"
+new_wallet_env = "HARNESS_SEED_NEW"
+payment_processor_env = "HARNESS_SEED_PP"
+wallet_password_env = "HARNESS_WALLET_PW"
+
+[modes]
+old_wallet_grpc_address = "http://127.0.0.1:18143"
+new_wallet_database = ".bench-data/new-wallet/wallet.db"
+payment_processor_listen = "127.0.0.1:9145"
+payment_receiver_listen = "127.0.0.1:9146"
+
+[versions]
+minotari_cli_rev = "360c4848a54d65fd710266233cc9277b0f785e74"
+payment_processor_rev = "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c"
+
+[timeouts]
+startup_secs = 1800
+confirmation_secs = 1200
+scan_batch_secs = 300
+transaction_lock_secs = 60

@@ -1,0 +1,391 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-06-23T14:21:30.019966Z",
+  "network": "esmeralda",
+  "environment": {
+    "os": "macOS 26.5.1",
+    "cpu_brand": "Apple M1 Pro",
+    "physical_cores": 8,
+    "total_memory_bytes": 17179869184
+  },
+  "versions": {
+    "harness_minotari_cli_pin": "360c4848a54d65fd710266233cc9277b0f785e74",
+    "harness_payment_processor_pin": "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c",
+    "minotari_cli_rev": "360c4848a54d65fd710266233cc9277b0f785e74",
+    "minotari_payment_processor_rev": "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c"
+  },
+  "config": {
+    "A_fund": "10000 T",
+    "C_min": 3,
+    "S4_T_budget_secs": 900,
+    "S5_K": 10,
+    "S5_M": 100,
+    "concurrent_batches": [
+      8,
+      16,
+      32,
+      64,
+      128
+    ],
+    "doubling_rounds": 6,
+    "fanout_outputs_per_tx": 8,
+    "fee_rate": "5 uT",
+    "mode3_env_template": [
+      "ACCOUNTS__DEFAULT__NAME",
+      "ACCOUNTS__DEFAULT__PUBLIC_SPEND_KEY",
+      "ACCOUNTS__DEFAULT__VIEW_KEY",
+      "BASE_NODE",
+      "CONSOLE_WALLET_BASE_PATH",
+      "CONSOLE_WALLET_PASSWORD",
+      "CONSOLE_WALLET_PATH",
+      "DATABASE_URL",
+      "LISTEN_IP",
+      "LISTEN_PORT",
+      "PAYMENT_RECEIVER",
+      "TARI_NETWORK"
+    ],
+    "repetitions": 3,
+    "volume_target": 512
+  },
+  "modes": {
+    "new_wallet": {
+      "mode": "new_wallet",
+      "address": "f2N1byhsarfgdpHFJorDkueL988t8YSpvtaqtsWNQoYpF1xRy28922wmtmhdBnfyhCgHiVKGV4f8qgE8TbPuMtWJ2w5",
+      "scenarios": {
+        "B0": {
+          "scenario": "b0",
+          "surface": "minotari_library",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S0": {
+          "scenario": "s0",
+          "surface": "minotari_library",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S1": {
+          "scenario": "s1",
+          "surface": "minotari_library",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S2": {
+          "scenario": "s2",
+          "surface": "minotari_library",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S3": {
+          "scenario": "s3",
+          "surface": "minotari_library",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S4": {
+          "scenario": "s4",
+          "surface": "minotari_library",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S5": {
+          "scenario": "s5",
+          "surface": "minotari_library",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S6": {
+          "scenario": "s6",
+          "surface": "minotari_library",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S7": {
+          "scenario": "s7",
+          "surface": "minotari_library",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        }
+      }
+    },
+    "old_wallet": {
+      "mode": "old_wallet",
+      "address": "f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr",
+      "scenarios": {
+        "B0": {
+          "scenario": "b0",
+          "surface": "console_wallet_grpc",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S0": {
+          "scenario": "s0",
+          "surface": "console_wallet_grpc",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S1": {
+          "scenario": "s1",
+          "surface": "console_wallet_grpc",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S2": {
+          "scenario": "s2",
+          "surface": "console_wallet_grpc",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S3": {
+          "scenario": "s3",
+          "surface": "console_wallet_grpc",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S4": {
+          "scenario": "s4",
+          "surface": "console_wallet_grpc",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S5": {
+          "scenario": "s5",
+          "surface": "console_wallet_grpc",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S6": {
+          "scenario": "s6",
+          "surface": "console_wallet_grpc",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S7": {
+          "scenario": "s7",
+          "surface": "console_wallet_grpc",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        }
+      }
+    },
+    "payment_processor": {
+      "mode": "payment_processor",
+      "address": "f23VeMsmJboQnnbQX8Cbbg2Emxk4jT8BYX1HyMtnY5Fnr94W6rgwLSrVniKENn8QtwrRpiyAYC1UVQRatJRF72jB6p6",
+      "scenarios": {
+        "B0": {
+          "scenario": "b0",
+          "surface": "companion_wallet_scan",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S0": {
+          "scenario": "s0",
+          "surface": "payment_processor_api",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S1": {
+          "scenario": "s1",
+          "surface": "payment_processor_api",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S2": {
+          "scenario": "s2",
+          "surface": "companion_wallet_scan",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S3": {
+          "scenario": "s3",
+          "surface": "companion_wallet_scan",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S4": {
+          "scenario": "s4",
+          "surface": "payment_processor_api",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S5": {
+          "scenario": "s5",
+          "surface": "payment_processor_api",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S6": {
+          "scenario": "s6",
+          "surface": "companion_wallet_scan",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        },
+        "S7": {
+          "scenario": "s7",
+          "surface": "companion_wallet_scan",
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": [
+            "built without live-minotari feature; this profile is a pre-live scaffold"
+          ]
+        }
+      }
+    }
+  },
+  "findings": [
+    {
+      "id": "pp-real-app",
+      "title": "Mode 3 uses the real minotari_payment_processor",
+      "status": "implemented_in_topology",
+      "recommendation": "Keep PP failures visible as benchmark output rather than bypassing the service."
+    },
+    {
+      "id": "birthday-seeds",
+      "title": "Genesis and birthday scans require birthday-encoded seeds",
+      "status": "harness_generates_seed_material",
+      "recommendation": "Use generated seeds and rewrite birthday for scan setup instead of RescanWallet(0)."
+    },
+    {
+      "id": "chain-verification",
+      "title": "Mempool acceptance is not benchmark success",
+      "status": "schema_requires_chain_verification",
+      "recommendation": "Verify claimed successful transactions with status value 6 before publishing throughput."
+    }
+  ],
+  "chain_verification": {
+    "tx_mined_confirmed_status_value": 6,
+    "verified_transactions": []
+  }
+}

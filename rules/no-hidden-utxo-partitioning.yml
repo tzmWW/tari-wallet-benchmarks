@@ -1,0 +1,11 @@
+id: no-hidden-utxo-partitioning
+language: Rust
+severity: error
+message: Do not hide wallet behavior with harness-level UTXO pre-partitioning.
+rule:
+  any:
+    - pattern: pre_partition($$$ARGS)
+    - pattern: prepartition($$$ARGS)
+    - pattern: partition_utxos($$$ARGS)
+files:
+  - src/**/*.rs
