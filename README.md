@@ -13,9 +13,10 @@ Current implementation status: CLI/config/schema/seed handling, Esmeralda
 guarding, result-profile generation, PP environment/API contract, static
 "no hidden wallet pain" rules, and the Mode 2 `live-minotari` scan/signing smoke
 path are in place. Fresh Mode 2 and PP companion scan cells are measured from
-new databases so warmed scan state does not leak into the baseline. The
-remaining bounty-critical work is the funded live send-side runner for the full
-B0/S0-S7 matrix across all three modes.
+new databases so warmed scan state does not leak into the baseline. The checked
+baseline also includes an opt-in Mode 2 one-sided send smoke submitted without
+retry middleware. The remaining bounty-critical work is the funded live
+send-side runner for the full B0/S0-S7 matrix across all three modes.
 
 Start by generating fundable addresses:
 
@@ -37,5 +38,5 @@ cargo run --features live-minotari -- run --config harness.toml --profile baseli
 Full operator detail is in [RUNBOOK.md](RUNBOOK.md).
 
 The committed baseline JSON is schema-valid harness output and deliberately
-contains no secrets. Replace it with a funded live Esmeralda run before using it
-as performance evidence.
+contains no secrets. It includes funding evidence and a tiny Mode 2 send-side
+compatibility proof, but not the completed benchmark matrix yet.

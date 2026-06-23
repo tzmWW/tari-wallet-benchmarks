@@ -10,6 +10,14 @@ This summary accompanies `baselines/esmeralda_baseline.json`.
   wallet.
 - Seed phrases and wallet passwords are excluded from result profiles.
 
-The checked-in profile is a schema-valid harness output, not a completed
-performance baseline. Replace it with a funded live Esmeralda run after the full
-B0/S0-S7 runner is completed before using the numbers as benchmark evidence.
+Current checked-in live evidence:
+
+- Mode 2 S0 funded scan detected `50000000000` microtari available from funding
+  tx `7676530785144502866` at height `707741`.
+- Mode 2 S1 contains a compatibility smoke only: one `1 T` one-sided transaction
+  was constructed, signed, persisted to the wallet DB, and accepted by
+  Esmeralda through direct no-retry JSON-RPC submit. Tx id:
+  `18389397492102525901`.
+
+The checked-in profile is not a completed performance baseline. Replace it with
+the full B0/S0-S7 matrix before using the numbers as benchmark evidence.

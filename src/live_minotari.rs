@@ -4,13 +4,15 @@ use std::{
     fs,
     path::{Path, PathBuf},
     str::FromStr,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
 use minotari::{
     ScanMode, Scanner,
-    db::get_latest_scanned_tip_block_by_account,
+    db::{self, get_latest_scanned_tip_block_by_account},
     get_accounts, get_balance, init_db,
+    models::PendingTransactionStatus,
     transactions::{manager::TransactionSender, one_sided_transaction::Recipient},
     utils::init_wallet::init_with_seed_words,
 };
@@ -18,8 +20,12 @@ use tari_common::configuration::Network;
 use tari_common_types::seeds::cipher_seed::CipherSeed;
 use tari_common_types::tari_address::TariAddress;
 use tari_transaction_components::{
-    MicroMinotari, consensus::ConsensusConstantsBuilder, offline_signing::sign_locked_transaction,
+    MicroMinotari,
+    consensus::ConsensusConstantsBuilder,
+    offline_signing::{models::SignedOneSidedTransactionResult, sign_locked_transaction},
+    rpc::models::{TxSubmissionRejectionReason, TxSubmissionResponse},
 };
+use tari_utilities::ByteArray;
 
 use crate::{
     config::{Config, parse_amount},
@@ -100,7 +106,22 @@ pub async fn annotate_profile_with_library_smoke(
         }
     }
 
-    annotate_fresh_scan_cells(config, book, profile).await?;
+    if config.benchmark.mode2_send_smoke {
+        annotate_mode2_send_smoke(config, book, profile).await?;
+    } else if let Some(mode) = profile.modes.get_mut("new_wallet")
+        && let Some(cell) = mode.scenarios.get_mut("S1")
+    {
+        cell.notes.push(
+            "Mode 2 send smoke disabled; set benchmark.mode2_send_smoke=true to run the opt-in tiny spend"
+                .to_string(),
+        );
+    }
+
+    if config.benchmark.live_fresh_scan_cells {
+        annotate_fresh_scan_cells(config, book, profile).await?;
+    } else {
+        annotate_fresh_scan_cells_disabled(profile);
+    }
     Ok(())
 }
 
@@ -175,6 +196,102 @@ async fn annotate_fresh_scan_cells(
             birthday,
         )
         .await?;
+    }
+
+    Ok(())
+}
+
+fn annotate_fresh_scan_cells_disabled(profile: &mut ResultProfile) {
+    for mode in ["new_wallet", "payment_processor"] {
+        let Some(mode_profile) = profile.modes.get_mut(mode) else {
+            continue;
+        };
+        for scenario in [
+            ScenarioName::B0,
+            ScenarioName::S2,
+            ScenarioName::S3,
+            ScenarioName::S6,
+            ScenarioName::S7,
+        ] {
+            if let Some(cell) = mode_profile.scenarios.get_mut(scenario.as_str()) {
+                cell.notes.push(
+                    "fresh live scan cell disabled for this run; set benchmark.live_fresh_scan_cells=true for the long baseline pass"
+                        .to_string(),
+                );
+            }
+        }
+    }
+}
+
+async fn annotate_mode2_send_smoke(
+    config: &Config,
+    book: &AddressBook,
+    profile: &mut ResultProfile,
+) -> anyhow::Result<()> {
+    let Some(sender_seed) = book.addresses.get(WalletRole::NewWallet.label()) else {
+        return Ok(());
+    };
+    let Some(recipient_seed) = book.addresses.get(WalletRole::OldWallet.label()) else {
+        return Ok(());
+    };
+
+    let password = wallet_password(&config.seeds.wallet_password_env)?;
+    let amount = parse_amount(&config.benchmark.mode2_send_smoke_amount)?;
+    ensure_signing_wallet(
+        &config.modes.new_wallet_database,
+        &sender_seed.seed_words,
+        &config.seeds.wallet_password_env,
+    )?;
+    let start = Instant::now();
+    let send = construct_sign_broadcast_one_sided(OneSidedSendRequest {
+        db_path: &config.modes.new_wallet_database,
+        password: &password,
+        base_node_url: &config.network.base_node_http_url,
+        recipient: &recipient_seed.address,
+        amount,
+        fee_rate: config.fee_rate()?,
+        seconds_to_lock: config.timeouts.transaction_lock_secs,
+        confirmation_window: config.benchmark.c_min,
+        request_timeout: Duration::from_secs(30),
+    })
+    .await;
+    let wall_ms = start.elapsed().as_millis();
+
+    if let Some(mode) = profile.modes.get_mut("new_wallet")
+        && let Some(cell) = mode.scenarios.get_mut("S1")
+    {
+        match send {
+            Ok(outcome) => {
+                cell.record_repetition(Repetition {
+                    run: 1,
+                    status: CellStatus::Ok,
+                    wall_ms: Some(wall_ms),
+                    success_count: 1,
+                    failure_count: 0,
+                    fee_microtari: Some(outcome.fee_microtari),
+                    error: None,
+                });
+                cell.notes.push(format!(
+                    "Mode 2 compatibility smoke only: constructed, signed, persisted, and submitted one one-sided tx without retry middleware; tx_id={} amount={} recipient={} accepted={} is_synced={}",
+                    outcome.tx_id,
+                    config.benchmark.mode2_send_smoke_amount,
+                    recipient_seed.address,
+                    outcome.accepted,
+                    outcome.is_synced
+                ));
+            }
+            Err(error) => {
+                cell.record_repetition(Repetition {
+                    run: 1,
+                    status: CellStatus::Failed,
+                    wall_ms: Some(wall_ms),
+                    success_count: 0,
+                    failure_count: 1,
+                    fee_microtari: None,
+                    error: Some(format!("{error:#}")),
+                });
+            }
+        }
     }
 
     Ok(())
@@ -398,11 +515,19 @@ pub struct OneSidedSendRequest<'a> {
     pub fee_rate: MicroMinotari,
     pub seconds_to_lock: u64,
     pub confirmation_window: u64,
+    pub request_timeout: Duration,
+}
+
+pub struct OneSidedSendOutcome {
+    pub tx_id: String,
+    pub fee_microtari: u64,
+    pub accepted: bool,
+    pub is_synced: bool,
 }
 
 pub async fn construct_sign_broadcast_one_sided(
     request: OneSidedSendRequest<'_>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<OneSidedSendOutcome> {
     let pool = init_db(request.db_path.to_path_buf())?;
     let mut sender = TransactionSender::new(
         pool,
@@ -425,11 +550,162 @@ pub async fn construct_sign_broadcast_one_sided(
     let key_manager = sender.account.get_key_manager(request.password)?;
     let constants = ConsensusConstantsBuilder::new(Network::Esmeralda).build();
     let signed = sign_locked_transaction(&key_manager, constants, Network::Esmeralda, unsigned)?;
-    let tx_id = signed.signed_transaction.tx_id.to_string();
-    sender
-        .finalize_transaction_and_broadcast(signed, request.base_node_url.to_string())
-        .await?;
-    Ok(tx_id)
+    finalize_transaction_and_broadcast_without_retry(&sender, signed, request).await
+}
+
+async fn finalize_transaction_and_broadcast_without_retry(
+    sender: &TransactionSender,
+    signed: SignedOneSidedTransactionResult,
+    request: OneSidedSendRequest<'_>,
+) -> anyhow::Result<OneSidedSendOutcome> {
+    persist_signed_transaction(sender, &signed)?;
+    let tx_id = signed.signed_transaction.tx_id;
+    let fee_microtari = signed.request.info.fee.0;
+    let submission = submit_transaction_without_retry(
+        request.base_node_url,
+        signed.signed_transaction.transaction,
+        request.request_timeout,
+    )
+    .await;
+
+    let conn = sender.db_pool.get()?;
+    match submission {
+        Ok(response) if response.accepted => {
+            db::mark_completed_transaction_as_broadcasted(&conn, tx_id, 1)?;
+            Ok(OneSidedSendOutcome {
+                tx_id: tx_id.to_string(),
+                fee_microtari,
+                accepted: response.accepted,
+                is_synced: response.is_synced,
+            })
+        }
+        Ok(response) if response.rejection_reason == TxSubmissionRejectionReason::AlreadyMined => {
+            Ok(OneSidedSendOutcome {
+                tx_id: tx_id.to_string(),
+                fee_microtari,
+                accepted: response.accepted,
+                is_synced: response.is_synced,
+            })
+        }
+        Ok(response) => {
+            db::mark_completed_transaction_as_rejected(
+                &conn,
+                tx_id,
+                &response.rejection_reason.to_string(),
+            )?;
+            db::update_pending_transaction_status(
+                &conn,
+                sender.processed_transactions.id(),
+                PendingTransactionStatus::Expired,
+            )?;
+            db::unlock_outputs_for_pending_transaction(&conn, sender.processed_transactions.id())?;
+            anyhow::bail!(
+                "transaction was not accepted by the network: {}",
+                response.rejection_reason
+            );
+        }
+        Err(error) => {
+            db::mark_completed_transaction_as_rejected(
+                &conn,
+                tx_id,
+                &format!("Transaction submission failed: {error}"),
+            )?;
+            db::update_pending_transaction_status(
+                &conn,
+                sender.processed_transactions.id(),
+                PendingTransactionStatus::Expired,
+            )?;
+            db::unlock_outputs_for_pending_transaction(&conn, sender.processed_transactions.id())?;
+            Err(error)
+        }
+    }
+}
+
+fn persist_signed_transaction(
+    sender: &TransactionSender,
+    signed: &SignedOneSidedTransactionResult,
+) -> anyhow::Result<()> {
+    let conn = sender.db_pool.get()?;
+    let pending_tx_id = sender.processed_transactions.id();
+    if pending_tx_id.is_empty() {
+        anyhow::bail!("pending transaction id missing before broadcast");
+    }
+
+    let tx_id = signed.signed_transaction.tx_id;
+    let kernel_excess = signed
+        .signed_transaction
+        .transaction
+        .body()
+        .kernels()
+        .first()
+        .map(|kernel| kernel.excess.as_bytes().to_vec())
+        .unwrap_or_default();
+    let serialized_transaction = serde_json::to_vec(&signed.signed_transaction.transaction)
+        .context("serializing signed transaction")?;
+    let sent_output_hash = signed
+        .signed_transaction
+        .sent_hashes
+        .first()
+        .map(hex::encode);
+
+    db::update_pending_transaction_status(
+        &conn,
+        pending_tx_id,
+        PendingTransactionStatus::Completed,
+    )?;
+    db::create_completed_transaction(
+        &conn,
+        sender.account.id,
+        pending_tx_id,
+        &kernel_excess,
+        &serialized_transaction,
+        sent_output_hash,
+        tx_id,
+    )?;
+    Ok(())
+}
+
+async fn submit_transaction_without_retry(
+    base_node_url: &str,
+    transaction: tari_transaction_components::transaction_components::Transaction,
+    timeout: Duration,
+) -> anyhow::Result<TxSubmissionResponse> {
+    let url = json_rpc_url(base_node_url)?;
+    let client = reqwest::Client::builder().timeout(timeout).build()?;
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "submit_transaction",
+        "params": { "transaction": transaction }
+    });
+
+    let response = client.post(url).json(&request).send().await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("submit_transaction HTTP {status}: {body}");
+    }
+    let envelope: JsonRpcEnvelope<TxSubmissionResponse> = serde_json::from_str(&body)?;
+    if let Some(result) = envelope.result {
+        return Ok(result);
+    }
+    anyhow::bail!(
+        "submit_transaction JSON-RPC error: {}",
+        envelope
+            .error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "missing result".to_string())
+    )
+}
+
+fn json_rpc_url(base_node_url: &str) -> anyhow::Result<url::Url> {
+    Ok(url::Url::parse(base_node_url)?.join("/json_rpc")?)
+}
+
+#[derive(serde::Deserialize)]
+struct JsonRpcEnvelope<T> {
+    result: Option<T>,
+    error: Option<serde_json::Value>,
 }
 
 fn wallet_password(env_var: &str) -> anyhow::Result<String> {

@@ -46,6 +46,12 @@ pub struct BenchmarkConfig {
     pub repetitions: u32,
     #[serde(default = "default_scan_batch_size")]
     pub scan_batch_size: u64,
+    #[serde(default)]
+    pub live_fresh_scan_cells: bool,
+    #[serde(default)]
+    pub mode2_send_smoke: bool,
+    #[serde(default = "default_mode2_send_smoke_amount")]
+    pub mode2_send_smoke_amount: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +143,8 @@ impl Config {
         if self.benchmark.scan_batch_size == 0 {
             bail!("benchmark.scan_batch_size must be greater than 0");
         }
+        parse_amount(&self.benchmark.mode2_send_smoke_amount)
+            .context("benchmark.mode2_send_smoke_amount")?;
         if self.benchmark.s5_k == 0 || !self.benchmark.s5_m.is_multiple_of(self.benchmark.s5_k) {
             bail!("benchmark.s5_m must be a positive multiple of benchmark.s5_k");
         }
@@ -201,6 +209,18 @@ impl Config {
                 "scan_batch_size".to_string(),
                 serde_json::json!(self.benchmark.scan_batch_size),
             ),
+            (
+                "live_fresh_scan_cells".to_string(),
+                serde_json::json!(self.benchmark.live_fresh_scan_cells),
+            ),
+            (
+                "mode2_send_smoke".to_string(),
+                serde_json::json!(self.benchmark.mode2_send_smoke),
+            ),
+            (
+                "mode2_send_smoke_amount".to_string(),
+                serde_json::json!(self.benchmark.mode2_send_smoke_amount),
+            ),
         ])
     }
 
@@ -229,6 +249,9 @@ impl Default for Config {
                 fee_rate: "5 uT".to_string(),
                 repetitions: 3,
                 scan_batch_size: default_scan_batch_size(),
+                live_fresh_scan_cells: false,
+                mode2_send_smoke: false,
+                mode2_send_smoke_amount: default_mode2_send_smoke_amount(),
             },
             paths: PathConfig {
                 data_dir: PathBuf::from(".bench-data"),
@@ -264,6 +287,10 @@ impl Default for Config {
 
 fn default_scan_batch_size() -> u64 {
     1_000
+}
+
+fn default_mode2_send_smoke_amount() -> String {
+    "1 T".to_string()
 }
 
 impl FundingConfig {
@@ -349,5 +376,13 @@ mod tests {
         cfg.benchmark.scan_batch_size = 0;
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("scan_batch_size"));
+    }
+
+    #[test]
+    fn mode2_smoke_amount_must_parse() {
+        let mut cfg = Config::default();
+        cfg.benchmark.mode2_send_smoke_amount = "not money".to_string();
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("mode2_send_smoke_amount"));
     }
 }

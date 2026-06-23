@@ -15,6 +15,9 @@ s5_k = 10
 fee_rate = "5 uT"
 repetitions = 3
 scan_batch_size = 1000
+live_fresh_scan_cells = false
+mode2_send_smoke = false
+mode2_send_smoke_amount = "1 T"
 
 [paths]
 data_dir = ".bench-data"

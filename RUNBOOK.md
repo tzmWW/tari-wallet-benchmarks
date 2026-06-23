@@ -68,6 +68,16 @@ missing.
 
 ## Run
 
+By default, live profile generation will verify the funded Mode 2 wallet balance
+but will not spend funds and will not run the long fresh-scan matrix. Enable the
+extra live gates intentionally in `[benchmark]`:
+
+```toml
+live_fresh_scan_cells = true    # long-running B0/S2/S3 fresh database scans
+mode2_send_smoke = true         # spends mode2_send_smoke_amount once
+mode2_send_smoke_amount = "1 T"
+```
+
 ```sh
 cargo run --features live-minotari -- run \
   --config harness.toml \
@@ -78,14 +88,19 @@ The result profile is written atomically and does not contain seed phrases or
 passwords. Public addresses may appear in the profile.
 
 Implementation note: the committed harness currently writes the full result
-profile shape and exercises Mode 2 plus PP companion fresh scan paths when the
-`live-minotari` feature is enabled. The `[benchmark].scan_batch_size` setting
+profile shape and can exercise Mode 2 plus PP companion fresh scan paths when
+`live_fresh_scan_cells` is enabled. The `[benchmark].scan_batch_size` setting
 controls how many blocks each HTTP scan request fetches; larger values make
 full-chain scan cells practical on Esmeralda. These fresh scan cells deliberately
 wipe their local databases per repetition, so they are long-running and print
-per-cell progress while they execute. The funded send-side B0/S0-S7 runner still
-has to be completed before the profile can be used as final bounty performance
-evidence.
+per-cell progress while they execute.
+
+When `mode2_send_smoke` is enabled, the harness constructs, signs, persists, and
+submits one one-sided transaction from the Mode 2 wallet using a direct JSON-RPC
+request. This avoids `WalletHttpClient::new`, whose default transport retries
+transient failures. The smoke is compatibility evidence only; the funded
+send-side B0/S0-S7 runner still has to be completed before the profile can be
+used as final bounty performance evidence.
 
 ## Schema
 
