@@ -71,6 +71,11 @@ cargo run --features live-minotari -- run \
 The result profile is written atomically and does not contain seed phrases or
 passwords. Public addresses may appear in the profile.
 
+Implementation note: the committed harness currently writes the full result
+profile shape and exercises the Mode 2 `live-minotari` scan path when the feature
+is enabled. The full funded B0/S0-S7 runner still has to be completed before the
+profile can be used as bounty performance evidence.
+
 ## Schema
 
 ```sh

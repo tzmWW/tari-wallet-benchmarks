@@ -7,11 +7,17 @@ This is the owned delivery repository at
 `https://github.com/tzmWW/tari-wallet-benchmarks`; it is not a PR branch in the
 upstream bounty repo.
 
-The harness targets Esmeralda only and measures three wallet surfaces:
+The harness targets Esmeralda only and models the three required wallet surfaces:
 
 - old wallet: `minotari_console_wallet` process managed by the harness
 - new wallet: `minotari` crate APIs for scan, selection, signing, and broadcast
 - payment processor: real `minotari_payment_processor` plus a parallel `minotari` payment-receiver wallet
+
+Current implementation status: CLI/config/schema/seed handling, Esmeralda
+guarding, result-profile generation, PP environment/API contract, static
+"no hidden wallet pain" rules, and the Mode 2 `live-minotari` scan/signing smoke
+path are in place. The remaining bounty-critical work is the funded live
+scenario runner for the full B0/S0-S7 matrix across all three modes.
 
 Start by generating fundable addresses:
 
