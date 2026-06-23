@@ -1,11 +1,7 @@
 # Tari Wallet Benchmarks
 
 Standalone reproducible wallet performance harness for
-`tari-project/wallet-benchmarks#1`.
-
-This is the owned delivery repository at
-`https://github.com/tzmWW/tari-wallet-benchmarks`; it is not a PR branch in the
-upstream bounty repo.
+`tari-project/wallet-benchmarks`.
 
 The harness targets Esmeralda only and models the three required wallet surfaces:
 
@@ -23,6 +19,7 @@ Start by generating fundable addresses:
 
 ```sh
 cp harness.toml.example harness.toml
+scripts/fetch-minotari-cli.sh .bench-cache tools
 export HARNESS_WALLET_PW='replace-with-a-long-local-password'
 cargo run -- addresses --config harness.toml --out .secrets/seeds.env
 ```

@@ -17,6 +17,10 @@ git -C "${PP_DIR}" checkout "${PP_REV}"
 mkdir -p "${PP_DIR}/data"
 (
   cd "${PP_DIR}"
+  rm -f data/payments.db
+  for migration in migrations/*.sql; do
+    sqlite3 data/payments.db < "${migration}"
+  done
   DATABASE_URL=sqlite://data/payments.db cargo build --release
 )
 

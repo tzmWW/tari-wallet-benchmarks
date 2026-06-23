@@ -36,7 +36,26 @@ payment_receiver_listen = "127.0.0.1:9146"
 
 [versions]
 minotari_cli_rev = "360c4848a54d65fd710266233cc9277b0f785e74"
+tari_console_wallet_rev = "9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
 payment_processor_rev = "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c"
+
+# Optional: record funding evidence after sending Esmeralda funds to the
+# generated addresses. These are benchmark inputs, not secrets.
+#
+# [funding.old_wallet]
+# amount = "50000 T"
+# tx_id = "11463237927696771510"
+# height = 707731
+#
+# [funding.new_wallet]
+# amount = "50000 T"
+# tx_id = "7676530785144502866"
+# height = 707741
+#
+# [funding.payment_processor]
+# amount = "50000 T"
+# tx_id = "4002233626181090692"
+# height = 707747
 
 [timeouts]
 startup_secs = 1800

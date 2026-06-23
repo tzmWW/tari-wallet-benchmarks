@@ -9,7 +9,7 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use tari_transaction_components::MicroMinotari;
 
-use crate::versions::{MINOTARI_CLI_REV, PAYMENT_PROCESSOR_REV};
+use crate::versions::{MINOTARI_CLI_REV, PAYMENT_PROCESSOR_REV, TARI_CONSOLE_WALLET_REV};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -19,6 +19,8 @@ pub struct Config {
     pub seeds: SeedConfig,
     pub modes: ModeConfig,
     pub versions: VersionConfig,
+    #[serde(default)]
+    pub funding: FundingConfig,
     #[serde(default)]
     pub timeouts: TimeoutConfig,
 }
@@ -72,7 +74,25 @@ pub struct ModeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionConfig {
     pub minotari_cli_rev: String,
+    pub tari_console_wallet_rev: String,
     pub payment_processor_rev: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FundingConfig {
+    #[serde(default)]
+    pub old_wallet: Option<FundingRecord>,
+    #[serde(default)]
+    pub new_wallet: Option<FundingRecord>,
+    #[serde(default)]
+    pub payment_processor: Option<FundingRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FundingRecord {
+    pub amount: String,
+    pub tx_id: String,
+    pub height: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +143,7 @@ impl Config {
         }
         self.a_fund()?;
         self.fee_rate()?;
+        self.funding.validate()?;
         Ok(())
     }
 
@@ -222,10 +243,45 @@ impl Default for Config {
             },
             versions: VersionConfig {
                 minotari_cli_rev: MINOTARI_CLI_REV.to_string(),
+                tari_console_wallet_rev: TARI_CONSOLE_WALLET_REV.to_string(),
                 payment_processor_rev: PAYMENT_PROCESSOR_REV.to_string(),
             },
+            funding: FundingConfig::default(),
             timeouts: TimeoutConfig::default(),
         }
+    }
+}
+
+impl FundingConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (role, record) in self.records() {
+            let Some(record) = record else {
+                continue;
+            };
+            parse_amount(&record.amount).with_context(|| format!("funding.{role}.amount"))?;
+            if record.tx_id.trim().is_empty() {
+                bail!("funding.{role}.tx_id must not be empty");
+            }
+            if record.height == 0 {
+                bail!("funding.{role}.height must be greater than 0");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn records(&self) -> [(&'static str, Option<&FundingRecord>); 3] {
+        [
+            ("old_wallet", self.old_wallet.as_ref()),
+            ("new_wallet", self.new_wallet.as_ref()),
+            ("payment_processor", self.payment_processor.as_ref()),
+        ]
+    }
+
+    pub fn as_map(&self) -> BTreeMap<String, FundingRecord> {
+        self.records()
+            .into_iter()
+            .filter_map(|(role, record)| record.cloned().map(|record| (role.to_string(), record)))
+            .collect()
     }
 }
 
@@ -255,5 +311,21 @@ mod tests {
         cfg.benchmark.s5_m = 101;
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("s5_m"));
+    }
+
+    #[test]
+    fn funding_records_validate_amounts_and_heights() {
+        let mut cfg = Config::default();
+        cfg.funding.new_wallet = Some(FundingRecord {
+            amount: "50000 T".to_string(),
+            tx_id: "7676530785144502866".to_string(),
+            height: 707741,
+        });
+        cfg.validate().unwrap();
+        assert_eq!(cfg.funding.as_map()["new_wallet"].height, 707741);
+
+        cfg.funding.new_wallet.as_mut().unwrap().height = 0;
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("funding.new_wallet.height"));
     }
 }

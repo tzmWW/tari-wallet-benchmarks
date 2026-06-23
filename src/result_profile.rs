@@ -11,10 +11,12 @@ use crate::{
     config::Config,
     env_capture::Environment,
     modes::{ModeName, ScenarioName},
-    versions::{MINOTARI_CLI_REV, PAYMENT_PROCESSOR_REV, TX_MINED_CONFIRMED_STATUS},
+    versions::{
+        MINOTARI_CLI_REV, PAYMENT_PROCESSOR_REV, TARI_CONSOLE_WALLET_REV, TX_MINED_CONFIRMED_STATUS,
+    },
 };
 
-pub const RESULT_SCHEMA_VERSION: u32 = 1;
+pub const RESULT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultProfile {
@@ -24,6 +26,7 @@ pub struct ResultProfile {
     pub environment: Environment,
     pub versions: BTreeMap<String, String>,
     pub config: BTreeMap<String, serde_json::Value>,
+    pub funding: BTreeMap<String, crate::config::FundingRecord>,
     pub modes: BTreeMap<String, ModeProfile>,
     pub findings: Vec<Finding>,
     pub chain_verification: ChainVerification,
@@ -99,12 +102,20 @@ impl ResultProfile {
                 config.versions.minotari_cli_rev.clone(),
             ),
             (
+                "tari_console_wallet_rev".to_string(),
+                config.versions.tari_console_wallet_rev.clone(),
+            ),
+            (
                 "minotari_payment_processor_rev".to_string(),
                 config.versions.payment_processor_rev.clone(),
             ),
             (
                 "harness_minotari_cli_pin".to_string(),
                 MINOTARI_CLI_REV.to_string(),
+            ),
+            (
+                "harness_tari_console_wallet_pin".to_string(),
+                TARI_CONSOLE_WALLET_REV.to_string(),
             ),
             (
                 "harness_payment_processor_pin".to_string(),
@@ -119,6 +130,7 @@ impl ResultProfile {
             environment,
             versions,
             config: config.scenario_defaults(),
+            funding: config.funding.as_map(),
             modes: BTreeMap::new(),
             findings: default_findings(),
             chain_verification: ChainVerification {
@@ -179,6 +191,7 @@ pub fn write_schema(path: &PathBuf) -> anyhow::Result<()> {
             "environment",
             "versions",
             "config",
+            "funding",
             "modes",
             "findings",
             "chain_verification"
@@ -231,9 +244,16 @@ mod tests {
 
     #[test]
     fn profile_round_trips() {
-        let profile = ResultProfile::new(&Config::default(), env_capture::capture());
+        let mut config = Config::default();
+        config.funding.new_wallet = Some(crate::config::FundingRecord {
+            amount: "50000 T".to_string(),
+            tx_id: "7676530785144502866".to_string(),
+            height: 707741,
+        });
+        let profile = ResultProfile::new(&config, env_capture::capture());
         let json = serde_json::to_string(&profile).unwrap();
         let decoded: ResultProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.schema_version, RESULT_SCHEMA_VERSION);
+        assert_eq!(decoded.funding["new_wallet"].height, 707741);
     }
 }

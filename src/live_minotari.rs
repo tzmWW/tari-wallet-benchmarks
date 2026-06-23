@@ -15,7 +15,7 @@ use tari_transaction_components::{
 };
 
 use crate::{
-    config::Config,
+    config::{Config, parse_amount},
     result_profile::{CellStatus, Repetition, ResultProfile},
     seeds::{AddressBook, WalletRole, seed_from_words},
 };
@@ -37,13 +37,25 @@ pub async fn annotate_profile_with_library_smoke(
         &config.network.base_node_http_url,
         config.benchmark.c_min,
     )
-    .await;
+    .await
+    .and_then(|wall_ms| {
+        let balance = account_balance(db_path)?;
+        let available = amount_field_as_microtari(&balance, "available")
+            .with_context(|| format!("available balance missing from {balance}"))?;
+        let expected = config.a_fund()?.0;
+        if available < expected {
+            anyhow::bail!(
+                "available balance {available} µT is below configured A_fund {expected} µT; balance={balance}"
+            );
+        }
+        Ok((wall_ms, available, balance))
+    });
 
     if let Some(mode) = profile.modes.get_mut("new_wallet")
-        && let Some(cell) = mode.scenarios.get_mut("B0")
+        && let Some(cell) = mode.scenarios.get_mut("S0")
     {
         match scan {
-            Ok(wall_ms) => {
+            Ok((wall_ms, available, balance)) => {
                 cell.status = CellStatus::Ok;
                 cell.repetitions.push(Repetition {
                     run: 1,
@@ -56,6 +68,15 @@ pub async fn annotate_profile_with_library_smoke(
                 });
                 cell.median_wall_ms = Some(wall_ms);
                 cell.spread_wall_ms = Some(0);
+                cell.notes.push(format!(
+                    "live-minotari funded scan smoke detected available_microtari={available}; balance={balance}"
+                ));
+                if let Some(funding) = &config.funding.new_wallet {
+                    cell.notes.push(format!(
+                        "funding tx_id={} height={} amount={}",
+                        funding.tx_id, funding.height, funding.amount
+                    ));
+                }
             }
             Err(error) => {
                 cell.status = CellStatus::Failed;
@@ -126,6 +147,23 @@ pub fn account_balance(db_path: &Path) -> anyhow::Result<serde_json::Value> {
         .context("no account")?;
     let balance = get_balance(&conn, account.id)?;
     Ok(serde_json::to_value(balance)?)
+}
+
+fn amount_field_as_microtari(balance: &serde_json::Value, key: &str) -> Option<u64> {
+    match balance.get(key)? {
+        serde_json::Value::Number(number) => number.as_u64(),
+        serde_json::Value::String(value) => {
+            if let Ok(raw) = value.parse::<u64>() {
+                return Some(raw);
+            }
+            parse_amount(value).ok().map(|amount| amount.0)
+        }
+        serde_json::Value::Object(map) => map
+            .get("value")
+            .and_then(|value| value.as_u64())
+            .or_else(|| map.get("microtari").and_then(|value| value.as_u64())),
+        _ => None,
+    }
 }
 
 pub struct OneSidedSendRequest<'a> {

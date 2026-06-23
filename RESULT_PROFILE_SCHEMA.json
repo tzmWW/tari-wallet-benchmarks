@@ -14,10 +14,11 @@
     "environment",
     "versions",
     "config",
+    "funding",
     "modes",
     "findings",
     "chain_verification"
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "tx_mined_confirmed_status_value": 6
 }

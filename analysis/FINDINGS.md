@@ -22,6 +22,10 @@ not hide.
   PP unsigned/sign/broadcast pipeline hits an upstream format mismatch, the cell
   must be recorded as `blocked_upstream` with logs instead of patched over in the
   harness.
+- The pinned PP source uses SQLx compile-time query checks. Build it with a real
+  migrated SQLite database at `data/payments.db`; otherwise the build fails with
+  `unable to open database file` from SQLx macros. The helper script now creates
+  that database from the pinned migrations before compiling.
 - Wallet construction stalls, UTXO lock contention, and failed concurrent sends
   are benchmark signal. Scenario code must not add retries, backoff, throttling,
   sleeps between S4 dispatches, or hidden UTXO pre-partitioning.

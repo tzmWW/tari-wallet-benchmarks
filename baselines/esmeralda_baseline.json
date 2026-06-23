@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "generated_at": "2026-06-23T14:21:30.019966Z",
+  "schema_version": 2,
+  "generated_at": "2026-06-23T19:15:50.455708Z",
   "network": "esmeralda",
   "environment": {
     "os": "macOS 26.5.1",
@@ -11,8 +11,10 @@
   "versions": {
     "harness_minotari_cli_pin": "360c4848a54d65fd710266233cc9277b0f785e74",
     "harness_payment_processor_pin": "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c",
+    "harness_tari_console_wallet_pin": "9f5adb7183dc2ec285f5c8fae05f4be9735d9749",
     "minotari_cli_rev": "360c4848a54d65fd710266233cc9277b0f785e74",
-    "minotari_payment_processor_rev": "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c"
+    "minotari_payment_processor_rev": "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c",
+    "tari_console_wallet_rev": "9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
   },
   "config": {
     "A_fund": "10000 T",
@@ -47,6 +49,23 @@
     "repetitions": 3,
     "volume_target": 512
   },
+  "funding": {
+    "new_wallet": {
+      "amount": "50000 T",
+      "tx_id": "7676530785144502866",
+      "height": 707741
+    },
+    "old_wallet": {
+      "amount": "50000 T",
+      "tx_id": "11463237927696771510",
+      "height": 707731
+    },
+    "payment_processor": {
+      "amount": "50000 T",
+      "tx_id": "4002233626181090692",
+      "height": 707747
+    }
+  },
   "modes": {
     "new_wallet": {
       "mode": "new_wallet",
@@ -59,19 +78,28 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S0": {
           "scenario": "s0",
           "surface": "minotari_library",
-          "status": "ready_for_live_run",
-          "repetitions": [],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
+          "status": "ok",
+          "repetitions": [
+            {
+              "run": 1,
+              "status": "ok",
+              "wall_ms": 1968,
+              "success_count": 1,
+              "failure_count": 0,
+              "fee_microtari": null,
+              "error": null
+            }
+          ],
+          "median_wall_ms": 1968,
+          "spread_wall_ms": 0,
           "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
+            "live-minotari funded scan smoke detected available_microtari=50000000000; balance={\"available\":50000000000,\"immature\":0,\"locked\":0,\"max_date\":\"2026-06-23 16:45:00\",\"max_height\":707741,\"total\":50000000000,\"total_credits\":50000000000,\"total_debits\":0,\"unconfirmed\":0}",
+            "funding tx_id=7676530785144502866 height=707741 amount=50000 T"
           ]
         },
         "S1": {
@@ -81,9 +109,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S2": {
           "scenario": "s2",
@@ -92,9 +118,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S3": {
           "scenario": "s3",
@@ -103,9 +127,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S4": {
           "scenario": "s4",
@@ -114,9 +136,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S5": {
           "scenario": "s5",
@@ -125,9 +145,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S6": {
           "scenario": "s6",
@@ -136,9 +154,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S7": {
           "scenario": "s7",
@@ -147,9 +163,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         }
       }
     },
@@ -164,9 +178,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S0": {
           "scenario": "s0",
@@ -175,9 +187,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S1": {
           "scenario": "s1",
@@ -186,9 +196,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S2": {
           "scenario": "s2",
@@ -197,9 +205,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S3": {
           "scenario": "s3",
@@ -208,9 +214,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S4": {
           "scenario": "s4",
@@ -219,9 +223,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S5": {
           "scenario": "s5",
@@ -230,9 +232,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S6": {
           "scenario": "s6",
@@ -241,9 +241,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S7": {
           "scenario": "s7",
@@ -252,9 +250,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         }
       }
     },
@@ -269,9 +265,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S0": {
           "scenario": "s0",
@@ -280,9 +274,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S1": {
           "scenario": "s1",
@@ -291,9 +283,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S2": {
           "scenario": "s2",
@@ -302,9 +292,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S3": {
           "scenario": "s3",
@@ -313,9 +301,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S4": {
           "scenario": "s4",
@@ -324,9 +310,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S5": {
           "scenario": "s5",
@@ -335,9 +319,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S6": {
           "scenario": "s6",
@@ -346,9 +328,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         },
         "S7": {
           "scenario": "s7",
@@ -357,9 +337,7 @@
           "repetitions": [],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": [
-            "built without live-minotari feature; this profile is a pre-live scaffold"
-          ]
+          "notes": []
         }
       }
     }

@@ -22,17 +22,35 @@ pub fn generate_addresses(config: &Config, out: &Path) -> anyhow::Result<()> {
 pub async fn preflight(config: &Config) -> anyhow::Result<()> {
     let book = AddressBook::from_config_or_generate(config)?;
     require_env(&config.seeds.wallet_password_env)?;
-    check_binary(
+    let mut missing = Vec::new();
+    if !config.paths.minotari_console_wallet.exists() || !config.paths.minotari_binary.exists() {
+        println!(
+            "minotari binaries missing; fetch/build with: scripts/fetch-minotari-cli.sh {} tools",
+            config.paths.cache_dir.display()
+        );
+    }
+    if let Err(error) = check_binary(
         &config.paths.minotari_console_wallet,
         "minotari_console_wallet",
-    )?;
-    check_binary(&config.paths.minotari_binary, "minotari")?;
+    ) {
+        missing.push(error.to_string());
+    }
+    if let Err(error) = check_binary(&config.paths.minotari_binary, "minotari") {
+        missing.push(error.to_string());
+    }
     if !config.paths.payment_processor_binary.exists() {
         println!(
             "payment processor binary missing: {}\nfetch/build with: {}",
             config.paths.payment_processor_binary.display(),
             payment_processor::build_fetch_command(&config.paths.cache_dir)
         );
+        missing.push(format!(
+            "payment processor binary not found at {}",
+            config.paths.payment_processor_binary.display()
+        ));
+    }
+    if !missing.is_empty() {
+        bail!("preflight failed:\n{}", missing.join("\n"));
     }
 
     for (role, material) in &book.addresses {

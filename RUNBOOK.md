@@ -9,8 +9,9 @@ addresses, then run the benchmark.
 - Rust stable with edition 2024 support.
 - Access to Esmeralda funds. Tari Universe mining is the expected way to fund the
   three generated addresses.
-- `minotari_console_wallet` and `minotari` binaries built from
-  `360c4848a54d65fd710266233cc9277b0f785e74`, placed at the paths in
+- `minotari` built from `360c4848a54d65fd710266233cc9277b0f785e74` and
+  `minotari_console_wallet` built from Tari
+  `9f5adb7183dc2ec285f5c8fae05f4be9735d9749`, placed at the paths in
   `harness.toml`.
 - `minotari_payment_processor` built from
   `f0572c98cbfac7377412dc6d4094c7d7dfc5de2c`, using the helper script below.
@@ -19,6 +20,7 @@ addresses, then run the benchmark.
 
 ```sh
 cp harness.toml.example harness.toml
+scripts/fetch-minotari-cli.sh .bench-cache tools
 scripts/fetch-payment-processor.sh .bench-cache
 cargo build --release --all-features
 ```
@@ -47,6 +49,10 @@ Git. Do not commit it.
 Fund each generated address with at least `A_fund` from `harness.toml`
 (`10000 T` by default). Funding is intentionally outside the measured benchmark.
 Wait until the funding output has at least `C_min` confirmations.
+
+After funding, record each tx in `[funding.<mode>]` in `harness.toml` with the
+amount, transaction id, and block height. These fields are written to result
+profiles as public benchmark inputs.
 
 ## Preflight
 

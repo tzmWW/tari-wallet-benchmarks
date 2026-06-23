@@ -34,6 +34,13 @@ fn schema_command_writes_json() {
         serde_json::from_str(&fs::read_to_string(schema_path).unwrap()).unwrap();
     assert_eq!(json["schema_version"], RESULT_SCHEMA_VERSION);
     assert_eq!(json["tx_mined_confirmed_status_value"], 6);
+    assert!(
+        json["required_top_level_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key == "funding")
+    );
 }
 
 #[test]
