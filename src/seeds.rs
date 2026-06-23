@@ -1,11 +1,20 @@
-use std::{collections::BTreeMap, env, fs, io::Write, path::Path, str::FromStr};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    io::Write,
+    path::Path,
+    str::FromStr,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tari_common::configuration::Network;
 use tari_common_types::{
     seeds::{
-        cipher_seed::CipherSeed, mnemonic::Mnemonic, mnemonic::MnemonicLanguage,
+        cipher_seed::{BIRTHDAY_GENESIS_FROM_UNIX_EPOCH, CipherSeed},
+        mnemonic::Mnemonic,
+        mnemonic::MnemonicLanguage,
         seed_words::SeedWords,
     },
     tari_address::{TariAddress, TariAddressFeatures},
@@ -136,6 +145,20 @@ pub fn seed_from_words(words: &str) -> anyhow::Result<CipherSeed> {
         .map_err(|e| anyhow::anyhow!("invalid cipher seed: {e}"))
 }
 
+pub fn seed_from_words_with_birthday(words: &str, birthday: u16) -> anyhow::Result<CipherSeed> {
+    let mut seed = seed_from_words(words)?;
+    seed.change_birthday(birthday);
+    Ok(seed)
+}
+
+pub fn current_birthday() -> u16 {
+    let birthday_genesis = UNIX_EPOCH + Duration::from_secs(BIRTHDAY_GENESIS_FROM_UNIX_EPOCH);
+    let Ok(age) = SystemTime::now().duration_since(birthday_genesis) else {
+        return 0;
+    };
+    u16::try_from(age.as_secs() / 86_400).unwrap_or(0)
+}
+
 pub fn material_from_seed(
     role: WalletRole,
     env_var: String,
@@ -193,5 +216,27 @@ mod tests {
         assert!(material.address.starts_with('f'));
         assert_eq!(material.birthday, 0);
         assert_eq!(redact_middle(&material.private_view_key_hex).len(), 15);
+    }
+
+    #[test]
+    fn changing_birthday_preserves_address() {
+        let seed = CipherSeed::random();
+        let original = material_from_seed(
+            WalletRole::NewWallet,
+            "HARNESS_SEED_NEW".to_string(),
+            seed.clone(),
+        )
+        .unwrap();
+        let mut genesis = seed;
+        genesis.change_birthday(0);
+        let changed = material_from_seed(
+            WalletRole::NewWallet,
+            "HARNESS_SEED_NEW".to_string(),
+            genesis,
+        )
+        .unwrap();
+
+        assert_eq!(changed.birthday, 0);
+        assert_eq!(changed.address, original.address);
     }
 }

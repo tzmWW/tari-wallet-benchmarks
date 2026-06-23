@@ -153,6 +153,55 @@ impl ResultProfile {
     }
 }
 
+impl ScenarioCell {
+    pub fn record_repetition(&mut self, repetition: Repetition) {
+        self.repetitions.push(repetition);
+        self.refresh_summary();
+    }
+
+    pub fn refresh_summary(&mut self) {
+        let mut walls = self
+            .repetitions
+            .iter()
+            .filter_map(|run| {
+                if run.status == CellStatus::Ok {
+                    run.wall_ms
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        walls.sort_unstable();
+
+        self.median_wall_ms = median(&walls);
+        self.spread_wall_ms = match (walls.first(), walls.last()) {
+            (Some(min), Some(max)) => Some(max - min),
+            _ => None,
+        };
+
+        self.status = if self.repetitions.is_empty() {
+            self.status.clone()
+        } else if self
+            .repetitions
+            .iter()
+            .all(|run| run.status == CellStatus::Ok)
+        {
+            CellStatus::Ok
+        } else if self
+            .repetitions
+            .iter()
+            .any(|run| run.status == CellStatus::Ok)
+        {
+            CellStatus::Failed
+        } else {
+            self.repetitions
+                .last()
+                .map(|run| run.status.clone())
+                .unwrap_or_else(|| self.status.clone())
+        };
+    }
+}
+
 pub fn empty_mode_profile(mode: ModeName, address: Option<String>) -> ModeProfile {
     let scenarios = ScenarioName::ALL
         .into_iter()
@@ -175,6 +224,18 @@ pub fn empty_mode_profile(mode: ModeName, address: Option<String>) -> ModeProfil
         mode,
         address,
         scenarios,
+    }
+}
+
+fn median(sorted: &[u128]) -> Option<u128> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        Some((sorted[mid - 1] + sorted[mid]) / 2)
+    } else {
+        Some(sorted[mid])
     }
 }
 
@@ -255,5 +316,49 @@ mod tests {
         let decoded: ResultProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.schema_version, RESULT_SCHEMA_VERSION);
         assert_eq!(decoded.funding["new_wallet"].height, 707741);
+    }
+
+    #[test]
+    fn cell_summary_uses_ok_repetition_walls() {
+        let mut cell = ScenarioCell {
+            scenario: crate::modes::ScenarioName::S2,
+            surface: "minotari_library".to_string(),
+            status: CellStatus::ReadyForLiveRun,
+            repetitions: Vec::new(),
+            median_wall_ms: None,
+            spread_wall_ms: None,
+            notes: Vec::new(),
+        };
+        cell.record_repetition(Repetition {
+            run: 1,
+            status: CellStatus::Ok,
+            wall_ms: Some(30),
+            success_count: 1,
+            failure_count: 0,
+            fee_microtari: None,
+            error: None,
+        });
+        cell.record_repetition(Repetition {
+            run: 2,
+            status: CellStatus::Ok,
+            wall_ms: Some(10),
+            success_count: 1,
+            failure_count: 0,
+            fee_microtari: None,
+            error: None,
+        });
+        cell.record_repetition(Repetition {
+            run: 3,
+            status: CellStatus::Ok,
+            wall_ms: Some(20),
+            success_count: 1,
+            failure_count: 0,
+            fee_microtari: None,
+            error: None,
+        });
+
+        assert_eq!(cell.status, CellStatus::Ok);
+        assert_eq!(cell.median_wall_ms, Some(20));
+        assert_eq!(cell.spread_wall_ms, Some(20));
     }
 }

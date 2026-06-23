@@ -12,8 +12,10 @@ The harness targets Esmeralda only and models the three required wallet surfaces
 Current implementation status: CLI/config/schema/seed handling, Esmeralda
 guarding, result-profile generation, PP environment/API contract, static
 "no hidden wallet pain" rules, and the Mode 2 `live-minotari` scan/signing smoke
-path are in place. The remaining bounty-critical work is the funded live
-scenario runner for the full B0/S0-S7 matrix across all three modes.
+path are in place. Fresh Mode 2 and PP companion scan cells are measured from
+new databases so warmed scan state does not leak into the baseline. The
+remaining bounty-critical work is the funded live send-side runner for the full
+B0/S0-S7 matrix across all three modes.
 
 Start by generating fundable addresses:
 

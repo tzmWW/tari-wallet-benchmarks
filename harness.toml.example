@@ -14,6 +14,7 @@ s5_m = 100
 s5_k = 10
 fee_rate = "5 uT"
 repetitions = 3
+scan_batch_size = 1000
 
 [paths]
 data_dir = ".bench-data"

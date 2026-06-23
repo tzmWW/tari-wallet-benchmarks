@@ -31,6 +31,10 @@ not hide.
   sleeps between S4 dispatches, or hidden UTXO pre-partitioning.
 - Scan timings are noisy. Publish medians plus spread where a funded live run can
   support repetitions.
+- Fresh full-chain scans are materially sensitive to scan batch size. A 100-block
+  HTTP batch left the first Esmeralda B0 scan running for several minutes during
+  development; `[benchmark].scan_batch_size` is now explicit and defaults to
+  `1000`.
 - `TX_MINED_CONFIRMED` is recorded as status value `6` in result profiles.
 
 ## Local Baseline Status

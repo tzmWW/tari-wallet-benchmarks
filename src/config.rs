@@ -44,6 +44,8 @@ pub struct BenchmarkConfig {
     pub s5_k: u32,
     pub fee_rate: String,
     pub repetitions: u32,
+    #[serde(default = "default_scan_batch_size")]
+    pub scan_batch_size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +134,9 @@ impl Config {
         if self.benchmark.repetitions == 0 {
             bail!("benchmark.repetitions must be greater than 0");
         }
+        if self.benchmark.scan_batch_size == 0 {
+            bail!("benchmark.scan_batch_size must be greater than 0");
+        }
         if self.benchmark.s5_k == 0 || !self.benchmark.s5_m.is_multiple_of(self.benchmark.s5_k) {
             bail!("benchmark.s5_m must be a positive multiple of benchmark.s5_k");
         }
@@ -192,6 +197,10 @@ impl Config {
                 "repetitions".to_string(),
                 serde_json::json!(self.benchmark.repetitions),
             ),
+            (
+                "scan_batch_size".to_string(),
+                serde_json::json!(self.benchmark.scan_batch_size),
+            ),
         ])
     }
 
@@ -219,6 +228,7 @@ impl Default for Config {
                 s5_k: 10,
                 fee_rate: "5 uT".to_string(),
                 repetitions: 3,
+                scan_batch_size: default_scan_batch_size(),
             },
             paths: PathConfig {
                 data_dir: PathBuf::from(".bench-data"),
@@ -250,6 +260,10 @@ impl Default for Config {
             timeouts: TimeoutConfig::default(),
         }
     }
+}
+
+fn default_scan_batch_size() -> u64 {
+    1_000
 }
 
 impl FundingConfig {
@@ -327,5 +341,13 @@ mod tests {
         cfg.funding.new_wallet.as_mut().unwrap().height = 0;
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("funding.new_wallet.height"));
+    }
+
+    #[test]
+    fn scan_batch_size_must_be_positive() {
+        let mut cfg = Config::default();
+        cfg.benchmark.scan_batch_size = 0;
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("scan_batch_size"));
     }
 }

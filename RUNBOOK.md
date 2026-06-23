@@ -78,9 +78,14 @@ The result profile is written atomically and does not contain seed phrases or
 passwords. Public addresses may appear in the profile.
 
 Implementation note: the committed harness currently writes the full result
-profile shape and exercises the Mode 2 `live-minotari` scan path when the feature
-is enabled. The full funded B0/S0-S7 runner still has to be completed before the
-profile can be used as bounty performance evidence.
+profile shape and exercises Mode 2 plus PP companion fresh scan paths when the
+`live-minotari` feature is enabled. The `[benchmark].scan_batch_size` setting
+controls how many blocks each HTTP scan request fetches; larger values make
+full-chain scan cells practical on Esmeralda. These fresh scan cells deliberately
+wipe their local databases per repetition, so they are long-running and print
+per-cell progress while they execute. The funded send-side B0/S0-S7 runner still
+has to be completed before the profile can be used as final bounty performance
+evidence.
 
 ## Schema
 
