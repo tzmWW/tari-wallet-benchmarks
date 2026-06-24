@@ -244,23 +244,34 @@ async fn annotate_fresh_scan_cells(
 }
 
 fn annotate_fresh_scan_cells_disabled(profile: &mut ResultProfile) {
-    for mode in ["new_wallet", "payment_processor"] {
-        let Some(mode_profile) = profile.modes.get_mut(mode) else {
-            continue;
-        };
-        for scenario in [
-            ScenarioName::B0,
-            ScenarioName::S2,
-            ScenarioName::S3,
-            ScenarioName::S6,
-            ScenarioName::S7,
-        ] {
-            if let Some(cell) = mode_profile.scenarios.get_mut(scenario.as_str()) {
-                cell.notes.push(
-                    "fresh live scan cell disabled for this run; set benchmark.live_fresh_scan_cells=true for the long baseline pass"
-                        .to_string(),
-                );
-            }
+    for scenario in [
+        ScenarioName::B0,
+        ScenarioName::S2,
+        ScenarioName::S3,
+        ScenarioName::S6,
+        ScenarioName::S7,
+    ] {
+        if let Some(cell) = profile
+            .modes
+            .get_mut("new_wallet")
+            .and_then(|mode| mode.scenarios.get_mut(scenario.as_str()))
+        {
+            cell.notes.push(
+                "fresh live scan cell disabled for this run; set benchmark.live_fresh_scan_cells=true for the long baseline pass"
+                    .to_string(),
+            );
+        }
+
+        if let Some(cell) = profile
+            .modes
+            .get_mut("payment_processor")
+            .and_then(|mode| mode.scenarios.get_mut(scenario.as_str()))
+        {
+            cell.status = CellStatus::NotApplicable;
+            cell.notes.push(
+                "PP has no direct scan API; companion-wallet scan cells run only when benchmark.live_fresh_scan_cells=true"
+                    .to_string(),
+            );
         }
     }
 }
@@ -1509,10 +1520,13 @@ async fn wait_for_mode2_scan_advance(
     password: &str,
     label: &str,
 ) -> anyhow::Result<String> {
-    let initial_height = account_snapshot(db_path)
+    let initial_scan_height = account_snapshot(db_path)
         .with_context(|| format!("mode2 settle gate {label} could not read wallet scan height"))?
         .max_height;
-    let target_height = initial_height.saturating_add(config.settle_wait_blocks());
+    let initial_tip_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .with_context(|| format!("mode2 settle gate {label} could not read base-node tip"))?;
+    let target_tip_height = initial_tip_height.saturating_add(config.settle_wait_blocks());
     let timeout = config.timeout(config.timeouts.confirmation_secs);
     let start = Instant::now();
     let mut attempts = 0u32;
@@ -1535,16 +1549,21 @@ async fn wait_for_mode2_scan_advance(
                 format!("mode2 settle gate {label} could not read wallet scan height")
             })?
             .max_height;
-        println!("mode2 settle gate {label}: scanned_height={last_height} target={target_height}");
+        let tip_height = base_node_tip_height(&config.network.base_node_http_url)
+            .await
+            .with_context(|| format!("mode2 settle gate {label} could not read base-node tip"))?;
+        println!(
+            "mode2 settle gate {label}: scanned_height={last_height} tip_height={tip_height} target_tip={target_tip_height}"
+        );
 
-        if last_height >= target_height {
+        if tip_height >= target_tip_height {
             return Ok(format!(
-                "Mode 2 settle gate {label}: scanned_height {initial_height}->{last_height} target={target_height} attempts={attempts} scan_wall_ms={total_scan_wall_ms}"
+                "Mode 2 settle gate {label}: scanned_height {initial_scan_height}->{last_height} tip_height {initial_tip_height}->{tip_height} target_tip={target_tip_height} attempts={attempts} scan_wall_ms={total_scan_wall_ms}"
             ));
         }
         if start.elapsed() >= timeout {
             bail!(
-                "mode2 settle gate {label} timed out after {}s waiting for scanned_height {last_height} to reach target {target_height}",
+                "mode2 settle gate {label} timed out after {}s waiting for tip_height {tip_height} to reach target {target_tip_height}; scanned_height={last_height}",
                 timeout.as_secs()
             );
         }
@@ -1555,6 +1574,28 @@ async fn wait_for_mode2_scan_advance(
             time::sleep(sleep_for).await;
         }
     }
+}
+
+async fn base_node_tip_height(base_node_url: &str) -> anyhow::Result<u64> {
+    let url = base_node_endpoint_url(base_node_url, "/get_tip_info")?;
+    let response = reqwest::Client::new()
+        .get(url)
+        .send()
+        .await
+        .context("requesting base-node tip info")?
+        .error_for_status()
+        .context("base-node tip info HTTP status")?
+        .json::<serde_json::Value>()
+        .await
+        .context("decoding base-node tip info")?;
+    response
+        .pointer("/metadata/best_block_height")
+        .and_then(serde_json::Value::as_u64)
+        .with_context(|| format!("base-node tip info missing best_block_height: {response}"))
+}
+
+fn base_node_endpoint_url(base_node_url: &str, path: &str) -> anyhow::Result<url::Url> {
+    Ok(url::Url::parse(base_node_url)?.join(path)?)
 }
 
 fn append_mode2_note(profile: &mut ResultProfile, scenario: ScenarioName, note: String) {
@@ -1976,32 +2017,27 @@ async fn run_mode3_send_cells(
     context: &Mode3TopologyContext,
 ) -> anyhow::Result<()> {
     let amount = parse_amount(&config.benchmark.mode3_scenario_amount)?;
-    let s1_attempts = capped_attempts(
-        config
-            .benchmark
-            .doubling_rounds
-            .saturating_mul(config.benchmark.fanout_outputs_per_tx)
-            .min(config.benchmark.volume_target),
-        config.benchmark.mode3_live_max_s1_batches,
-    );
-    let s1 = run_pp_batches_sequential(
+    let s1_rounds = s1_round_plan(config, config.benchmark.mode3_live_max_s1_batches);
+    let s1 = run_pp_recipient_batches_sequential(
         config,
         context,
         "payment_processor/S1",
         ScenarioName::S1,
-        s1_attempts,
-        1,
-        &recipient,
+        s1_pp_recipient_batches(&s1_rounds, &recipient),
         amount,
     )
     .await;
+    let mut s1_extra = serde_json::Map::new();
+    s1_extra.insert("rounds".to_string(), s1_round_metrics(&s1_rounds));
+    let s1 = s1.with_extra_metrics(s1_extra);
     record_pp_summary(
         profile,
         ScenarioName::S1,
         &s1,
         vec![format!(
-            "Mode 3 S1 drove /v1/payment-batches through real PP topology; attempted_batches={} items_per_batch=1 amount={} cap={}",
+            "Mode 3 S1 drove /v1/payment-batches through real PP topology as a batch-shape analogue to doubling/fanout rounds; attempted_batches={} attempted_payments={} amount={} cap={}",
             s1.attempted_batches,
+            s1.attempted_payments,
             config.benchmark.mode3_scenario_amount,
             config.benchmark.mode3_live_max_s1_batches
         )],
@@ -2077,44 +2113,6 @@ async fn run_pp_s4_batches(
     total.wall_ms = start.elapsed().as_millis();
     total.observe_db(config).await;
     total
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_pp_batches_sequential(
-    config: &Config,
-    context: &Mode3TopologyContext,
-    label: &str,
-    scenario: ScenarioName,
-    batch_count: u32,
-    items_per_batch: u32,
-    recipient: &str,
-    amount: MicroMinotari,
-) -> PpScenarioSummary {
-    let mut summary = PpScenarioSummary {
-        attempted_batches: batch_count,
-        attempted_payments: batch_count.saturating_mul(items_per_batch),
-        ..PpScenarioSummary::default()
-    };
-    let start = Instant::now();
-    for batch_index in 1..=batch_count {
-        println!("{label} batch {batch_index}/{batch_count} dispatching");
-        let result = submit_pp_batch(
-            &context.client,
-            scenario,
-            batch_index,
-            items_per_batch,
-            recipient,
-            amount,
-        )
-        .await;
-        summary
-            .construction_complete_ms
-            .push(start.elapsed().as_millis());
-        summary.record_batch(batch_index, result);
-    }
-    summary.wall_ms = start.elapsed().as_millis();
-    summary.observe_db(config).await;
-    summary
 }
 
 async fn run_pp_recipient_batches_sequential(
@@ -2297,6 +2295,33 @@ fn recipient_batches(recipients: Vec<String>, batch_size: u32) -> Vec<Vec<String
     batches
 }
 
+fn s1_pp_recipient_batches(rounds: &[S1RoundPlan], recipient: &str) -> Vec<Vec<String>> {
+    let mut batches = Vec::new();
+    for round in rounds {
+        for _ in 0..round.tx_count {
+            batches.push(repeated_recipient(recipient, round.outputs_per_tx as usize));
+        }
+    }
+    batches
+}
+
+fn s1_round_metrics(rounds: &[S1RoundPlan]) -> serde_json::Value {
+    serde_json::Value::Array(
+        rounds
+            .iter()
+            .map(|round| {
+                serde_json::json!({
+                    "round_index": round.round_index,
+                    "fanout": round.fanout,
+                    "tx_count": round.tx_count,
+                    "outputs_per_tx": round.outputs_per_tx,
+                    "target_utxos_after": round.target_utxos_after,
+                })
+            })
+            .collect(),
+    )
+}
+
 fn record_pp_summary(
     profile: &mut ResultProfile,
     scenario: ScenarioName,
@@ -2304,7 +2329,10 @@ fn record_pp_summary(
     mut notes: Vec<String>,
 ) {
     let verified = summary.verified_transactions(scenario);
-    let verification_complete = summary.batch_ids.is_empty() || !verified.is_empty();
+    let confirmed_batch_count = verified.len();
+    let accepted_batch_count = usize::try_from(summary.accepted_batches).unwrap_or(usize::MAX);
+    let observation_complete =
+        summary.accepted_batches == 0 || confirmed_batch_count >= accepted_batch_count;
     let all_verified_ok = verified.iter().all(|tx| tx.confirmed);
     profile
         .chain_verification
@@ -2318,7 +2346,7 @@ fn record_pp_summary(
     };
     let status = if summary.blocked_upstream {
         CellStatus::BlockedUpstream
-    } else if summary.failed_batches == 0 && verification_complete && all_verified_ok {
+    } else if summary.failed_batches == 0 && observation_complete && all_verified_ok {
         CellStatus::Ok
     } else {
         CellStatus::Failed
@@ -2334,14 +2362,18 @@ fn record_pp_summary(
             (!all_verified_ok)
                 .then_some("one or more PP batches did not verify as terminal-ok".to_string())
                 .or_else(|| {
-                    (!verification_complete).then_some(
-                        "PP batches were accepted but chain verification returned no rows"
+                    (!observation_complete).then_some(
+                        "PP batches were accepted but payment_processor_db_observed returned no confirmed rows"
                             .to_string(),
                     )
                 })
         }),
         metrics: Some(summary.metrics(scenario)),
     });
+    notes.push(
+        "verification_source=payment_processor_db_observed; pending PP batches stay in metrics/notes and are not emitted as confirmed chain-verification rows"
+            .to_string(),
+    );
     notes.push(summary.note(scenario));
     cell.notes.extend(notes);
 }
@@ -2985,6 +3017,7 @@ impl PpScenarioSummary {
     fn metrics(&self, scenario: ScenarioName) -> serde_json::Value {
         serde_json::json!({
             "scenario": scenario.as_str(),
+            "verification_source": "payment_processor_db_observed",
             "attempted_batches": self.attempted_batches,
             "attempted_payments": self.attempted_payments,
             "accepted_batches": self.accepted_batches,
@@ -2993,6 +3026,7 @@ impl PpScenarioSummary {
             "payment_ids": self.payment_ids,
             "max_serialization_gap_ms": max_serialization_gap_ms(self.construction_complete_ms.clone()),
             "double_selection_rejections": double_selection_rejections(&self.errors),
+            "db_status_summary": self.db_snapshot.as_ref().map(PaymentProcessorDbSnapshot::status_summary),
             "responses": self.events,
             "extra": self.extra_metrics,
         })
@@ -3005,28 +3039,27 @@ impl PpScenarioSummary {
                 snapshot
                     .batches
                     .iter()
-                    .map(|batch| {
-                        let confirmed = batch.status == "CONFIRMED";
-                        VerifiedTransaction {
-                            tx_id: batch.id.clone(),
-                            status_value: if confirmed {
-                                TX_MINED_CONFIRMED_STATUS
-                            } else {
-                                1
-                            },
-                            mode: "payment_processor".to_string(),
-                            scenario: scenario.as_str().to_string(),
-                            amount_microtari: None,
-                            fee_microtari: None,
-                            mined_height: batch
-                                .mined_height
-                                .and_then(|height| u64::try_from(height).ok()),
-                            confirmed,
-                        }
+                    .filter(|batch| batch.status == "CONFIRMED")
+                    .map(|batch| VerifiedTransaction {
+                        tx_id: batch.id.clone(),
+                        status_value: TX_MINED_CONFIRMED_STATUS,
+                        mode: "payment_processor".to_string(),
+                        scenario: scenario.as_str().to_string(),
+                        amount_microtari: None,
+                        fee_microtari: None,
+                        mined_height: batch
+                            .mined_height
+                            .and_then(|height| u64::try_from(height).ok()),
+                        confirmed: true,
                     })
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn with_extra_metrics(mut self, metrics: serde_json::Map<String, serde_json::Value>) -> Self {
+        self.extra_metrics.extend(metrics);
+        self
     }
 }
 
@@ -3311,10 +3344,18 @@ impl ScenarioSendSummary {
     fn metrics(&self, scenario: ScenarioName) -> serde_json::Value {
         let mut metrics = serde_json::Map::new();
         metrics.insert("scenario".to_string(), serde_json::json!(scenario.as_str()));
+        metrics.insert(
+            "verification_source".to_string(),
+            serde_json::json!("wallet_db_observed"),
+        );
         metrics.insert("attempted".to_string(), serde_json::json!(self.attempted));
         metrics.insert("tx_ids".to_string(), serde_json::json!(self.tx_ids));
         metrics.insert(
             "verified_transactions".to_string(),
+            serde_json::json!(self.verified_transactions()),
+        );
+        metrics.insert(
+            "observed_transactions".to_string(),
             serde_json::json!(self.tx_infos),
         );
         metrics.insert(
@@ -3332,7 +3373,11 @@ impl ScenarioSendSummary {
     }
 
     fn verified_transactions(&self) -> Vec<VerifiedTransaction> {
-        self.tx_infos.clone()
+        self.tx_infos
+            .iter()
+            .filter(|tx| tx.confirmed)
+            .cloned()
+            .collect()
     }
 }
 
@@ -3876,6 +3921,16 @@ mod tests {
     }
 
     #[test]
+    fn base_node_endpoint_url_uses_http_surface() {
+        assert_eq!(
+            base_node_endpoint_url("https://rpc.esmeralda.tari.com", "/get_tip_info")
+                .unwrap()
+                .as_str(),
+            "https://rpc.esmeralda.tari.com/get_tip_info"
+        );
+    }
+
+    #[test]
     fn recipient_batches_preserve_order_without_chunks() {
         let recipients = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         assert_eq!(
@@ -3885,6 +3940,54 @@ mod tests {
                 vec!["c".to_string()]
             ]
         );
+    }
+
+    #[test]
+    fn pp_s1_batches_follow_round_output_shape() {
+        let config = Config::default();
+        let rounds = s1_round_plan(&config, 65);
+        let batches = s1_pp_recipient_batches(&rounds, "addr");
+
+        assert_eq!(batches.len(), 65);
+        assert_eq!(batches[0], vec!["addr".to_string(), "addr".to_string()]);
+        assert_eq!(batches[63].len(), 8);
+        assert_eq!(batches[64].len(), 8);
+    }
+
+    #[test]
+    fn pp_scan_cells_are_not_applicable_when_companion_scans_are_disabled() {
+        let config = Config::default();
+        let mut profile = ResultProfile::new(&config, crate::env_capture::capture());
+        profile.modes.insert(
+            ModeName::NewWallet.as_str().to_string(),
+            empty_mode_profile(ModeName::NewWallet, None),
+        );
+        profile.modes.insert(
+            ModeName::PaymentProcessor.as_str().to_string(),
+            empty_mode_profile(ModeName::PaymentProcessor, None),
+        );
+
+        annotate_fresh_scan_cells_disabled(&mut profile);
+
+        let pp_b0 = &profile
+            .modes
+            .get(ModeName::PaymentProcessor.as_str())
+            .unwrap()
+            .scenarios[ScenarioName::B0.as_str()];
+        assert_eq!(pp_b0.status, CellStatus::NotApplicable);
+        assert!(
+            pp_b0
+                .notes
+                .iter()
+                .any(|note| note.contains("PP has no direct scan API"))
+        );
+
+        let new_b0 = &profile
+            .modes
+            .get(ModeName::NewWallet.as_str())
+            .unwrap()
+            .scenarios[ScenarioName::B0.as_str()];
+        assert_eq!(new_b0.status, CellStatus::ReadyForLiveRun);
     }
 
     #[test]
@@ -3937,7 +4040,16 @@ mod tests {
             .unwrap()
             .scenarios[ScenarioName::S1.as_str()];
         assert_eq!(cell.status, CellStatus::Failed);
-        assert_eq!(profile.chain_verification.verified_transactions.len(), 1);
+        assert_eq!(profile.chain_verification.verified_transactions.len(), 0);
+        let metrics = cell.repetitions[0].metrics.as_ref().unwrap();
+        assert_eq!(
+            metrics["observed_transactions"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            metrics["verified_transactions"].as_array().unwrap().len(),
+            0
+        );
     }
 
     #[test]
@@ -4007,6 +4119,71 @@ mod tests {
             .unwrap()
             .scenarios[ScenarioName::S5.as_str()];
         assert_eq!(cell.status, CellStatus::Failed);
+        assert_eq!(profile.chain_verification.verified_transactions.len(), 0);
+        assert_eq!(
+            cell.repetitions[0].error.as_deref(),
+            Some(
+                "PP batches were accepted but payment_processor_db_observed returned no confirmed rows"
+            )
+        );
+    }
+
+    #[test]
+    fn pp_summary_emits_only_confirmed_observed_batches() {
+        let config = Config::default();
+        let mut profile = ResultProfile::new(&config, crate::env_capture::capture());
+        profile.modes.insert(
+            ModeName::PaymentProcessor.as_str().to_string(),
+            empty_mode_profile(ModeName::PaymentProcessor, None),
+        );
+        let summary = PpScenarioSummary {
+            attempted_batches: 2,
+            attempted_payments: 2,
+            accepted_batches: 2,
+            batch_ids: vec!["confirmed".to_string(), "pending".to_string()],
+            db_snapshot: Some(PaymentProcessorDbSnapshot {
+                batches: vec![
+                    payment_processor::PaymentBatchSnapshot {
+                        id: "confirmed".to_string(),
+                        status: "CONFIRMED".to_string(),
+                        retry_count: 0,
+                        error_message: None,
+                        has_unsigned_tx: true,
+                        has_signed_tx: true,
+                        mined_height: Some(42),
+                    },
+                    payment_processor::PaymentBatchSnapshot {
+                        id: "pending".to_string(),
+                        status: "PENDING_BATCHING".to_string(),
+                        retry_count: 0,
+                        error_message: None,
+                        has_unsigned_tx: false,
+                        has_signed_tx: false,
+                        mined_height: None,
+                    },
+                ],
+                payments: Vec::new(),
+            }),
+            ..PpScenarioSummary::default()
+        };
+
+        record_pp_summary(&mut profile, ScenarioName::S1, &summary, Vec::new());
+
+        let cell = &profile
+            .modes
+            .get(ModeName::PaymentProcessor.as_str())
+            .unwrap()
+            .scenarios[ScenarioName::S1.as_str()];
+        assert_eq!(cell.status, CellStatus::Failed);
         assert_eq!(profile.chain_verification.verified_transactions.len(), 1);
+        assert_eq!(
+            profile.chain_verification.verified_transactions[0].tx_id,
+            "confirmed"
+        );
+        let metrics = cell.repetitions[0].metrics.as_ref().unwrap();
+        assert_eq!(
+            metrics["verification_source"],
+            serde_json::json!("payment_processor_db_observed")
+        );
     }
 }

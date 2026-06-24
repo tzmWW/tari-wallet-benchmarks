@@ -2,13 +2,10 @@
 
 This summary accompanies `baselines/esmeralda_baseline.json`.
 
-Note: this checked-in JSON predates schema v3 and the later Mode 2 S1
-multi-recipient/settlement hardening. The current harness records
-scenario-specific metrics, transaction verification rows, Mode 1 S1 `CoinSplit`
-rounds, Mode 2 self-directed doubling/fan-out rounds, scanner-backed Mode 2
-settle gates, and deterministic distinct-recipient S5 shapes. Regenerate the
-baseline after a capped proof passes and enough spendable Esmeralda funds are
-available.
+The checked-in profile was regenerated on `2026-06-24T15:12:19Z` with schema
+v3 after the REVIEW_v3 hardening pass. It is a capped live proof, not a full
+statistical B0/S0-S7 baseline: `repetitions = 1`, `live_fresh_scan_cells =
+false`, and Mode 1/2/3 live topologies were enabled with low safety caps.
 
 - Network: Esmeralda only.
 - Harness repository: `https://github.com/tzmWW/tari-wallet-benchmarks`.
@@ -20,50 +17,47 @@ available.
 
 Current checked-in live evidence:
 
-- Mode 1 S0 started a real `minotari_console_wallet` process with gRPC enabled.
-  The harness rewrote only the mnemonic birthday before launch because console
-  wallet seed recovery reads the birthday embedded in the seed words. Recovery
-  found `50003000000` microtari available for old-wallet funding tx
-  `11463237927696771510` at height `707731`.
-- Mode 1 S1 submitted one capped `1 T` gRPC `Transfer` request. It succeeded in
-  `41 ms` with fee `660` microtari and tx id `6866732622268686463`.
-- Mode 1 S4 submitted one capped concurrent-batch gRPC transfer. It succeeded in
-  `27 ms` with fee `700` microtari and tx id `3905119411675345783`.
-- Mode 1 S5 submitted one two-recipient `single_tx=true` gRPC transfer after
-  S1/S4 had locked funds. It failed with `Funds are still pending`, preserving
-  real wallet lock behavior as benchmark signal.
-- Mode 2 S0 funded scan detected `49998999300` microtari available after the
-  earlier compatibility smoke, tied to funding tx `7676530785144502866` at
-  height `707741`.
-- Mode 2 S1 live send cell attempted 2 capped `1 T` one-sided sends. The first
-  was constructed, signed, persisted, and accepted by Esmeralda through direct
-  no-retry JSON-RPC submit; tx id `6699431803862839962`. The second failed with
-  `Funds are pending`.
-- Mode 2 S4 live cell dispatched capped concurrent batches for configured
-  batch sizes `[8, 16, 32, 64, 128]` with 2 attempts each. All 10 attempts
-  failed with the same pending-funds condition after S1 locked the large
-  available output/change.
-- Mode 2 S5 individual-send arm attempted 2 capped sends. Both failed with the
-  same pending-funds condition.
-- SQLite inspection after the run showed two broadcast completed transactions
-  total, including the prior smoke and new S1 tx, plus one locked output worth
-  `49998999300` microtari tied to the new S1 pending transaction.
+- Mode 1 S0 started a real `minotari_console_wallet` process with gRPC enabled
+  and completed startup in `1662 ms`.
+- Mode 1 S1 submitted one capped `1 T` CoinSplit round with two outputs. Tx
+  `15297395523124947594` reached terminal-ok status `2` at height `710565` with
+  fee `945` microtari.
+- Mode 1 S4 submitted one capped concurrent-batch gRPC transfer. Tx
+  `16571143755989443134` reached terminal-ok status `2` at height `710568` with
+  fee `700` microtari.
+- Mode 1 S5 submitted the capped batch arm plus individual arm against
+  deterministic distinct recipients. Four txs were confirmed:
+  `1810960988092390726`, `10759835787874539413`, `9489914261621933203`, and
+  `17517677251440746429`.
+- Mode 2 S0 failed because the current live DB has `0` available microtari and
+  `50000998600` locked microtari. This preserves the live wallet state after
+  earlier proof sends rather than wiping or pre-partitioning the wallet.
+- Mode 2 S1 used the multi-recipient round plan but failed before submission
+  with `Funds are pending`; the attempted first round required `2 T` for two
+  outputs. Mode 2 S4/S5 failed for the same pending-funds condition.
+- Mode 2 observations are kept in per-cell metrics under
+  `observed_transactions`; only confirmed rows can enter top-level
+  `chain_verification.verified_transactions`.
 - Mode 3 S0 started the real `minotari_payment_processor` plus companion
-  `minotari daemon` payment receiver. The receiver view wallet used effective
-  birthday `1635` and detected `49999000000` microtari from funding tx
-  `4002233626181090692` at height `707747`.
-- Mode 3 S1 submitted one capped `1 T` `/v1/payment-batches` request. PP accepted
-  batch `d30a3dd8-7243-47ce-a5cc-c66496815fbe`; the profile snapshot captured
-  unsigned and signed tx JSON with status `AWAITING_BROADCAST`, and later SQLite
-  inspection showed the batch reached `CONFIRMED` at height `708613`.
-- Mode 3 S4 accepted one capped PP batch for each configured concurrency tier
-  `[8, 16, 32, 64, 128]`. Those later batches remained `PENDING_BATCHING` because
-  the first PP transaction locked the single large funded UTXO/change while it
-  awaited confirmation.
-- Mode 3 S5 accepted one capped two-item PP batch and likewise remained
-  `PENDING_BATCHING` under the same single-UTXO lock condition.
+  payment receiver in `2031 ms`.
+- Mode 3 S1 now drives PP `/v1/payment-batches` in S1 round shape: two capped
+  batches, two payments per batch, with round metrics recorded under
+  `metrics.extra.rounds`. Both PP batches were accepted but remained
+  `PENDING_BATCHING`.
+- Mode 3 S4 accepted one capped one-payment PP batch and Mode 3 S5 accepted one
+  capped two-payment PP batch. Both remained `PENDING_BATCHING`.
+- PP DB observations are labeled `payment_processor_db_observed`; pending PP
+  batches stay in metrics/notes and are not emitted as confirmed
+  chain-verification rows.
+- Mode 3 scan-shape cells are `not_applicable` when
+  `live_fresh_scan_cells=false` because PP has no direct scan API. Companion
+  wallet scans are only recorded when explicitly enabled.
 
-The checked-in profile is not a completed all-mode performance baseline. It is
-capped Mode 1, Mode 2, and Mode 3 live evidence that preserves the wallets'
-current UTXO-locking behavior instead of hiding it with harness-side
-pre-partitioning.
+REVIEW_v3 status:
+
+- Fixed after the review: Mode 2 S1 multi-recipient round shape, Mode 2
+  settlement gates, Mode 1 verified fee backfill, Mode 3 S1 PP batch shape,
+  confirmed-only top-level verification rows, and PP scan-cell ambiguity.
+- Still not claimed as complete: three-repetition statistical evidence and the
+  full fresh-scan matrix. The profile is intentionally labeled as capped proof
+  evidence.

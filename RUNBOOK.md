@@ -163,9 +163,11 @@ S5 through the direct minotari crate path:
   address as the recipient, so later Mode 2 scan cells rediscover outputs in
   the measured wallet instead of draining the wallet to another mode.
 - Between Mode 2 S1 rounds and between S4 and S5, the harness runs the wallet
-  scanner and waits for recorded scan height to advance by `settle_wait_blocks`.
-  This is a settlement gate for the known `FundsPending` lock behavior, not a
-  retry.
+  scanner and waits for the public base-node HTTP `/get_tip_info` height to
+  advance by `settle_wait_blocks`. The wallet scan is still run on each attempt,
+  but the base-node tip is the chain-advance clock because wallet scan-tip
+  metadata can update in coarse buckets. This is a settlement gate for the known
+  `FundsPending` lock behavior, not a retry.
 - S4 dispatches each configured concurrent batch against the same wallet
   database, capped by `mode2_live_max_s4_batch` when non-zero. Wallet lock
   contention and failed sends are counted as benchmark signal.
@@ -181,12 +183,21 @@ force an accidental genesis scan. Before the daemon starts, the harness expires
 and unlocks stale payment-receiver locks left by previously interrupted local
 runs; it does not unlock between scenarios inside a run.
 
-Mode 3 S1/S4/S5 drive `/v1/payment-batches` with the configured caps. S5 uses
-the same deterministic distinct-recipient pool shape as the other modes, grouped
-by `S5_K`. With a single large funded UTXO, the first signed/broadcast PP batch
-can lock the wallet change while it waits for confirmation, and later PP batches
-may remain `PENDING_BATCHING` with worker logs reporting insufficient available
-funds. That is real topology behavior and is preserved as benchmark signal.
+Mode 3 S1/S4/S5 drive `/v1/payment-batches` with the configured caps. S1 is a
+PP batch-shape analogue to the doubling/fan-out plan: each planned S1 tx becomes
+one PP batch, and `outputs_per_tx` becomes payments per batch. S5 uses the same
+deterministic distinct-recipient pool shape as the other modes, grouped by
+`S5_K`. PP DB observations are labeled `payment_processor_db_observed`; only
+confirmed PP batches are emitted as top-level chain-verification rows. Pending
+PP batches remain in metrics/notes. With a single large funded UTXO, the first
+signed/broadcast PP batch can lock the wallet change while it waits for
+confirmation, and later PP batches may remain `PENDING_BATCHING` with worker logs
+reporting insufficient available funds. That is real topology behavior and is
+preserved as benchmark signal.
+
+PP has no direct scan API. When `live_fresh_scan_cells=false`, PP scan-shape
+cells are marked `not_applicable`; when enabled, those cells measure the
+companion minotari wallet scan surface.
 
 ## Schema
 
@@ -198,8 +209,9 @@ The JSON profile is designed for automated comparison. Every profile records the
 network, hardware environment, pinned versions, benchmark parameters, per-mode
 scenario cells, findings, and chain-verification status value. Schema v3 adds
 per-repetition `metrics` for scenario-specific values such as S1 round details,
-S4 serialization gaps, S5 recipient shape, and chain-verification rows with
-amount/fee/mined-height/confirmed fields when the wallet surface exposes them.
+S4 serialization gaps, S5 recipient shape, observed-but-unconfirmed DB rows, and
+confirmed chain-verification rows with amount/fee/mined-height fields when the
+wallet surface exposes them.
 
 ## Verification Gates
 
@@ -207,7 +219,9 @@ Before publishing a result profile, run:
 
 ```sh
 cargo fmt --check
+cargo check --all-features
 cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
 cargo test
 ast-grep scan
 ```
