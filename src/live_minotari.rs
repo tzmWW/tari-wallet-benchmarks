@@ -11,10 +11,14 @@ use std::{
 use anyhow::{Context, bail};
 use minotari::{
     ScanMode, Scanner,
-    db::{self, get_latest_scanned_tip_block_by_account},
+    db::{self, SqlitePool, get_latest_scanned_tip_block_by_account},
     get_accounts, get_balance, init_db,
     models::PendingTransactionStatus,
-    transactions::{manager::TransactionSender, one_sided_transaction::Recipient},
+    transactions::{
+        fund_locker::FundLocker,
+        manager::TransactionSender,
+        one_sided_transaction::{OneSidedTransaction, Recipient},
+    },
     utils::init_wallet::{init_with_seed_words, init_with_view_key},
 };
 use minotari_wallet_grpc_client::{WalletGrpcClient, grpc};
@@ -782,6 +786,7 @@ async fn run_mode1_s5(
         config.timeout(config.timeouts.confirmation_secs),
     )
     .await;
+    // Cool down between the two S5 arms so wallet state can settle; dispatch inside each arm stays immediate.
     time::sleep(Duration::from_secs(config.benchmark.settle_cooldown_secs)).await;
     let individual_recipients = selected
         .into_iter()
@@ -1393,9 +1398,10 @@ async fn annotate_mode2_live_scenarios(
         &config.seeds.wallet_password_env,
     )?;
 
+    let password = wallet_password(&config.seeds.wallet_password_env)?;
     let request = OwnedOneSidedSendRequest {
         db_path: config.modes.new_wallet_database.clone(),
-        password: wallet_password(&config.seeds.wallet_password_env)?,
+        password: password.clone(),
         base_node_url: config.network.base_node_http_url.clone(),
         recipient: recipient_seed.address.clone(),
         amount: parse_amount(&config.benchmark.mode2_scenario_amount)?,
@@ -1405,15 +1411,9 @@ async fn annotate_mode2_live_scenarios(
         request_timeout: Duration::from_secs(30),
     };
 
-    let s1_attempts = capped_attempts(
-        config
-            .benchmark
-            .doubling_rounds
-            .saturating_mul(config.benchmark.fanout_outputs_per_tx)
-            .min(config.benchmark.volume_target),
-        config.benchmark.mode2_live_max_s1_txs,
-    );
-    let mut s1 = run_send_attempts_sequential("new_wallet/S1", s1_attempts, request.clone()).await;
+    let mut s1_request = request.clone();
+    s1_request.recipient = sender_seed.address.clone();
+    let mut s1 = run_mode2_s1_rounds(config, s1_request).await;
     s1.tx_infos = verify_mode2_transactions_from_db(
         &config.modes.new_wallet_database,
         &s1.tx_ids,
@@ -1425,22 +1425,17 @@ async fn annotate_mode2_live_scenarios(
         &s1,
         vec![
             format!(
-                "Mode 2 S1 live scenario: attempted {} one-sided sends of {} to recipient {}; planned_doubling_fanout={} capped_by_mode2_live_max_s1_txs={}",
+                "Mode 2 S1 live scenario: attempted {} self-directed multi-recipient one-sided txs of {} per output to {}; planned_rounds={} cap={}",
                 s1.attempted,
                 config.benchmark.mode2_scenario_amount,
-                recipient_seed.address,
-                config
-                    .benchmark
-                    .doubling_rounds
-                    .saturating_mul(config.benchmark.fanout_outputs_per_tx)
-                    .min(config.benchmark.volume_target),
+                sender_seed.address,
+                s1_round_plan(config, 0).len(),
                 config.benchmark.mode2_live_max_s1_txs
             ),
-            "Pinned minotari one-sided API is currently single-recipient, so this records configured send attempts rather than true multi-recipient fanout."
+            "Mode 2 S1 uses the minotari multi-recipient one-sided builder directly so the measured wallet builds the output set without shelling out or pre-partitioning UTXOs."
                 .to_string(),
         ],
     );
-
     let mut s4 = run_s4_batches(config, request.clone()).await;
     s4.tx_infos = verify_mode2_transactions_from_db(
         &config.modes.new_wallet_database,
@@ -1462,6 +1457,16 @@ async fn annotate_mode2_live_scenarios(
                 .to_string(),
         ],
     );
+    if !s4.tx_ids.is_empty() {
+        let note = wait_for_mode2_scan_advance(
+            config,
+            &config.modes.new_wallet_database,
+            &password,
+            "S4->S5",
+        )
+        .await?;
+        append_mode2_note(profile, ScenarioName::S4, note);
+    }
 
     let s5_attempts = capped_attempts(
         config.benchmark.s5_m,
@@ -1498,6 +1503,156 @@ async fn annotate_mode2_live_scenarios(
     Ok(())
 }
 
+async fn wait_for_mode2_scan_advance(
+    config: &Config,
+    db_path: &Path,
+    password: &str,
+    label: &str,
+) -> anyhow::Result<String> {
+    let initial_height = account_snapshot(db_path)
+        .with_context(|| format!("mode2 settle gate {label} could not read wallet scan height"))?
+        .max_height;
+    let target_height = initial_height.saturating_add(config.settle_wait_blocks());
+    let timeout = config.timeout(config.timeouts.confirmation_secs);
+    let start = Instant::now();
+    let mut attempts = 0u32;
+    let mut total_scan_wall_ms = 0u128;
+
+    loop {
+        attempts = attempts.saturating_add(1);
+        let scan_wall_ms = scan_to_tip(
+            db_path,
+            password,
+            &config.network.base_node_http_url,
+            config.benchmark.scan_batch_size,
+            config.benchmark.c_min,
+        )
+        .await
+        .with_context(|| format!("mode2 settle gate {label} scan failed"))?;
+        total_scan_wall_ms = total_scan_wall_ms.saturating_add(scan_wall_ms);
+        let last_height = account_snapshot(db_path)
+            .with_context(|| {
+                format!("mode2 settle gate {label} could not read wallet scan height")
+            })?
+            .max_height;
+        println!("mode2 settle gate {label}: scanned_height={last_height} target={target_height}");
+
+        if last_height >= target_height {
+            return Ok(format!(
+                "Mode 2 settle gate {label}: scanned_height {initial_height}->{last_height} target={target_height} attempts={attempts} scan_wall_ms={total_scan_wall_ms}"
+            ));
+        }
+        if start.elapsed() >= timeout {
+            bail!(
+                "mode2 settle gate {label} timed out after {}s waiting for scanned_height {last_height} to reach target {target_height}",
+                timeout.as_secs()
+            );
+        }
+
+        let remaining = timeout.saturating_sub(start.elapsed());
+        let sleep_for = Duration::from_secs(10).min(remaining);
+        if !sleep_for.is_zero() {
+            time::sleep(sleep_for).await;
+        }
+    }
+}
+
+fn append_mode2_note(profile: &mut ResultProfile, scenario: ScenarioName, note: String) {
+    if let Some(cell) = profile
+        .modes
+        .get_mut("new_wallet")
+        .and_then(|mode| mode.scenarios.get_mut(scenario.as_str()))
+    {
+        cell.notes.push(note);
+    }
+}
+
+async fn run_mode2_s1_rounds(
+    config: &Config,
+    request: OwnedOneSidedSendRequest,
+) -> ScenarioSendSummary {
+    let mut total = ScenarioSendSummary::default();
+    let start = Instant::now();
+    let rounds = s1_round_plan(config, config.benchmark.mode2_live_max_s1_txs);
+    let mut round_metrics = Vec::new();
+
+    for round in rounds {
+        let mut round_summary = ScenarioSendSummary {
+            attempted: round.tx_count,
+            ..ScenarioSendSummary::default()
+        };
+        let round_start = Instant::now();
+        for tx_index in 1..=round.tx_count {
+            println!(
+                "new_wallet/S1 round {} tx {}/{} outputs={}",
+                round.round_index, tx_index, round.tx_count, round.outputs_per_tx
+            );
+            let recipients = repeated_recipient(&request.recipient, round.outputs_per_tx as usize);
+            let result = construct_sign_broadcast_one_sided_multi_recipient_owned(
+                request.clone(),
+                recipients,
+            )
+            .await;
+            round_summary
+                .construction_complete_ms
+                .push(round_start.elapsed().as_millis());
+            round_summary.record_attempt(tx_index, result);
+        }
+        round_summary.wall_ms = round_start.elapsed().as_millis();
+
+        let mut settle_note = None;
+        if !round_summary.tx_ids.is_empty() {
+            match wait_for_mode2_scan_advance(
+                config,
+                &request.db_path,
+                &request.password,
+                &format!("S1 round {}", round.round_index),
+            )
+            .await
+            {
+                Ok(note) => settle_note = Some(note),
+                Err(error) => {
+                    round_summary.failure_count = round_summary.failure_count.saturating_add(1);
+                    round_summary
+                        .errors
+                        .push(format!("mode2 S1 settle gate failed: {error:#}"));
+                }
+            }
+        }
+
+        round_metrics.push(serde_json::json!({
+            "round_index": round.round_index,
+            "fanout": round.fanout,
+            "tx_count": round.tx_count,
+            "outputs_per_tx": round.outputs_per_tx,
+            "target_utxos_after": round.target_utxos_after,
+            "success_count": round_summary.success_count,
+            "failure_count": round_summary.failure_count,
+            "settle_note": settle_note,
+            "wall_ms": round_summary.wall_ms
+        }));
+        let has_failure = round_summary.failure_count > 0;
+        total.add_batch(round.round_index, round_summary);
+        if has_failure {
+            break;
+        }
+    }
+
+    total.wall_ms = start.elapsed().as_millis();
+    total
+        .extra_metrics
+        .insert("rounds".to_string(), serde_json::json!(round_metrics));
+    total
+}
+
+fn repeated_recipient(recipient: &str, count: usize) -> Vec<String> {
+    let mut recipients = Vec::with_capacity(count);
+    for _ in 0..count {
+        recipients.push(recipient.to_string());
+    }
+    recipients
+}
+
 async fn run_s4_batches(config: &Config, request: OwnedOneSidedSendRequest) -> ScenarioSendSummary {
     let mut total = ScenarioSendSummary::default();
     let start = Instant::now();
@@ -1513,28 +1668,6 @@ async fn run_s4_batches(config: &Config, request: OwnedOneSidedSendRequest) -> S
     }
     total.wall_ms = start.elapsed().as_millis();
     total
-}
-
-async fn run_send_attempts_sequential(
-    label: &str,
-    attempts: u32,
-    request: OwnedOneSidedSendRequest,
-) -> ScenarioSendSummary {
-    let mut summary = ScenarioSendSummary {
-        attempted: attempts,
-        ..ScenarioSendSummary::default()
-    };
-    let start = Instant::now();
-    for attempt in 1..=attempts {
-        println!("{label} attempt {attempt}/{attempts} dispatching");
-        let result = construct_sign_broadcast_one_sided_owned(request.clone()).await;
-        summary
-            .construction_complete_ms
-            .push(start.elapsed().as_millis());
-        summary.record_attempt(attempt, result);
-    }
-    summary.wall_ms = start.elapsed().as_millis();
-    summary
 }
 
 async fn run_send_attempts_to_recipients_sequential(
@@ -1602,7 +1735,7 @@ fn record_mode2_send_summary(
     summary: &ScenarioSendSummary,
     mut notes: Vec<String>,
 ) {
-    let verified = summary.verified_transactions("new_wallet", scenario);
+    let verified = summary.verified_transactions();
     let verification_complete = summary.tx_ids.is_empty() || !verified.is_empty();
     let all_verified_ok = verified.iter().all(|tx| tx.confirmed);
     profile
@@ -2099,21 +2232,23 @@ async fn submit_pp_batch_to_recipients(
     let items = recipients
         .into_iter()
         .enumerate()
-        .map(|(item_index, recipient_address)| BulkPaymentItem {
-            client_id: format!(
-                "bench-{}-{}-{}-{}",
-                scenario.as_str().to_lowercase(),
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-                batch_index,
-                item_index + 1
-            ),
-            recipient_address,
-            amount,
-            payment_id: Some(format!(
-                "wallet-bench-{}-{batch_index}-{item_index}",
-                scenario.as_str(),
-                item_index = item_index + 1
-            )),
+        .map(|(item_index, recipient_address)| {
+            let payment_index = item_index + 1;
+            BulkPaymentItem {
+                client_id: format!(
+                    "bench-{}-{}-{}-{}",
+                    scenario.as_str().to_lowercase(),
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+                    batch_index,
+                    payment_index
+                ),
+                recipient_address,
+                amount,
+                payment_id: Some(format!(
+                    "wallet-bench-{}-{batch_index}-{payment_index}",
+                    scenario.as_str()
+                )),
+            }
         })
         .collect::<Vec<_>>();
     let response = client
@@ -2482,6 +2617,7 @@ struct ScenarioSendSummary {
     batch_summaries: Vec<BatchSendSummary>,
     construction_complete_ms: Vec<u128>,
     tx_infos: Vec<VerifiedTransaction>,
+    extra_metrics: serde_json::Map<String, serde_json::Value>,
 }
 
 struct BatchSendSummary {
@@ -3118,6 +3254,7 @@ impl ScenarioSendSummary {
         self.construction_complete_ms
             .extend(batch.construction_complete_ms);
         self.tx_infos.extend(batch.tx_infos);
+        self.extra_metrics.extend(batch.extra_metrics);
         self.batch_summaries.push(BatchSendSummary {
             configured_batch,
             attempted: batch.attempted,
@@ -3172,36 +3309,30 @@ impl ScenarioSendSummary {
     }
 
     fn metrics(&self, scenario: ScenarioName) -> serde_json::Value {
-        serde_json::json!({
-            "scenario": scenario.as_str(),
-            "attempted": self.attempted,
-            "tx_ids": self.tx_ids,
-            "max_serialization_gap_ms": max_serialization_gap_ms(self.construction_complete_ms.clone()),
-            "double_selection_rejections": double_selection_rejections(&self.errors)
-        })
+        let mut metrics = serde_json::Map::new();
+        metrics.insert("scenario".to_string(), serde_json::json!(scenario.as_str()));
+        metrics.insert("attempted".to_string(), serde_json::json!(self.attempted));
+        metrics.insert("tx_ids".to_string(), serde_json::json!(self.tx_ids));
+        metrics.insert(
+            "verified_transactions".to_string(),
+            serde_json::json!(self.tx_infos),
+        );
+        metrics.insert(
+            "max_serialization_gap_ms".to_string(),
+            serde_json::json!(max_serialization_gap_ms(
+                self.construction_complete_ms.clone()
+            )),
+        );
+        metrics.insert(
+            "double_selection_rejections".to_string(),
+            serde_json::json!(double_selection_rejections(&self.errors)),
+        );
+        metrics.extend(self.extra_metrics.clone());
+        serde_json::Value::Object(metrics)
     }
 
-    fn verified_transactions(
-        &self,
-        mode: &str,
-        scenario: ScenarioName,
-    ) -> Vec<VerifiedTransaction> {
-        if !self.tx_infos.is_empty() {
-            return self.tx_infos.clone();
-        }
-        self.tx_ids
-            .iter()
-            .map(|tx_id| VerifiedTransaction {
-                tx_id: tx_id.clone(),
-                status_value: 1,
-                mode: mode.to_string(),
-                scenario: scenario.as_str().to_string(),
-                amount_microtari: None,
-                fee_microtari: None,
-                mined_height: None,
-                confirmed: false,
-            })
-            .collect()
+    fn verified_transactions(&self) -> Vec<VerifiedTransaction> {
+        self.tx_infos.clone()
     }
 }
 
@@ -3226,6 +3357,13 @@ async fn construct_sign_broadcast_one_sided_owned(
     request: OwnedOneSidedSendRequest,
 ) -> anyhow::Result<OneSidedSendOutcome> {
     construct_sign_broadcast_one_sided(request.as_borrowed()).await
+}
+
+async fn construct_sign_broadcast_one_sided_multi_recipient_owned(
+    request: OwnedOneSidedSendRequest,
+    recipients: Vec<String>,
+) -> anyhow::Result<OneSidedSendOutcome> {
+    construct_sign_broadcast_one_sided_multi_recipient(request.as_borrowed(), &recipients).await
 }
 
 pub async fn construct_sign_broadcast_one_sided(
@@ -3267,13 +3405,129 @@ pub async fn construct_sign_broadcast_one_sided(
     finalize_transaction_and_broadcast_without_retry(&sender, signed, request).await
 }
 
+pub async fn construct_sign_broadcast_one_sided_multi_recipient(
+    request: OneSidedSendRequest<'_>,
+    recipients: &[String],
+) -> anyhow::Result<OneSidedSendOutcome> {
+    if recipients.is_empty() {
+        bail!("multi-recipient one-sided transaction requires at least one recipient");
+    }
+    let pool = init_db(request.db_path.to_path_buf())?;
+    let account = {
+        let conn = pool.get()?;
+        db::get_account_by_name(&conn, "default")?.context("Account not found: default")?
+    };
+    let recipients = recipients
+        .iter()
+        .map(|recipient| {
+            Ok(Recipient {
+                address: TariAddress::from_str(recipient)?,
+                amount: request.amount,
+                payment_id: None,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let amount = recipients.iter().map(|recipient| recipient.amount).sum();
+    let idempotency_key = uuid_like_idempotency();
+    let locked_funds = FundLocker::new(pool.clone()).lock(
+        account.id,
+        amount,
+        recipients.len(),
+        request.fee_rate,
+        None,
+        Some(idempotency_key.clone()),
+        request.seconds_to_lock,
+        request.confirmation_window,
+    )?;
+    let pending_tx_id = {
+        let conn = pool.get()?;
+        db::find_pending_transaction_by_idempotency_key(&conn, &idempotency_key, account.id)?
+            .map(|pending| pending.id.to_string())
+            .with_context(|| {
+                format!("pending transaction missing for idempotency key {idempotency_key}")
+            })?
+    };
+    let one_sided_tx = OneSidedTransaction::new(
+        pool.clone(),
+        Network::Esmeralda,
+        request.password.to_string(),
+    );
+    let unsigned = match one_sided_tx.create_unsigned_transaction(
+        &account,
+        locked_funds,
+        recipients,
+        request.fee_rate,
+    ) {
+        Ok(unsigned) => unsigned,
+        Err(error) => {
+            if let Err(cleanup) = expire_and_unlock_pending_transaction_id(&pool, &pending_tx_id) {
+                anyhow::bail!(
+                    "creating multi-recipient unsigned transaction failed: {error}; cleanup failed: {cleanup:#}"
+                );
+            }
+            anyhow::bail!("creating multi-recipient unsigned transaction failed: {error}");
+        }
+    };
+    let key_manager = match account.get_key_manager(request.password) {
+        Ok(key_manager) => key_manager,
+        Err(error) => {
+            if let Err(cleanup) = expire_and_unlock_pending_transaction_id(&pool, &pending_tx_id) {
+                anyhow::bail!("opening key manager failed: {error}; cleanup failed: {cleanup:#}");
+            }
+            anyhow::bail!("opening key manager failed: {error}");
+        }
+    };
+    let constants = ConsensusConstantsBuilder::new(Network::Esmeralda).build();
+    let signed = match sign_locked_transaction(
+        &key_manager,
+        constants,
+        Network::Esmeralda,
+        unsigned,
+    ) {
+        Ok(signed) => signed,
+        Err(error) => {
+            if let Err(cleanup) = expire_and_unlock_pending_transaction_id(&pool, &pending_tx_id) {
+                anyhow::bail!(
+                    "signing multi-recipient locked transaction failed: {error}; cleanup failed: {cleanup:#}"
+                );
+            }
+            anyhow::bail!("signing multi-recipient locked transaction failed: {error}");
+        }
+    };
+    finalize_signed_transaction_and_broadcast_without_retry(
+        &pool,
+        account.id,
+        &pending_tx_id,
+        signed,
+        request,
+    )
+    .await
+}
+
 async fn finalize_transaction_and_broadcast_without_retry(
     sender: &TransactionSender,
     signed: SignedOneSidedTransactionResult,
     request: OneSidedSendRequest<'_>,
 ) -> anyhow::Result<OneSidedSendOutcome> {
-    if let Err(error) = persist_signed_transaction(sender, &signed) {
-        if let Err(cleanup) = expire_and_unlock_processed_transaction(sender) {
+    finalize_signed_transaction_and_broadcast_without_retry(
+        &sender.db_pool,
+        sender.account.id,
+        sender.processed_transactions.id(),
+        signed,
+        request,
+    )
+    .await
+}
+
+async fn finalize_signed_transaction_and_broadcast_without_retry(
+    db_pool: &SqlitePool,
+    account_id: i64,
+    pending_tx_id: &str,
+    signed: SignedOneSidedTransactionResult,
+    request: OneSidedSendRequest<'_>,
+) -> anyhow::Result<OneSidedSendOutcome> {
+    if let Err(error) = persist_signed_transaction(db_pool, account_id, pending_tx_id, &signed) {
+        if let Err(cleanup) = expire_and_unlock_pending_transaction_id(db_pool, pending_tx_id) {
             anyhow::bail!(
                 "persisting signed transaction failed: {error:#}; cleanup failed: {cleanup:#}"
             );
@@ -3289,7 +3543,7 @@ async fn finalize_transaction_and_broadcast_without_retry(
     )
     .await;
 
-    let conn = sender.db_pool.get()?;
+    let conn = db_pool.get()?;
     match submission {
         Ok(response) if response.accepted => {
             db::mark_completed_transaction_as_broadcasted(&conn, tx_id, 1)?;
@@ -3316,10 +3570,10 @@ async fn finalize_transaction_and_broadcast_without_retry(
             )?;
             db::update_pending_transaction_status(
                 &conn,
-                sender.processed_transactions.id(),
+                pending_tx_id,
                 PendingTransactionStatus::Expired,
             )?;
-            db::unlock_outputs_for_pending_transaction(&conn, sender.processed_transactions.id())?;
+            db::unlock_outputs_for_pending_transaction(&conn, pending_tx_id)?;
             anyhow::bail!(
                 "transaction was not accepted by the network: {}",
                 response.rejection_reason
@@ -3333,10 +3587,10 @@ async fn finalize_transaction_and_broadcast_without_retry(
             )?;
             db::update_pending_transaction_status(
                 &conn,
-                sender.processed_transactions.id(),
+                pending_tx_id,
                 PendingTransactionStatus::Expired,
             )?;
-            db::unlock_outputs_for_pending_transaction(&conn, sender.processed_transactions.id())?;
+            db::unlock_outputs_for_pending_transaction(&conn, pending_tx_id)?;
             Err(error)
         }
     }
@@ -3344,24 +3598,32 @@ async fn finalize_transaction_and_broadcast_without_retry(
 
 fn expire_and_unlock_processed_transaction(sender: &TransactionSender) -> anyhow::Result<()> {
     let pending_tx_id = sender.processed_transactions.id();
+    expire_and_unlock_pending_transaction_id(&sender.db_pool, pending_tx_id)
+}
+
+fn expire_and_unlock_pending_transaction_id(
+    db_pool: &SqlitePool,
+    pending_tx_id: &str,
+) -> anyhow::Result<()> {
     if pending_tx_id.is_empty() {
         return Ok(());
     }
-    let conn = sender.db_pool.get()?;
+    let conn = db_pool.get()?;
     db::update_pending_transaction_status(&conn, pending_tx_id, PendingTransactionStatus::Expired)?;
     db::unlock_outputs_for_pending_transaction(&conn, pending_tx_id)?;
     Ok(())
 }
 
 fn persist_signed_transaction(
-    sender: &TransactionSender,
+    db_pool: &SqlitePool,
+    account_id: i64,
+    pending_tx_id: &str,
     signed: &SignedOneSidedTransactionResult,
 ) -> anyhow::Result<()> {
-    let conn = sender.db_pool.get()?;
-    let pending_tx_id = sender.processed_transactions.id();
     if pending_tx_id.is_empty() {
         anyhow::bail!("pending transaction id missing before broadcast");
     }
+    let conn = db_pool.get()?;
 
     let tx_id = signed.signed_transaction.tx_id;
     let kernel_excess = signed
@@ -3387,7 +3649,7 @@ fn persist_signed_transaction(
     )?;
     db::create_completed_transaction(
         &conn,
-        sender.account.id,
+        account_id,
         pending_tx_id,
         &kernel_excess,
         &serialized_transaction,
@@ -3676,6 +3938,37 @@ mod tests {
             .scenarios[ScenarioName::S1.as_str()];
         assert_eq!(cell.status, CellStatus::Failed);
         assert_eq!(profile.chain_verification.verified_transactions.len(), 1);
+    }
+
+    #[test]
+    fn mode2_summary_does_not_emit_unverified_placeholder_rows() {
+        let config = Config::default();
+        let mut profile = ResultProfile::new(&config, crate::env_capture::capture());
+        profile.modes.insert(
+            ModeName::NewWallet.as_str().to_string(),
+            empty_mode_profile(ModeName::NewWallet, None),
+        );
+        let summary = ScenarioSendSummary {
+            attempted: 1,
+            success_count: 1,
+            tx_ids: vec!["1".to_string()],
+            tx_infos: Vec::new(),
+            ..ScenarioSendSummary::default()
+        };
+
+        record_mode2_send_summary(&mut profile, ScenarioName::S1, &summary, Vec::new());
+
+        let cell = &profile
+            .modes
+            .get(ModeName::NewWallet.as_str())
+            .unwrap()
+            .scenarios[ScenarioName::S1.as_str()];
+        assert_eq!(cell.status, CellStatus::Failed);
+        assert_eq!(profile.chain_verification.verified_transactions.len(), 0);
+        assert_eq!(
+            cell.repetitions[0].error.as_deref(),
+            Some("tx_ids were produced but chain verification returned no rows")
+        );
     }
 
     #[test]

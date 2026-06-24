@@ -2,10 +2,13 @@
 
 This summary accompanies `baselines/esmeralda_baseline.json`.
 
-Note: this checked-in JSON predates schema v3. The current harness records
+Note: this checked-in JSON predates schema v3 and the later Mode 2 S1
+multi-recipient/settlement hardening. The current harness records
 scenario-specific metrics, transaction verification rows, Mode 1 S1 `CoinSplit`
-rounds, and deterministic distinct-recipient S5 shapes. Regenerate the baseline
-after a capped proof passes and enough spendable Esmeralda funds are available.
+rounds, Mode 2 self-directed doubling/fan-out rounds, scanner-backed Mode 2
+settle gates, and deterministic distinct-recipient S5 shapes. Regenerate the
+baseline after a capped proof passes and enough spendable Esmeralda funds are
+available.
 
 - Network: Esmeralda only.
 - Harness repository: `https://github.com/tzmWW/tari-wallet-benchmarks`.

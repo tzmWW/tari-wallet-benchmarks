@@ -50,9 +50,15 @@ not hide.
   smoke persists the signed transaction to the minotari wallet DB, then submits
   it with a direct `submit_transaction` JSON-RPC request so the harness does not
   hide base-node submission failures behind transport retries.
-- The pinned `minotari` one-sided transaction API is currently single-recipient.
-  Mode 2 S1 therefore records configured one-sided send attempts honestly
-  instead of synthesizing hidden multi-recipient fanout in the harness.
+- The pinned `TransactionSender::start_new_transaction` wrapper is
+  single-recipient, but the lower-level `OneSidedTransaction` builder supports
+  multiple recipients. Mode 2 S1 uses that builder for self-directed
+  doubling/fan-out rounds so later scan cells measure outputs in the Mode 2
+  wallet; S4/S5 keep the simpler single-recipient send path where that is the
+  scenario shape.
+- Mode 2 uses scanner-backed settlement gates between S1 rounds and between
+  S4 and S5. The gate waits for recorded scan height advancement rather than
+  retrying failed sends.
 - Mode 2 S4 dispatches concurrent attempts against the same wallet DB and keeps
   the pinned `FundLocker` behavior visible. The harness reports success/failure
   counts rather than smoothing over lock contention.

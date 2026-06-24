@@ -155,12 +155,17 @@ output, S5 can fail with `Funds are still pending`; that is recorded as wallet
 behavior rather than retried or hidden.
 
 When `mode2_live_scenarios` is enabled, the harness records Mode 2 S1, S4, and
-S5 from the same direct one-sided send primitive:
+S5 through the direct minotari crate path:
 
-- S1 attempts the configured doubling/fanout send count, capped by
-  `mode2_live_max_s1_txs` when non-zero. The pinned `minotari` one-sided API is
-  single-recipient, so the result is recorded as send attempts rather than fake
-  multi-recipient fanout.
+- S1 follows the same doubling/fan-out round plan as Mode 1, capped by
+  `mode2_live_max_s1_txs` when non-zero. It uses the pinned
+  `OneSidedTransaction` multi-recipient builder with the Mode 2 wallet's own
+  address as the recipient, so later Mode 2 scan cells rediscover outputs in
+  the measured wallet instead of draining the wallet to another mode.
+- Between Mode 2 S1 rounds and between S4 and S5, the harness runs the wallet
+  scanner and waits for recorded scan height to advance by `settle_wait_blocks`.
+  This is a settlement gate for the known `FundsPending` lock behavior, not a
+  retry.
 - S4 dispatches each configured concurrent batch against the same wallet
   database, capped by `mode2_live_max_s4_batch` when non-zero. Wallet lock
   contention and failed sends are counted as benchmark signal.
