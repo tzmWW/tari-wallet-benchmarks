@@ -76,6 +76,13 @@ for compatibility or development runs.
 
 ```toml
 live_fresh_scan_cells = true    # long-running B0/S2/S3 fresh database scans
+
+mode1_live_topology = true      # runs real minotari_console_wallet with gRPC
+mode1_scenario_amount = "1 T"
+mode1_live_max_s1_txs = 1       # 0 means full doubling/fanout target
+mode1_live_max_s4_batch = 1     # 0 means use each concurrent_batches value
+mode1_live_max_s5_items = 2     # 0 means use S5_M
+
 mode2_send_smoke = true         # spends mode2_send_smoke_amount once
 mode2_send_smoke_amount = "1 T"
 
@@ -115,6 +122,20 @@ submits one one-sided transaction from the Mode 2 wallet using a direct JSON-RPC
 request. This avoids `WalletHttpClient::new`, whose default transport retries
 transient failures. `mode2_send_smoke` and `mode2_live_scenarios` are mutually
 exclusive.
+
+When `mode1_live_topology` is enabled, the harness starts a real
+`minotari_console_wallet` process with gRPC enabled, waits for recovery to find
+the funded balance, and drives S1/S4/S5 through `Transfer` requests. The console
+wallet seed-recovery path reads the birthday embedded in the mnemonic; it does
+not apply the separate `--birthday` flag to seed words. The harness therefore
+rewrites only the mnemonic birthday before launch. This preserves the address and
+keys while avoiding an accidental genesis scan for freshly funded Esmeralda
+benchmark wallets.
+
+Mode 1 S5 uses one gRPC `Transfer` call with `single_tx=true` and multiple
+recipients. If earlier S1/S4 sends have locked the single large funded UTXO or
+change output, S5 can fail with `Funds are still pending`; that is recorded as
+wallet behavior rather than retried or hidden.
 
 When `mode2_live_scenarios` is enabled, the harness records Mode 2 S1, S4, and
 S5 from the same direct one-sided send primitive:

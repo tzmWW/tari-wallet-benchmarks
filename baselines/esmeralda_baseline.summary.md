@@ -12,6 +12,18 @@ This summary accompanies `baselines/esmeralda_baseline.json`.
 
 Current checked-in live evidence:
 
+- Mode 1 S0 started a real `minotari_console_wallet` process with gRPC enabled.
+  The harness rewrote only the mnemonic birthday before launch because console
+  wallet seed recovery reads the birthday embedded in the seed words. Recovery
+  found `50003000000` microtari available for old-wallet funding tx
+  `11463237927696771510` at height `707731`.
+- Mode 1 S1 submitted one capped `1 T` gRPC `Transfer` request. It succeeded in
+  `41 ms` with fee `660` microtari and tx id `6866732622268686463`.
+- Mode 1 S4 submitted one capped concurrent-batch gRPC transfer. It succeeded in
+  `27 ms` with fee `700` microtari and tx id `3905119411675345783`.
+- Mode 1 S5 submitted one two-recipient `single_tx=true` gRPC transfer after
+  S1/S4 had locked funds. It failed with `Funds are still pending`, preserving
+  real wallet lock behavior as benchmark signal.
 - Mode 2 S0 funded scan detected `49998999300` microtari available after the
   earlier compatibility smoke, tied to funding tx `7676530785144502866` at
   height `707741`.
@@ -44,5 +56,6 @@ Current checked-in live evidence:
   `PENDING_BATCHING` under the same single-UTXO lock condition.
 
 The checked-in profile is not a completed all-mode performance baseline. It is
-Mode 2 and Mode 3 live evidence that preserves the wallets' current UTXO-locking
-behavior instead of hiding it with harness-side pre-partitioning.
+capped Mode 1, Mode 2, and Mode 3 live evidence that preserves the wallets'
+current UTXO-locking behavior instead of hiding it with harness-side
+pre-partitioning.

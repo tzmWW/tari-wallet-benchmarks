@@ -1,13 +1,14 @@
 #![cfg(feature = "live-minotari")]
 
 use std::{
-    fs,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
+    process::Stdio,
     str::FromStr,
     time::{Duration, Instant},
 };
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use minotari::{
     ScanMode, Scanner,
     db::{self, get_latest_scanned_tip_block_by_account},
@@ -16,6 +17,7 @@ use minotari::{
     transactions::{manager::TransactionSender, one_sided_transaction::Recipient},
     utils::init_wallet::{init_with_seed_words, init_with_view_key},
 };
+use minotari_wallet_grpc_client::{WalletGrpcClient, grpc};
 use tari_common::configuration::Network;
 use tari_common_types::seeds::cipher_seed::CipherSeed;
 use tari_common_types::tari_address::TariAddress;
@@ -26,7 +28,7 @@ use tari_transaction_components::{
     rpc::models::{TxSubmissionRejectionReason, TxSubmissionResponse},
 };
 use tari_utilities::ByteArray;
-use tokio::task::JoinSet;
+use tokio::{process::Command, task::JoinSet, time};
 
 use crate::{
     config::{Config, parse_amount},
@@ -38,6 +40,7 @@ use crate::{
     result_profile::{CellStatus, Repetition, ResultProfile, ScenarioCell},
     seeds::{
         AddressBook, WalletRole, current_birthday, seed_from_words, seed_from_words_with_birthday,
+        seed_words_with_birthday,
     },
 };
 
@@ -109,6 +112,12 @@ pub async fn annotate_profile_with_library_smoke(
                 });
             }
         }
+    }
+
+    if config.benchmark.mode1_live_topology {
+        annotate_mode1_console_wallet(config, book, profile).await?;
+    } else {
+        annotate_mode1_disabled(profile);
     }
 
     if config.benchmark.mode2_live_scenarios {
@@ -265,6 +274,575 @@ fn annotate_mode3_disabled(profile: &mut ResultProfile) {
             );
         }
     }
+}
+
+fn annotate_mode1_disabled(profile: &mut ResultProfile) {
+    let Some(mode) = profile.modes.get_mut("old_wallet") else {
+        return;
+    };
+    for scenario in [
+        ScenarioName::S0,
+        ScenarioName::S1,
+        ScenarioName::S4,
+        ScenarioName::S5,
+    ] {
+        if let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) {
+            cell.notes.push(
+                "Mode 1 console-wallet topology disabled; set benchmark.mode1_live_topology=true to spawn minotari_console_wallet with gRPC"
+                    .to_string(),
+            );
+        }
+    }
+}
+
+async fn annotate_mode1_console_wallet(
+    config: &Config,
+    book: &AddressBook,
+    profile: &mut ResultProfile,
+) -> anyhow::Result<()> {
+    let Some(old_seed) = book.addresses.get(WalletRole::OldWallet.label()) else {
+        return Ok(());
+    };
+    let Some(recipient_seed) = book.addresses.get(WalletRole::NewWallet.label()) else {
+        return Ok(());
+    };
+
+    let start = Instant::now();
+    let topology = start_mode1_console_wallet(config, old_seed).await;
+    match topology {
+        Ok(mut context) => {
+            record_mode1_s0(config, profile, &context, start.elapsed().as_millis());
+            run_mode1_send_cells(
+                config,
+                profile,
+                recipient_seed.address.clone(),
+                &mut context,
+            )
+            .await?;
+        }
+        Err(error) => {
+            record_mode1_startup_failure(profile, start.elapsed().as_millis(), error);
+        }
+    }
+    Ok(())
+}
+
+async fn start_mode1_console_wallet(
+    config: &Config,
+    old_seed: &crate::seeds::SeedMaterial,
+) -> anyhow::Result<Mode1ConsoleContext> {
+    let password = wallet_password(&config.seeds.wallet_password_env)?;
+    let base_path = old_wallet_base_path(config);
+    let config_path = base_path.join("config/config.toml");
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::create_dir_all("logs")?;
+    let stdout_path = PathBuf::from("logs/mode1-console-wallet.stdout.log");
+    let stderr_path = PathBuf::from("logs/mode1-console-wallet.stderr.log");
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stdout_path)?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_path)?;
+    let grpc_bind = grpc_bind_multiaddr(&config.modes.old_wallet_grpc_address)?;
+    let birthday = mode1_wallet_birthday(old_seed);
+    // Console-wallet seed recovery reads the birthday embedded in the mnemonic.
+    let recovery_seed_words = seed_words_with_birthday(&old_seed.seed_words, birthday)
+        .context("encoding Mode 1 console-wallet recovery seed birthday")?;
+
+    let mut command = Command::new(&config.paths.minotari_console_wallet);
+    command
+        .env("MINOTARI_WALLET_SEED_WORDS", recovery_seed_words)
+        .env("MINOTARI_WALLET_PASSWORD", &password)
+        .arg("--base-path")
+        .arg(&base_path)
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--network")
+        .arg("Esmeralda")
+        .arg("--non-interactive-mode")
+        .arg("--grpc-enabled")
+        .arg("--grpc-address")
+        .arg(&grpc_bind)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+
+    let mut process = Mode1ConsoleProcess {
+        child: command
+            .spawn()
+            .context("spawning minotari_console_wallet")?,
+        stdout_path,
+        stderr_path,
+    };
+    let client = wait_for_mode1_grpc(config, &mut process).await?;
+    let mut context = Mode1ConsoleContext {
+        process,
+        client,
+        balance: None,
+        birthday,
+        grpc_bind,
+        version: None,
+    };
+    let version = context
+        .client
+        .get_version(grpc::GetVersionRequest {})
+        .await?
+        .into_inner()
+        .version;
+    context.version = Some(version);
+    let required_balance = config.a_fund()?.0;
+    let balance = wait_for_mode1_balance(config, &mut context, required_balance).await?;
+    context.balance = Some(balance);
+    Ok(context)
+}
+
+fn old_wallet_base_path(config: &Config) -> PathBuf {
+    config.paths.data_dir.join("old-wallet-console")
+}
+
+fn mode1_wallet_birthday(seed: &crate::seeds::SeedMaterial) -> u16 {
+    if seed.birthday == 0 {
+        current_birthday()
+    } else {
+        seed.birthday
+    }
+}
+
+fn grpc_bind_multiaddr(address: &str) -> anyhow::Result<String> {
+    if address.starts_with('/') {
+        return Ok(address.to_string());
+    }
+    let trimmed = address
+        .strip_prefix("http://")
+        .or_else(|| address.strip_prefix("https://"))
+        .unwrap_or(address);
+    let (host, port) = trimmed
+        .rsplit_once(':')
+        .with_context(|| format!("invalid gRPC address {address}"))?;
+    Ok(format!("/ip4/{host}/tcp/{port}"))
+}
+
+async fn wait_for_mode1_grpc(
+    config: &Config,
+    process: &mut Mode1ConsoleProcess,
+) -> anyhow::Result<WalletGrpcClient<tonic::transport::Channel>> {
+    let start = Instant::now();
+    let timeout = config.timeout(config.timeouts.startup_secs);
+    let mut interval = time::interval(Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        if let Some(status) = process.try_wait()? {
+            bail!(
+                "minotari_console_wallet exited during gRPC startup with status {status}; stdout_log={} stderr_log={}",
+                process.stdout_path.display(),
+                process.stderr_path.display()
+            );
+        }
+        match time::timeout(
+            Duration::from_secs(5),
+            WalletGrpcClient::connect(&config.modes.old_wallet_grpc_address),
+        )
+        .await
+        {
+            Ok(Ok(client)) => return Ok(client),
+            Ok(Err(error)) => {
+                if start.elapsed() > timeout {
+                    bail!("console wallet gRPC did not become ready within {timeout:?}: {error}");
+                }
+            }
+            Err(_) => {
+                if start.elapsed() > timeout {
+                    bail!("console wallet gRPC connect timed out for {timeout:?}");
+                }
+            }
+        }
+    }
+}
+
+async fn wait_for_mode1_balance(
+    config: &Config,
+    context: &mut Mode1ConsoleContext,
+    min_available: u64,
+) -> anyhow::Result<grpc::GetBalanceResponse> {
+    let start = Instant::now();
+    let timeout = config.timeout(config.timeouts.startup_secs);
+    let mut last_report = Instant::now();
+    let mut interval = time::interval(Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        if let Some(status) = context.process.try_wait()? {
+            bail!(
+                "minotari_console_wallet exited during startup with status {status}; stdout_log={} stderr_log={}",
+                context.process.stdout_path.display(),
+                context.process.stderr_path.display()
+            );
+        }
+        let balance = context
+            .client
+            .get_balance(grpc::GetBalanceRequest { payment_id: None })
+            .await?
+            .into_inner();
+        if balance.available_balance >= min_available {
+            return Ok(balance);
+        }
+        if last_report.elapsed() >= Duration::from_secs(30) {
+            println!(
+                "mode1 console wallet balance wait: available={} pending_in={} pending_out={} required={}",
+                balance.available_balance,
+                balance.pending_incoming_balance,
+                balance.pending_outgoing_balance,
+                min_available
+            );
+            last_report = Instant::now();
+        }
+        if start.elapsed() > timeout {
+            bail!(
+                "console wallet did not reach required available balance {} within {:?}; available={} pending_in={} pending_out={}",
+                min_available,
+                timeout,
+                balance.available_balance,
+                balance.pending_incoming_balance,
+                balance.pending_outgoing_balance
+            );
+        }
+    }
+}
+
+fn record_mode1_s0(
+    config: &Config,
+    profile: &mut ResultProfile,
+    context: &Mode1ConsoleContext,
+    wall_ms: u128,
+) {
+    let Some(mode) = profile.modes.get_mut("old_wallet") else {
+        return;
+    };
+    let Some(cell) = mode.scenarios.get_mut("S0") else {
+        return;
+    };
+    let balance = context.balance.as_ref();
+    cell.record_repetition(Repetition {
+        run: 1,
+        status: CellStatus::Ok,
+        wall_ms: Some(wall_ms),
+        success_count: 1,
+        failure_count: 0,
+        fee_microtari: None,
+        error: None,
+    });
+    cell.notes.push(format!(
+        "Mode 1 topology started real minotari_console_wallet gRPC version {}; grpc_address={} grpc_bind={} base_path={} birthday={} balance_available={} pending_in={} pending_out={}",
+        context.version.as_deref().unwrap_or("unknown"),
+        config.modes.old_wallet_grpc_address,
+        context.grpc_bind,
+        old_wallet_base_path(config).display(),
+        context.birthday,
+        balance.map(|b| b.available_balance).unwrap_or_default(),
+        balance.map(|b| b.pending_incoming_balance).unwrap_or_default(),
+        balance.map(|b| b.pending_outgoing_balance).unwrap_or_default()
+    ));
+    if let Some(funding) = &config.funding.old_wallet {
+        cell.notes.push(format!(
+            "funding tx_id={} height={} amount={}",
+            funding.tx_id, funding.height, funding.amount
+        ));
+    }
+}
+
+fn record_mode1_startup_failure(profile: &mut ResultProfile, wall_ms: u128, error: anyhow::Error) {
+    let Some(mode) = profile.modes.get_mut("old_wallet") else {
+        return;
+    };
+    for scenario in [
+        ScenarioName::S0,
+        ScenarioName::S1,
+        ScenarioName::S4,
+        ScenarioName::S5,
+    ] {
+        let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
+            continue;
+        };
+        cell.record_repetition(Repetition {
+            run: 1,
+            status: CellStatus::Failed,
+            wall_ms: Some(wall_ms),
+            success_count: 0,
+            failure_count: 1,
+            fee_microtari: None,
+            error: Some(format!("{error:#}")),
+        });
+        cell.notes
+            .push("Mode 1 console-wallet startup failed before scenario dispatch".to_string());
+    }
+}
+
+async fn run_mode1_send_cells(
+    config: &Config,
+    profile: &mut ResultProfile,
+    recipient: String,
+    context: &mut Mode1ConsoleContext,
+) -> anyhow::Result<()> {
+    let amount = parse_amount(&config.benchmark.mode1_scenario_amount)?;
+    let fee_rate = config.fee_rate()?.0;
+    let s1_attempts = capped_attempts(
+        config
+            .benchmark
+            .doubling_rounds
+            .saturating_mul(config.benchmark.fanout_outputs_per_tx)
+            .min(config.benchmark.volume_target),
+        config.benchmark.mode1_live_max_s1_txs,
+    );
+    let s1 = run_mode1_transfers_sequential(
+        "old_wallet/S1",
+        &mut context.client,
+        ScenarioName::S1,
+        s1_attempts,
+        1,
+        false,
+        &recipient,
+        amount,
+        fee_rate,
+    )
+    .await;
+    record_mode1_transfer_summary(
+        profile,
+        ScenarioName::S1,
+        &s1,
+        vec![format!(
+            "Mode 1 S1 drove console-wallet gRPC Transfer; attempted_batches={} payments_per_batch=1 amount={} cap={}",
+            s1.attempted_batches,
+            config.benchmark.mode1_scenario_amount,
+            config.benchmark.mode1_live_max_s1_txs
+        )],
+    );
+
+    let s4 = run_mode1_s4_batches(config, &context.client, &recipient, amount, fee_rate).await;
+    record_mode1_transfer_summary(
+        profile,
+        ScenarioName::S4,
+        &s4,
+        vec![format!(
+            "Mode 1 S4 dispatched configured concurrent_batches={:?} through console-wallet gRPC Transfer; per-batch cap={}",
+            config.benchmark.concurrent_batches, config.benchmark.mode1_live_max_s4_batch
+        )],
+    );
+
+    let s5_items = capped_attempts(
+        config.benchmark.s5_m,
+        config.benchmark.mode1_live_max_s5_items,
+    );
+    let s5 = run_mode1_transfers_sequential(
+        "old_wallet/S5",
+        &mut context.client,
+        ScenarioName::S5,
+        1,
+        s5_items,
+        true,
+        &recipient,
+        amount,
+        fee_rate,
+    )
+    .await;
+    record_mode1_transfer_summary(
+        profile,
+        ScenarioName::S5,
+        &s5,
+        vec![format!(
+            "Mode 1 S5 used one console-wallet gRPC Transfer request with single_tx=true and items={} of configured S5_M={} and S5_K={}; cap={}",
+            s5_items,
+            config.benchmark.s5_m,
+            config.benchmark.s5_k,
+            config.benchmark.mode1_live_max_s5_items
+        )],
+    );
+    Ok(())
+}
+
+async fn run_mode1_s4_batches(
+    config: &Config,
+    client: &WalletGrpcClient<tonic::transport::Channel>,
+    recipient: &str,
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> Mode1TransferSummary {
+    let mut total = Mode1TransferSummary::default();
+    let start = Instant::now();
+    for configured_batch in &config.benchmark.concurrent_batches {
+        let attempts = capped_attempts(*configured_batch, config.benchmark.mode1_live_max_s4_batch);
+        let batch = run_mode1_transfers_concurrent(
+            &format!("old_wallet/S4 batch {configured_batch}"),
+            client,
+            ScenarioName::S4,
+            attempts,
+            1,
+            false,
+            recipient,
+            amount,
+            fee_rate,
+        )
+        .await;
+        total.add_batch(*configured_batch, batch);
+    }
+    total.wall_ms = start.elapsed().as_millis();
+    total
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_mode1_transfers_sequential(
+    label: &str,
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    scenario: ScenarioName,
+    batch_count: u32,
+    items_per_batch: u32,
+    single_tx: bool,
+    recipient: &str,
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> Mode1TransferSummary {
+    let mut summary = Mode1TransferSummary {
+        attempted_batches: batch_count,
+        attempted_payments: batch_count.saturating_mul(items_per_batch),
+        ..Mode1TransferSummary::default()
+    };
+    let start = Instant::now();
+    for batch_index in 1..=batch_count {
+        println!("{label} batch {batch_index}/{batch_count} dispatching");
+        let result = submit_mode1_transfer(
+            client,
+            scenario,
+            batch_index,
+            items_per_batch,
+            single_tx,
+            recipient,
+            amount,
+            fee_rate,
+        )
+        .await;
+        summary.record_batch(batch_index, items_per_batch, result);
+    }
+    summary.wall_ms = start.elapsed().as_millis();
+    summary
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_mode1_transfers_concurrent(
+    label: &str,
+    client: &WalletGrpcClient<tonic::transport::Channel>,
+    scenario: ScenarioName,
+    batch_count: u32,
+    items_per_batch: u32,
+    single_tx: bool,
+    recipient: &str,
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> Mode1TransferSummary {
+    let mut summary = Mode1TransferSummary {
+        attempted_batches: batch_count,
+        attempted_payments: batch_count.saturating_mul(items_per_batch),
+        ..Mode1TransferSummary::default()
+    };
+    let start = Instant::now();
+    let mut join_set = JoinSet::new();
+    for batch_index in 1..=batch_count {
+        println!("{label} batch {batch_index}/{batch_count} dispatching");
+        let mut client = client.clone();
+        let recipient = recipient.to_string();
+        join_set.spawn(async move {
+            (
+                batch_index,
+                submit_mode1_transfer(
+                    &mut client,
+                    scenario,
+                    batch_index,
+                    items_per_batch,
+                    single_tx,
+                    &recipient,
+                    amount,
+                    fee_rate,
+                )
+                .await,
+            )
+        });
+    }
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok((batch_index, transfer)) => {
+                summary.record_batch(batch_index, items_per_batch, transfer)
+            }
+            Err(error) => summary.record_join_error(error.to_string()),
+        }
+    }
+    summary.wall_ms = start.elapsed().as_millis();
+    summary
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submit_mode1_transfer(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    scenario: ScenarioName,
+    batch_index: u32,
+    items_per_batch: u32,
+    single_tx: bool,
+    recipient: &str,
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> anyhow::Result<Mode1TransferOutcome> {
+    let recipients = (1..=items_per_batch)
+        .map(|item_index| grpc::PaymentRecipient {
+            address: recipient.to_string(),
+            amount: amount.0,
+            fee_per_gram: fee_rate,
+            payment_type: 1,
+            raw_payment_id: format!(
+                "wallet-bench-{}-{batch_index}-{item_index}",
+                scenario.as_str()
+            )
+            .into_bytes(),
+            user_payment_id: None,
+        })
+        .collect::<Vec<_>>();
+    let response = client
+        .transfer(grpc::TransferRequest {
+            recipients,
+            single_tx,
+        })
+        .await?
+        .into_inner();
+    Ok(Mode1TransferOutcome::from_response(response))
+}
+
+fn record_mode1_transfer_summary(
+    profile: &mut ResultProfile,
+    scenario: ScenarioName,
+    summary: &Mode1TransferSummary,
+    mut notes: Vec<String>,
+) {
+    let Some(mode) = profile.modes.get_mut("old_wallet") else {
+        return;
+    };
+    let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
+        return;
+    };
+    let status = if summary.failure_count == 0 {
+        CellStatus::Ok
+    } else {
+        CellStatus::Failed
+    };
+    cell.record_repetition(Repetition {
+        run: 1,
+        status,
+        wall_ms: Some(summary.wall_ms),
+        success_count: summary.success_count,
+        failure_count: summary.failure_count,
+        fee_microtari: Some(summary.fee_microtari),
+        error: summary.error_note(),
+    });
+    notes.push(summary.note(scenario));
+    cell.notes.extend(notes);
 }
 
 async fn annotate_mode2_send_smoke(
@@ -1281,6 +1859,65 @@ struct BatchSendSummary {
     wall_ms: u128,
 }
 
+struct Mode1ConsoleContext {
+    process: Mode1ConsoleProcess,
+    client: WalletGrpcClient<tonic::transport::Channel>,
+    balance: Option<grpc::GetBalanceResponse>,
+    birthday: u16,
+    grpc_bind: String,
+    version: Option<String>,
+}
+
+struct Mode1ConsoleProcess {
+    child: tokio::process::Child,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+}
+
+impl Mode1ConsoleProcess {
+    fn try_wait(&mut self) -> anyhow::Result<Option<std::process::ExitStatus>> {
+        self.child
+            .try_wait()
+            .context("checking minotari_console_wallet process status")
+    }
+}
+
+impl Drop for Mode1ConsoleProcess {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
+#[derive(Default)]
+struct Mode1TransferSummary {
+    attempted_batches: u32,
+    attempted_payments: u32,
+    success_count: u32,
+    failure_count: u32,
+    wall_ms: u128,
+    fee_microtari: u64,
+    tx_ids: Vec<String>,
+    errors: Vec<String>,
+    batch_summaries: Vec<Mode1BatchSummary>,
+}
+
+struct Mode1BatchSummary {
+    configured_batch: u32,
+    attempted_batches: u32,
+    attempted_payments: u32,
+    success_count: u32,
+    failure_count: u32,
+    wall_ms: u128,
+}
+
+struct Mode1TransferOutcome {
+    success_count: u32,
+    failure_count: u32,
+    fee_microtari: u64,
+    tx_ids: Vec<String>,
+    errors: Vec<String>,
+}
+
 struct Mode3TopologyContext {
     _payment_receiver: payment_processor::ManagedProcess,
     _payment_processor: payment_processor::ManagedProcess,
@@ -1491,6 +2128,138 @@ fn pp_snapshot_has_progress_or_error(snapshot: &PaymentProcessorDbSnapshot) -> b
             ) || batch.has_signed_tx
                 || batch.retry_count > 0
         })
+}
+
+impl Mode1TransferOutcome {
+    fn from_response(response: grpc::TransferResponse) -> Self {
+        let mut outcome = Self {
+            success_count: 0,
+            failure_count: 0,
+            fee_microtari: 0,
+            tx_ids: Vec::new(),
+            errors: Vec::new(),
+        };
+        for result in response.results {
+            if result.is_success {
+                outcome.success_count += 1;
+                outcome.tx_ids.push(result.transaction_id.to_string());
+                if let Some(info) = result.transaction_info {
+                    outcome.fee_microtari = outcome.fee_microtari.saturating_add(info.fee);
+                }
+            } else {
+                outcome.failure_count += 1;
+                outcome.errors.push(format!(
+                    "address={} failure={}",
+                    result.address, result.failure_message
+                ));
+            }
+        }
+        outcome
+    }
+}
+
+impl Mode1TransferSummary {
+    fn record_batch(
+        &mut self,
+        batch_index: u32,
+        items_per_batch: u32,
+        result: anyhow::Result<Mode1TransferOutcome>,
+    ) {
+        match result {
+            Ok(outcome) => {
+                println!(
+                    "mode1 gRPC batch {batch_index} completed: successes={} failures={} tx_ids={}",
+                    outcome.success_count,
+                    outcome.failure_count,
+                    limited_list(&outcome.tx_ids)
+                );
+                self.success_count = self.success_count.saturating_add(outcome.success_count);
+                self.failure_count = self.failure_count.saturating_add(outcome.failure_count);
+                self.fee_microtari = self.fee_microtari.saturating_add(outcome.fee_microtari);
+                self.tx_ids.extend(outcome.tx_ids);
+                self.errors.extend(outcome.errors);
+            }
+            Err(error) => {
+                println!("mode1 gRPC batch {batch_index} failed: {error:#}");
+                self.failure_count = self.failure_count.saturating_add(items_per_batch);
+                self.errors.push(format!("{error:#}"));
+            }
+        }
+    }
+
+    fn record_join_error(&mut self, error: String) {
+        println!("mode1 concurrent gRPC transfer task failed: {error}");
+        self.failure_count += 1;
+        self.errors.push(format!("task join error: {error}"));
+    }
+
+    fn add_batch(&mut self, configured_batch: u32, batch: Self) {
+        self.attempted_batches = self
+            .attempted_batches
+            .saturating_add(batch.attempted_batches);
+        self.attempted_payments = self
+            .attempted_payments
+            .saturating_add(batch.attempted_payments);
+        self.success_count = self.success_count.saturating_add(batch.success_count);
+        self.failure_count = self.failure_count.saturating_add(batch.failure_count);
+        self.fee_microtari = self.fee_microtari.saturating_add(batch.fee_microtari);
+        self.tx_ids.extend(batch.tx_ids);
+        self.errors.extend(batch.errors);
+        self.batch_summaries.push(Mode1BatchSummary {
+            configured_batch,
+            attempted_batches: batch.attempted_batches,
+            attempted_payments: batch.attempted_payments,
+            success_count: batch.success_count,
+            failure_count: batch.failure_count,
+            wall_ms: batch.wall_ms,
+        });
+    }
+
+    fn note(&self, scenario: ScenarioName) -> String {
+        let mut parts = vec![
+            format!(
+                "{} console gRPC summary: attempted_batches={} attempted_payments={} successes={} failures={} wall_ms={} fee_microtari={}",
+                scenario.as_str(),
+                self.attempted_batches,
+                self.attempted_payments,
+                self.success_count,
+                self.failure_count,
+                self.wall_ms,
+                self.fee_microtari
+            ),
+            format!("tx_ids={}", limited_list(&self.tx_ids)),
+        ];
+        if !self.errors.is_empty() {
+            parts.push(format!("errors={}", limited_list(&self.errors)));
+        }
+        if !self.batch_summaries.is_empty() {
+            let batches = self
+                .batch_summaries
+                .iter()
+                .map(|batch| {
+                    format!(
+                        "configured_batch:{} attempted_batches:{} attempted_payments:{} successes:{} failures:{} wall_ms:{}",
+                        batch.configured_batch,
+                        batch.attempted_batches,
+                        batch.attempted_payments,
+                        batch.success_count,
+                        batch.failure_count,
+                        batch.wall_ms
+                    )
+                })
+                .collect::<Vec<_>>();
+            parts.push(format!("batches={}", batches.join("; ")));
+        }
+        parts.join("; ")
+    }
+
+    fn error_note(&self) -> Option<String> {
+        if self.failure_count == 0 {
+            None
+        } else {
+            Some(limited_list(&self.errors))
+        }
+    }
 }
 
 impl ScenarioSendSummary {

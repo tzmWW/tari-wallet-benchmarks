@@ -47,6 +47,16 @@ pub struct BenchmarkConfig {
     #[serde(default = "default_scan_batch_size")]
     pub scan_batch_size: u64,
     #[serde(default)]
+    pub mode1_live_topology: bool,
+    #[serde(default = "default_mode1_scenario_amount")]
+    pub mode1_scenario_amount: String,
+    #[serde(default)]
+    pub mode1_live_max_s1_txs: u32,
+    #[serde(default)]
+    pub mode1_live_max_s4_batch: u32,
+    #[serde(default)]
+    pub mode1_live_max_s5_items: u32,
+    #[serde(default)]
     pub live_fresh_scan_cells: bool,
     #[serde(default)]
     pub mode2_send_smoke: bool,
@@ -170,6 +180,8 @@ impl Config {
                 "benchmark.mode2_send_smoke and benchmark.mode2_live_scenarios are mutually exclusive"
             );
         }
+        parse_amount(&self.benchmark.mode1_scenario_amount)
+            .context("benchmark.mode1_scenario_amount")?;
         parse_amount(&self.benchmark.mode2_send_smoke_amount)
             .context("benchmark.mode2_send_smoke_amount")?;
         parse_amount(&self.benchmark.mode2_scenario_amount)
@@ -245,6 +257,26 @@ impl Config {
             (
                 "scan_batch_size".to_string(),
                 serde_json::json!(self.benchmark.scan_batch_size),
+            ),
+            (
+                "mode1_live_topology".to_string(),
+                serde_json::json!(self.benchmark.mode1_live_topology),
+            ),
+            (
+                "mode1_scenario_amount".to_string(),
+                serde_json::json!(self.benchmark.mode1_scenario_amount),
+            ),
+            (
+                "mode1_live_max_s1_txs".to_string(),
+                serde_json::json!(self.benchmark.mode1_live_max_s1_txs),
+            ),
+            (
+                "mode1_live_max_s4_batch".to_string(),
+                serde_json::json!(self.benchmark.mode1_live_max_s4_batch),
+            ),
+            (
+                "mode1_live_max_s5_items".to_string(),
+                serde_json::json!(self.benchmark.mode1_live_max_s5_items),
             ),
             (
                 "live_fresh_scan_cells".to_string(),
@@ -330,6 +362,11 @@ impl Default for Config {
                 fee_rate: "5 uT".to_string(),
                 repetitions: 3,
                 scan_batch_size: default_scan_batch_size(),
+                mode1_live_topology: false,
+                mode1_scenario_amount: default_mode1_scenario_amount(),
+                mode1_live_max_s1_txs: 0,
+                mode1_live_max_s4_batch: 0,
+                mode1_live_max_s5_items: 0,
                 live_fresh_scan_cells: false,
                 mode2_send_smoke: false,
                 mode2_send_smoke_amount: default_mode2_send_smoke_amount(),
@@ -379,6 +416,10 @@ impl Default for Config {
 
 fn default_scan_batch_size() -> u64 {
     1_000
+}
+
+fn default_mode1_scenario_amount() -> String {
+    "1 T".to_string()
 }
 
 fn default_mode2_send_smoke_amount() -> String {
@@ -488,6 +529,14 @@ mod tests {
         cfg.benchmark.mode2_send_smoke_amount = "not money".to_string();
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("mode2_send_smoke_amount"));
+    }
+
+    #[test]
+    fn mode1_live_scenario_amount_must_parse() {
+        let mut cfg = Config::default();
+        cfg.benchmark.mode1_scenario_amount = "not money".to_string();
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("mode1_scenario_amount"));
     }
 
     #[test]

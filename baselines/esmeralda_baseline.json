@@ -68,7 +68,12 @@
     "mode3_worker_sleep_secs": 1,
     "repetitions": 3,
     "scan_batch_size": 1000,
-    "volume_target": 512
+    "volume_target": 512,
+    "mode1_live_topology": true,
+    "mode1_scenario_amount": "1 T",
+    "mode1_live_max_s1_txs": 1,
+    "mode1_live_max_s4_batch": 1,
+    "mode1_live_max_s5_items": 2
   },
   "funding": {
     "new_wallet": {
@@ -217,20 +222,46 @@
         "S0": {
           "scenario": "s0",
           "surface": "console_wallet_grpc",
-          "status": "ready_for_live_run",
-          "repetitions": [],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
-          "notes": []
+          "status": "ok",
+          "repetitions": [
+            {
+              "run": 1,
+              "status": "ok",
+              "wall_ms": 22663,
+              "success_count": 1,
+              "failure_count": 0,
+              "fee_microtari": null,
+              "error": null
+            }
+          ],
+          "median_wall_ms": 22663,
+          "spread_wall_ms": 0,
+          "notes": [
+            "Mode 1 topology started real minotari_console_wallet gRPC version 5.3.0-pre.3; grpc_address=http://127.0.0.1:18143 grpc_bind=/ip4/127.0.0.1/tcp/18143 base_path=.bench-data/old-wallet-console birthday=1635 balance_available=50003000000 pending_in=0 pending_out=0",
+            "funding tx_id=11463237927696771510 height=707731 amount=50000 T"
+          ]
         },
         "S1": {
           "scenario": "s1",
           "surface": "console_wallet_grpc",
-          "status": "ready_for_live_run",
-          "repetitions": [],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
-          "notes": []
+          "status": "ok",
+          "repetitions": [
+            {
+              "run": 1,
+              "status": "ok",
+              "wall_ms": 41,
+              "success_count": 1,
+              "failure_count": 0,
+              "fee_microtari": 660,
+              "error": null
+            }
+          ],
+          "median_wall_ms": 41,
+          "spread_wall_ms": 0,
+          "notes": [
+            "Mode 1 S1 drove console-wallet gRPC Transfer; attempted_batches=1 payments_per_batch=1 amount=1 T cap=1",
+            "S1 console gRPC summary: attempted_batches=1 attempted_payments=1 successes=1 failures=0 wall_ms=41 fee_microtari=660; tx_ids=[6866732622268686463]"
+          ]
         },
         "S2": {
           "scenario": "s2",
@@ -253,20 +284,46 @@
         "S4": {
           "scenario": "s4",
           "surface": "console_wallet_grpc",
-          "status": "ready_for_live_run",
-          "repetitions": [],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
-          "notes": []
+          "status": "ok",
+          "repetitions": [
+            {
+              "run": 1,
+              "status": "ok",
+              "wall_ms": 27,
+              "success_count": 1,
+              "failure_count": 0,
+              "fee_microtari": 700,
+              "error": null
+            }
+          ],
+          "median_wall_ms": 27,
+          "spread_wall_ms": 0,
+          "notes": [
+            "Mode 1 S4 dispatched configured concurrent_batches=[1] through console-wallet gRPC Transfer; per-batch cap=1",
+            "S4 console gRPC summary: attempted_batches=1 attempted_payments=1 successes=1 failures=0 wall_ms=27 fee_microtari=700; tx_ids=[3905119411675345783]; batches=configured_batch:1 attempted_batches:1 attempted_payments:1 successes:1 failures:0 wall_ms:27"
+          ]
         },
         "S5": {
           "scenario": "s5",
           "surface": "console_wallet_grpc",
-          "status": "ready_for_live_run",
-          "repetitions": [],
+          "status": "failed",
+          "repetitions": [
+            {
+              "run": 1,
+              "status": "failed",
+              "wall_ms": 1,
+              "success_count": 0,
+              "failure_count": 2,
+              "fee_microtari": 0,
+              "error": "[status: Internal, message: \"Failed to send transaction: Output manager error: `Funds are still pending. Unable to fulfil transaction right now.`\", details: [], metadata: MetadataMap { headers: {\"content-type\": \"application/grpc\", \"date\": \"Wed, 24 Jun 2026 01:27:33 GMT\"} }]"
+            }
+          ],
           "median_wall_ms": null,
           "spread_wall_ms": null,
-          "notes": []
+          "notes": [
+            "Mode 1 S5 used one console-wallet gRPC Transfer request with single_tx=true and items=2 of configured S5_M=100 and S5_K=10; cap=2",
+            "S5 console gRPC summary: attempted_batches=1 attempted_payments=2 successes=0 failures=2 wall_ms=1 fee_microtari=0; tx_ids=[]; errors=[status: Internal, message: \"Failed to send transaction: Output manager error: `Funds are still pending. Unable to fulfil transaction right now.`\", details: [], metadata: MetadataMap { headers: {\"content-type\": \"application/grpc\", \"date\": \"Wed, 24 Jun 2026 01:27:33 GMT\"} }]"
+          ]
         },
         "S6": {
           "scenario": "s6",
@@ -457,6 +514,12 @@
       "title": "Mempool acceptance is not benchmark success",
       "status": "schema_requires_chain_verification",
       "recommendation": "Verify claimed successful transactions with status value 6 before publishing throughput."
+    },
+    {
+      "id": "console-wallet-birthday-mnemonic",
+      "title": "Mode 1 recovery must encode birthday in seed words",
+      "status": "implemented_in_topology",
+      "recommendation": "minotari_console_wallet seed recovery reads the birthday from the mnemonic; the harness rewrites only the mnemonic birthday so the real wallet scans the funded Esmeralda window without changing keys or addresses."
     }
   ],
   "chain_verification": {

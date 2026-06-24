@@ -7,7 +7,7 @@ repository = "https://github.com/tzmWW/tari-wallet-benchmarks"
 
 [features]
 default = []
-live-minotari = ["dep:minotari"]
+live-minotari = ["dep:minotari", "dep:minotari_wallet_grpc_client", "dep:tonic"]
 
 [dependencies]
 anyhow = "1.0.100"
@@ -29,9 +29,11 @@ tari_utilities = { version = "0.10", features = ["std"] }
 tempfile = "3.23.0"
 tokio = { version = "1.47.1", features = ["full"] }
 toml = "0.9.8"
+tonic = { version = "0.13.1", default-features = false, features = ["transport"], optional = true }
 url = "2.5.7"
 
 minotari = { git = "https://github.com/tari-project/minotari-cli", rev = "360c4848a54d65fd710266233cc9277b0f785e74", package = "minotari", optional = true }
+minotari_wallet_grpc_client = { version = "=5.3.1-pre.0", optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.0.17"

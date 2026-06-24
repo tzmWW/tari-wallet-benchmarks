@@ -151,6 +151,20 @@ pub fn seed_from_words_with_birthday(words: &str, birthday: u16) -> anyhow::Resu
     Ok(seed)
 }
 
+pub fn seed_words_with_birthday(words: &str, birthday: u16) -> anyhow::Result<String> {
+    let seed = seed_from_words_with_birthday(words, birthday)?;
+    seed_words_from_seed(&seed)
+}
+
+pub fn seed_words_from_seed(seed: &CipherSeed) -> anyhow::Result<String> {
+    Ok(seed
+        .to_mnemonic(MnemonicLanguage::English, None)
+        .map_err(|e| anyhow::anyhow!("seed to mnemonic failed: {e}"))?
+        .join(" ")
+        .reveal()
+        .to_string())
+}
+
 pub fn current_birthday() -> u16 {
     let birthday_genesis = UNIX_EPOCH + Duration::from_secs(BIRTHDAY_GENESIS_FROM_UNIX_EPOCH);
     let Ok(age) = SystemTime::now().duration_since(birthday_genesis) else {
@@ -165,12 +179,7 @@ pub fn material_from_seed(
     seed: CipherSeed,
 ) -> anyhow::Result<SeedMaterial> {
     let birthday = seed.birthday();
-    let seed_words = seed
-        .to_mnemonic(MnemonicLanguage::English, None)
-        .map_err(|e| anyhow::anyhow!("seed to mnemonic failed: {e}"))?
-        .join(" ")
-        .reveal()
-        .to_string();
+    let seed_words = seed_words_from_seed(&seed)?;
     let wallet = WalletType::SeedWords(
         SeedWordsWallet::construct_new(seed).map_err(|e| anyhow::anyhow!("{e}"))?,
     );
@@ -238,5 +247,31 @@ mod tests {
 
         assert_eq!(changed.birthday, 0);
         assert_eq!(changed.address, original.address);
+    }
+
+    #[test]
+    fn seed_words_with_changed_birthday_preserve_address() {
+        let seed = CipherSeed::random();
+        let original =
+            material_from_seed(WalletRole::OldWallet, "HARNESS_SEED_OLD".to_string(), seed)
+                .unwrap();
+        let rewritten_words = seed_words_with_birthday(&original.seed_words, 0).unwrap();
+        let rewritten = material_from_seed(
+            WalletRole::OldWallet,
+            "HARNESS_SEED_OLD".to_string(),
+            seed_from_words(&rewritten_words).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(rewritten.birthday, 0);
+        assert_eq!(rewritten.address, original.address);
+        assert_eq!(
+            rewritten.private_view_key_hex,
+            original.private_view_key_hex
+        );
+        assert_eq!(
+            rewritten.public_spend_key_hex,
+            original.public_spend_key_hex
+        );
     }
 }
