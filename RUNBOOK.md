@@ -135,6 +135,16 @@ rewrites only the mnemonic birthday before launch. This preserves the address an
 keys while avoiding an accidental genesis scan for freshly funded Esmeralda
 benchmark wallets.
 
+Do not treat deleting `.bench-data/old-wallet-console` as a harmless reset after
+that seed has already made live sends. In a 2026-06-24 proof, fresh recovery of a
+previously spent old-wallet seed imported historical matching outputs but did not
+fully restore their spent state before the next `CoinSplit`; the wallet selected
+the original funding output, and the base node rejected the tx as `AlreadyMined`.
+For iterative proofs, keep a wallet DB that has validated through the latest live
+sends, or fund a fresh seed. If a proof is interrupted after such a false spend,
+restart once from the same DB so validation can mark the stale output spent before
+the next benchmark send.
+
 Mode 1 S1 follows the spec round shape: six doubling rounds and one fan-out
 round, capped only by `mode1_live_max_s1_txs` for development runs. Between
 planned spend rounds the harness waits for chain/scanner height advancement;

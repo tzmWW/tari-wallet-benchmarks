@@ -1195,6 +1195,7 @@ async fn wait_for_mode1_summary_verification(
         interval.tick().await;
     }
     summary.tx_infos.extend(latest);
+    summary.backfill_verified_fee_total();
 }
 
 fn verify_mode2_transactions_from_db(
@@ -2932,6 +2933,18 @@ impl Mode1TransferOutcome {
 }
 
 impl Mode1TransferSummary {
+    fn backfill_verified_fee_total(&mut self) {
+        let verified_fee_total = self
+            .tx_infos
+            .iter()
+            .filter(|tx| tx.confirmed)
+            .filter_map(|tx| tx.fee_microtari)
+            .fold(0u64, u64::saturating_add);
+        if verified_fee_total > self.fee_microtari {
+            self.fee_microtari = verified_fee_total;
+        }
+    }
+
     fn record_batch(
         &mut self,
         batch_index: u32,
@@ -3544,6 +3557,50 @@ mod tests {
             "plain network timeout".to_string(),
         ];
         assert_eq!(double_selection_rejections(&errors), 2);
+    }
+
+    #[test]
+    fn mode1_summary_backfills_missing_verified_fee_total() {
+        let mut summary = Mode1TransferSummary {
+            fee_microtari: 0,
+            tx_infos: vec![VerifiedTransaction {
+                tx_id: "tx".to_string(),
+                status_value: TX_MINED_CONFIRMED_STATUS,
+                mode: "old_wallet".to_string(),
+                scenario: ScenarioName::S1.as_str().to_string(),
+                amount_microtari: Some(2_000_000),
+                fee_microtari: Some(945),
+                mined_height: Some(710_357),
+                confirmed: true,
+            }],
+            ..Mode1TransferSummary::default()
+        };
+
+        summary.backfill_verified_fee_total();
+
+        assert_eq!(summary.fee_microtari, 945);
+    }
+
+    #[test]
+    fn mode1_summary_keeps_larger_response_fee_total() {
+        let mut summary = Mode1TransferSummary {
+            fee_microtari: 1_000,
+            tx_infos: vec![VerifiedTransaction {
+                tx_id: "tx".to_string(),
+                status_value: TX_MINED_CONFIRMED_STATUS,
+                mode: "old_wallet".to_string(),
+                scenario: ScenarioName::S4.as_str().to_string(),
+                amount_microtari: Some(1_000_000),
+                fee_microtari: Some(945),
+                mined_height: Some(710_357),
+                confirmed: true,
+            }],
+            ..Mode1TransferSummary::default()
+        };
+
+        summary.backfill_verified_fee_total();
+
+        assert_eq!(summary.fee_microtari, 1_000);
     }
 
     #[test]
