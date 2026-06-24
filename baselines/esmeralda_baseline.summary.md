@@ -13,6 +13,9 @@ false`, and Mode 1/2/3 live topologies were enabled with low safety caps.
 - Mode 2 surface: pinned `minotari` crate APIs.
 - Mode 3 surface: real `minotari_payment_processor` plus companion minotari
   wallet.
+- Environment metadata now records OS/CPU/memory, disk type/name, and base-node
+  network path. This baseline was captured on `macOS 26.5.1`, Apple M1 Pro,
+  SSD, with remote base node `rpc.esmeralda.tari.com`.
 - Seed phrases and wallet passwords are excluded from result profiles.
 
 Current checked-in live evidence:
@@ -58,6 +61,9 @@ REVIEW_v3 status:
 - Fixed after the review: Mode 2 S1 multi-recipient round shape, Mode 2
   settlement gates, Mode 1 verified fee backfill, Mode 3 S1 PP batch shape,
   confirmed-only top-level verification rows, and PP scan-cell ambiguity.
+- Fixed after REVIEW_v4: environment capture includes disk/network-path fields,
+  direct `time::sleep(...)` alias calls are covered by ast-grep, and Mode 2 DB
+  status mapping is extracted/tested against the pinned minotari status strings.
 - Still not claimed as complete: three-repetition statistical evidence and the
   full fresh-scan matrix. The profile is intentionally labeled as capped proof
   evidence.

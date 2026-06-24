@@ -283,6 +283,16 @@ pub fn write_schema(path: &PathBuf) -> anyhow::Result<()> {
             "fee_microtari",
             "mined_height",
             "confirmed"
+        ],
+        "environment_fields": [
+            "os",
+            "cpu_brand",
+            "physical_cores",
+            "total_memory_bytes",
+            "disk_kind",
+            "disk_name",
+            "base_node_host",
+            "base_node_network_path"
         ]
     });
     fs::write(path, serde_json::to_string_pretty(&schema)? + "\n")?;

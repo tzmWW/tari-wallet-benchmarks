@@ -6,7 +6,11 @@
     "os": "macOS 26.5.1",
     "cpu_brand": "Apple M1 Pro",
     "physical_cores": 8,
-    "total_memory_bytes": 17179869184
+    "total_memory_bytes": 17179869184,
+    "disk_kind": "SSD",
+    "disk_name": "Macintosh HD",
+    "base_node_host": "rpc.esmeralda.tari.com",
+    "base_node_network_path": "remote"
   },
   "versions": {
     "harness_minotari_cli_pin": "360c4848a54d65fd710266233cc9277b0f785e74",

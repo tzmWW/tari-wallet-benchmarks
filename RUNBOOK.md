@@ -211,7 +211,8 @@ scenario cells, findings, and chain-verification status value. Schema v3 adds
 per-repetition `metrics` for scenario-specific values such as S1 round details,
 S4 serialization gaps, S5 recipient shape, observed-but-unconfirmed DB rows, and
 confirmed chain-verification rows with amount/fee/mined-height fields when the
-wallet surface exposes them.
+wallet surface exposes them. Environment capture includes OS, CPU, memory, disk
+kind/name, base-node host, and whether the base-node path is local or remote.
 
 ## Verification Gates
 

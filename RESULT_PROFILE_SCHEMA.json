@@ -7,6 +7,16 @@
     "blocked_upstream",
     "not_applicable"
   ],
+  "environment_fields": [
+    "os",
+    "cpu_brand",
+    "physical_cores",
+    "total_memory_bytes",
+    "disk_kind",
+    "disk_name",
+    "base_node_host",
+    "base_node_network_path"
+  ],
   "repetition_optional_metrics": "scenario-specific structured metrics",
   "required_top_level_keys": [
     "schema_version",

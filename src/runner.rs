@@ -73,7 +73,10 @@ pub async fn run_profile(config: &Config, profile_path: &Path) -> anyhow::Result
     }
     require_env(&config.seeds.wallet_password_env)?;
 
-    let mut profile = ResultProfile::new(config, env_capture::capture());
+    let mut profile = ResultProfile::new(
+        config,
+        env_capture::capture_for_base_node(&config.network.base_node_http_url),
+    );
     for mode in ModeName::ALL {
         let address = match mode {
             ModeName::OldWallet => book.addresses.get(WalletRole::OldWallet.label()),

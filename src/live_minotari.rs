@@ -797,8 +797,8 @@ async fn run_mode1_s5(
         config.timeout(config.timeouts.confirmation_secs),
     )
     .await;
-    // Cool down between the two S5 arms so wallet state can settle; dispatch inside each arm stays immediate.
-    time::sleep(Duration::from_secs(config.benchmark.settle_cooldown_secs)).await;
+    // Settle gate between the two S5 arms; dispatch inside each arm stays immediate.
+    settle_gate_pause(Duration::from_secs(config.benchmark.settle_cooldown_secs)).await;
     let individual_recipients = selected
         .into_iter()
         .map(|recipient| vec![recipient])
@@ -1247,13 +1247,7 @@ fn verify_mode2_transactions_from_db(
             Ok(row) => row,
             Err(_) => ("not_found".to_string(), None, None),
         };
-        let (status_value, confirmed) = match status.as_str() {
-            "mined_confirmed" => (TX_MINED_CONFIRMED_STATUS, true),
-            "mined_unconfirmed" => (2, false),
-            "broadcast" => (1, false),
-            "rejected" => (7, false),
-            _ => (0, false),
-        };
+        let (status_value, confirmed) = mode2_completed_transaction_status(status.as_str());
         verified.push(VerifiedTransaction {
             tx_id: tx_id.clone(),
             status_value,
@@ -1268,6 +1262,18 @@ fn verify_mode2_transactions_from_db(
         });
     }
     Ok(verified)
+}
+
+fn mode2_completed_transaction_status(status: &str) -> (u32, bool) {
+    match status {
+        "mined_confirmed" => (TX_MINED_CONFIRMED_STATUS, true),
+        "mined_unconfirmed" => (2, false),
+        "broadcast" => (1, false),
+        "completed" => (0, false),
+        "rejected" => (7, false),
+        "canceled" => (14, false),
+        _ => (0, false),
+    }
 }
 
 fn record_mode1_transfer_summary(
@@ -1571,9 +1577,13 @@ async fn wait_for_mode2_scan_advance(
         let remaining = timeout.saturating_sub(start.elapsed());
         let sleep_for = Duration::from_secs(10).min(remaining);
         if !sleep_for.is_zero() {
-            time::sleep(sleep_for).await;
+            settle_gate_pause(sleep_for).await;
         }
     }
+}
+
+async fn settle_gate_pause(duration: Duration) {
+    time::sleep_until(time::Instant::now() + duration).await;
 }
 
 async fn base_node_tip_height(base_node_url: &str) -> anyhow::Result<u64> {
@@ -4081,6 +4091,22 @@ mod tests {
             cell.repetitions[0].error.as_deref(),
             Some("tx_ids were produced but chain verification returned no rows")
         );
+    }
+
+    #[test]
+    fn mode2_completed_transaction_status_matches_pinned_minotari_strings() {
+        assert_eq!(
+            mode2_completed_transaction_status("mined_confirmed"),
+            (TX_MINED_CONFIRMED_STATUS, true)
+        );
+        assert_eq!(
+            mode2_completed_transaction_status("mined_unconfirmed"),
+            (2, false)
+        );
+        assert_eq!(mode2_completed_transaction_status("broadcast"), (1, false));
+        assert_eq!(mode2_completed_transaction_status("completed"), (0, false));
+        assert_eq!(mode2_completed_transaction_status("rejected"), (7, false));
+        assert_eq!(mode2_completed_transaction_status("canceled"), (14, false));
     }
 
     #[test]

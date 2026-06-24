@@ -73,6 +73,10 @@ not hide.
 - Mode 2 stores observed DB transaction rows in scenario metrics, but top-level
   `chain_verification.verified_transactions` is confirmed-only. Broadcast or
   pending DB rows must not be counted as verified evidence.
+- Mode 2 completed-transaction status mapping is source-backed: the pinned
+  minotari `CompletedTransactionStatus` serializes as lowercase
+  `completed`, `broadcast`, `mined_unconfirmed`, `mined_confirmed`, `rejected`,
+  and `canceled`. The harness maps and tests those strings explicitly.
 - Real Mode 3 live smoke confirmed PP can accept `/v1/payment-batches`, create
   unsigned transaction JSON, sign through `minotari_console_wallet`, broadcast,
   and reach confirmed batch state on Esmeralda. In the checked capped run, the
@@ -97,6 +101,9 @@ not hide.
   development; `[benchmark].scan_batch_size` is now explicit and defaults to
   `1000`.
 - `TX_MINED_CONFIRMED` is recorded as status value `6` in result profiles.
+- Environment capture records disk kind/name plus whether the base-node path is
+  local or remote. The committed Esmeralda baseline records remote
+  `rpc.esmeralda.tari.com` on an SSD-backed macOS host.
 
 ## Local Baseline Status
 
@@ -105,6 +112,8 @@ schema and is safe to share. The current schema v3 profile was regenerated on
 2026-06-24 after REVIEW_v3 hardening. It includes capped real Mode 1
 S0/S1/S4/S5 evidence, live Mode 2 pending-funds evidence from the current wallet
 DB, and capped real Mode 3 PP S0/S1/S4/S5 evidence with PP scan cells marked
-`not_applicable` when companion scans are disabled. A full funded Esmeralda
-baseline still requires the complete B0/S0-S7 matrix across all modes with
-repetitions; do not treat capped proof cells as final performance data.
+`not_applicable` when companion scans are disabled. REVIEW_v4 follow-up added
+environment disk/network metadata, stricter direct-sleep AST coverage, and
+source-backed Mode 2 status-mapping tests. A full funded Esmeralda baseline
+still requires the complete B0/S0-S7 matrix across all modes with repetitions;
+do not treat capped proof cells as final performance data.

@@ -5,6 +5,7 @@ message: S4 dispatch must not sleep or throttle between transaction submissions.
 rule:
   any:
     - pattern: tokio::time::sleep($$$ARGS)
+    - pattern: time::sleep($$$ARGS)
     - pattern: std::thread::sleep($$$ARGS)
     - pattern: sleep($$$ARGS)
 files:
