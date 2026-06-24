@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-06-24T00:17:29.088711Z",
+  "generated_at": "2026-06-24T00:59:08.295431Z",
   "network": "esmeralda",
   "environment": {
     "os": "macOS 26.5.1",
@@ -36,7 +36,7 @@
     "mode2_live_max_s1_txs": 2,
     "mode2_live_max_s4_batch": 2,
     "mode2_live_max_s5_txs": 2,
-    "mode2_live_scenarios": true,
+    "mode2_live_scenarios": false,
     "mode2_scenario_amount": "1 T",
     "mode2_send_smoke": false,
     "mode2_send_smoke_amount": "1 T",
@@ -45,6 +45,10 @@
       "ACCOUNTS__DEFAULT__PUBLIC_SPEND_KEY",
       "ACCOUNTS__DEFAULT__VIEW_KEY",
       "BASE_NODE",
+      "BATCH_CREATOR_SLEEP_SECS",
+      "BROADCASTER_SLEEP_SECS",
+      "CONFIRMATION_CHECKER_REQUIRED_CONFIRMATIONS",
+      "CONFIRMATION_CHECKER_SLEEP_SECS",
       "CONSOLE_WALLET_BASE_PATH",
       "CONSOLE_WALLET_PASSWORD",
       "CONSOLE_WALLET_PATH",
@@ -52,8 +56,16 @@
       "LISTEN_IP",
       "LISTEN_PORT",
       "PAYMENT_RECEIVER",
-      "TARI_NETWORK"
+      "TARI_NETWORK",
+      "TRANSACTION_SIGNER_SLEEP_SECS",
+      "UNSIGNED_TX_CREATOR_SLEEP_SECS"
     ],
+    "mode3_live_max_s1_batches": 1,
+    "mode3_live_max_s4_batch": 1,
+    "mode3_live_max_s5_items": 2,
+    "mode3_live_topology": true,
+    "mode3_scenario_amount": "1 T",
+    "mode3_worker_sleep_secs": 1,
     "repetitions": 3,
     "scan_batch_size": 1000,
     "volume_target": 512
@@ -94,46 +106,31 @@
         "S0": {
           "scenario": "s0",
           "surface": "minotari_library",
-          "status": "ok",
+          "status": "failed",
           "repetitions": [
             {
               "run": 1,
-              "status": "ok",
-              "wall_ms": 3161,
-              "success_count": 1,
-              "failure_count": 0,
+              "status": "failed",
+              "wall_ms": null,
+              "success_count": 0,
+              "failure_count": 1,
               "fee_microtari": null,
-              "error": null
+              "error": "available balance 0 µT is below configured A_fund 10000000000 µT; balance={\"available\":0,\"immature\":0,\"locked\":49998999300,\"max_date\":\"2026-06-23 19:56:12\",\"max_height\":707973,\"total\":49998999300,\"total_credits\":99998999300,\"total_debits\":50000000000,\"unconfirmed\":0}"
             }
           ],
-          "median_wall_ms": 3161,
-          "spread_wall_ms": 0,
-          "notes": [
-            "live-minotari funded scan smoke detected available_microtari=49998999300; balance={\"available\":49998999300,\"immature\":0,\"locked\":0,\"max_date\":\"2026-06-23 19:56:12\",\"max_height\":707973,\"total\":49998999300,\"total_credits\":99998999300,\"total_debits\":50000000000,\"unconfirmed\":0}",
-            "funding tx_id=7676530785144502866 height=707741 amount=50000 T"
-          ]
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
+          "notes": []
         },
         "S1": {
           "scenario": "s1",
           "surface": "minotari_library",
-          "status": "ok",
-          "repetitions": [
-            {
-              "run": 1,
-              "status": "ok",
-              "wall_ms": 2208,
-              "success_count": 1,
-              "failure_count": 1,
-              "fee_microtari": 0,
-              "error": null
-            }
-          ],
-          "median_wall_ms": 2208,
-          "spread_wall_ms": 0,
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
           "notes": [
-            "Mode 2 S1 live scenario: attempted 2 one-sided sends of 1 T to recipient f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr; planned_doubling_fanout=48 capped_by_mode2_live_max_s1_txs=2",
-            "Pinned minotari one-sided API is currently single-recipient, so this records configured send attempts rather than true multi-recipient fanout.",
-            "S1 summary: attempted=2 successes=1 failures=1 wall_ms=2208 fee_microtari=0; tx_ids=[6699431803862839962]; errors=[Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T]"
+            "Mode 2 send smoke disabled; set benchmark.mode2_send_smoke=true to run the opt-in tiny spend"
           ]
         },
         "S2": {
@@ -161,47 +158,23 @@
         "S4": {
           "scenario": "s4",
           "surface": "minotari_library",
-          "status": "ok",
-          "repetitions": [
-            {
-              "run": 1,
-              "status": "ok",
-              "wall_ms": 1435,
-              "success_count": 0,
-              "failure_count": 10,
-              "fee_microtari": 0,
-              "error": null
-            }
-          ],
-          "median_wall_ms": 1435,
-          "spread_wall_ms": 0,
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
           "notes": [
-            "Mode 2 S4 live scenario: configured concurrent_batches=[8, 16, 32, 64, 128], per-batch cap=2, S4_T_budget_secs=900",
-            "Each S4 batch is dispatched concurrently against the same wallet database; UTXO lock contention and send failures are benchmark signal.",
-            "S4 summary: attempted=10 successes=0 failures=10 wall_ms=1435 fee_microtari=0; tx_ids=[]; errors=[Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T]; batches=configured_batch:8 attempted:2 successes:0 failures:2 wall_ms:288; configured_batch:16 attempted:2 successes:0 failures:2 wall_ms:286; configured_batch:32 attempted:2 successes:0 failures:2 wall_ms:286; configured_batch:64 attempted:2 successes:0 failures:2 wall_ms:286; configured_batch:128 attempted:2 successes:0 failures:2 wall_ms:286"
+            "Mode 2 live scenarios disabled; set benchmark.mode2_live_scenarios=true to run concurrent send batches"
           ]
         },
         "S5": {
           "scenario": "s5",
           "surface": "minotari_library",
-          "status": "ok",
-          "repetitions": [
-            {
-              "run": 1,
-              "status": "ok",
-              "wall_ms": 562,
-              "success_count": 0,
-              "failure_count": 2,
-              "fee_microtari": 0,
-              "error": null
-            }
-          ],
-          "median_wall_ms": 562,
-          "spread_wall_ms": 0,
+          "status": "ready_for_live_run",
+          "repetitions": [],
+          "median_wall_ms": null,
+          "spread_wall_ms": null,
           "notes": [
-            "Mode 2 S5 individual-send arm: attempted 2 of configured S5_M=100 sends with S5_K=10; cap=2",
-            "Mode 2 has no batch endpoint at this layer; PP Mode 3 is responsible for the payment-batch arm.",
-            "S5 summary: attempted=2 successes=0 failures=2 wall_ms=562 fee_microtari=0; tx_ids=[]; errors=[Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 49998.999300 T, Required: 1.000000 T]"
+            "Mode 2 live scenarios disabled; set benchmark.mode2_live_scenarios=true to run the individual-send arm"
           ]
         },
         "S6": {
@@ -333,20 +306,47 @@
         "S0": {
           "scenario": "s0",
           "surface": "payment_processor_api",
-          "status": "ready_for_live_run",
-          "repetitions": [],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
-          "notes": []
+          "status": "ok",
+          "repetitions": [
+            {
+              "run": 1,
+              "status": "ok",
+              "wall_ms": 2025,
+              "success_count": 1,
+              "failure_count": 0,
+              "fee_microtari": null,
+              "error": null
+            }
+          ],
+          "median_wall_ms": 2025,
+          "spread_wall_ms": 0,
+          "notes": [
+            "Mode 3 topology started real minotari payment receiver plus minotari_payment_processor version 0.1.0; receiver_balance={\"available\":49999000000,\"immature\":0,\"locked\":0,\"max_date\":\"2026-06-23 16:51:21\",\"max_height\":707747,\"total\":49999000000,\"total_credits\":49999000000,\"total_debits\":0,\"unconfirmed\":0}; receiver_birthday=1635; worker_sleep_secs=1",
+            "payment_receiver_db=.bench-data/payment-receiver/wallet.db payment_processor_db=.bench-data/payment-processor/payments.db console_wallet_base=.bench-data/payment-processor-console-wallet",
+            "funding tx_id=4002233626181090692 height=707747 amount=50000 T"
+          ]
         },
         "S1": {
           "scenario": "s1",
           "surface": "payment_processor_api",
-          "status": "ready_for_live_run",
-          "repetitions": [],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
-          "notes": []
+          "status": "ok",
+          "repetitions": [
+            {
+              "run": 1,
+              "status": "ok",
+              "wall_ms": 5,
+              "success_count": 1,
+              "failure_count": 0,
+              "fee_microtari": null,
+              "error": null
+            }
+          ],
+          "median_wall_ms": 5,
+          "spread_wall_ms": 0,
+          "notes": [
+            "Mode 3 S1 drove /v1/payment-batches through real PP topology; attempted_batches=1 items_per_batch=1 amount=1 T cap=1",
+            "S1 PP summary: attempted_batches=1 attempted_payments=1 accepted_batches=1 failed_batches=0 wall_ms=5; batch_ids=[d30a3dd8-7243-47ce-a5cc-c66496815fbe]; payment_ids=[626ba97b-c54e-451c-a624-6f1e1e773113]; db_snapshot=batches=[batch:d30a3dd8-7243-47ce-a5cc-c66496815fbe status:AWAITING_BROADCAST retries:0 unsigned:true signed:true error:none] payments=[payment:626ba97b-c54e-451c-a624-6f1e1e773113 status:BATCHED batch:d30a3dd8-7243-47ce-a5cc-c66496815fbe failure:none]; last_pp_response={\"account_name\":\"default\",\"batch_id\":\"d30a3dd8-7243-47ce-a5cc-c66496815fbe\",\"payments\":[{\"account_name\":\"default\",\"amount\":1000000,\"client_id\":\"bench-s1-1782262752354944000-1-1\",\"created_at\":\"2026-06-24T00:59:12Z\",\"payment_id\":\"626ba97b-c54e-451c-a624-6f1e1e773113\",\"recipient_address\":\"f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr\",\"status\":\"BATCHED\",\"updated_at\":\"2026-06-24T00:59:12Z\"}],\"status\":\"PENDING_BATCHING\"}"
+          ]
         },
         "S2": {
           "scenario": "s2",
@@ -373,20 +373,46 @@
         "S4": {
           "scenario": "s4",
           "surface": "payment_processor_api",
-          "status": "ready_for_live_run",
-          "repetitions": [],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
-          "notes": []
+          "status": "ok",
+          "repetitions": [
+            {
+              "run": 1,
+              "status": "ok",
+              "wall_ms": 300048,
+              "success_count": 5,
+              "failure_count": 0,
+              "fee_microtari": null,
+              "error": null
+            }
+          ],
+          "median_wall_ms": 300048,
+          "spread_wall_ms": 0,
+          "notes": [
+            "Mode 3 S4 dispatched configured concurrent_batches=[8, 16, 32, 64, 128] through real PP /v1/payment-batches; per-batch cap=1",
+            "S4 PP summary: attempted_batches=5 attempted_payments=5 accepted_batches=5 failed_batches=0 wall_ms=300048; batch_ids=[e9c2568c-a56e-432d-be22-fc46945410f4, 1204ea98-f151-42f7-9647-a07eedf4b401, ebd3e01d-b377-4835-b6cb-2ef1cb30eaaa, e95c2d9b-e1ee-428e-90d5-c2b2ccecb94b, 846bdf7b-7667-4657-9fba-f549b365a660]; payment_ids=[cec2c83b-7cc6-4389-b897-bbb74000bc55, e1c20ca4-06e7-4d91-a16b-a7de8a3045b2, fc1203d9-ee0d-4524-b4b5-587efe34232a, 4a00a539-f5b1-4b80-9257-f245bd579109, f7d7acba-ae51-45e9-9116-89dac54715ad]; db_snapshot=batches=[batch:e9c2568c-a56e-432d-be22-fc46945410f4 status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none | batch:1204ea98-f151-42f7-9647-a07eedf4b401 status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none | batch:ebd3e01d-b377-4835-b6cb-2ef1cb30eaaa status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none | batch:e95c2d9b-e1ee-428e-90d5-c2b2ccecb94b status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none | batch:846bdf7b-7667-4657-9fba-f549b365a660 status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:cec2c83b-7cc6-4389-b897-bbb74000bc55 status:BATCHED batch:e9c2568c-a56e-432d-be22-fc46945410f4 failure:none | payment:e1c20ca4-06e7-4d91-a16b-a7de8a3045b2 status:BATCHED batch:1204ea98-f151-42f7-9647-a07eedf4b401 failure:none | payment:fc1203d9-ee0d-4524-b4b5-587efe34232a status:BATCHED batch:ebd3e01d-b377-4835-b6cb-2ef1cb30eaaa failure:none | payment:4a00a539-f5b1-4b80-9257-f245bd579109 status:BATCHED batch:e95c2d9b-e1ee-428e-90d5-c2b2ccecb94b failure:none | payment:f7d7acba-ae51-45e9-9116-89dac54715ad status:BATCHED batch:846bdf7b-7667-4657-9fba-f549b365a660 failure:none]; batches=configured_batch:8 attempted:1 accepted:1 failed:0 wall_ms:5; configured_batch:16 attempted:1 accepted:1 failed:0 wall_ms:5; configured_batch:32 attempted:1 accepted:1 failed:0 wall_ms:4; configured_batch:64 attempted:1 accepted:1 failed:0 wall_ms:5; configured_batch:128 attempted:1 accepted:1 failed:0 wall_ms:6"
+          ]
         },
         "S5": {
           "scenario": "s5",
           "surface": "payment_processor_api",
-          "status": "ready_for_live_run",
-          "repetitions": [],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
-          "notes": []
+          "status": "ok",
+          "repetitions": [
+            {
+              "run": 1,
+              "status": "ok",
+              "wall_ms": 8,
+              "success_count": 1,
+              "failure_count": 0,
+              "fee_microtari": null,
+              "error": null
+            }
+          ],
+          "median_wall_ms": 8,
+          "spread_wall_ms": 0,
+          "notes": [
+            "Mode 3 S5 payment-batch arm used one /v1/payment-batches request with items=2 of configured S5_M=100 and S5_K=10; cap=2",
+            "S5 PP summary: attempted_batches=1 attempted_payments=2 accepted_batches=1 failed_batches=0 wall_ms=8; batch_ids=[f446b7e4-82fb-410c-b0a1-efa329b994ae]; payment_ids=[ecc8b04d-0321-4b2f-8400-66e98952d73c, 3ae7b9d6-6686-41f0-924a-330291eae0b7]; db_snapshot=batches=[batch:f446b7e4-82fb-410c-b0a1-efa329b994ae status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:ecc8b04d-0321-4b2f-8400-66e98952d73c status:BATCHED batch:f446b7e4-82fb-410c-b0a1-efa329b994ae failure:none | payment:3ae7b9d6-6686-41f0-924a-330291eae0b7 status:BATCHED batch:f446b7e4-82fb-410c-b0a1-efa329b994ae failure:none]; last_pp_response={\"account_name\":\"default\",\"batch_id\":\"f446b7e4-82fb-410c-b0a1-efa329b994ae\",\"payments\":[{\"account_name\":\"default\",\"amount\":1000000,\"client_id\":\"bench-s5-1782263114417086000-1-1\",\"created_at\":\"2026-06-24T01:05:14Z\",\"payment_id\":\"ecc8b04d-0321-4b2f-8400-66e98952d73c\",\"recipient_address\":\"f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr\",\"status\":\"BATCHED\",\"updated_at\":\"2026-06-24T01:05:14Z\"},{\"account_name\":\"default\",\"amount\":1000000,\"client_id\":\"bench-s5-17822631144...<truncated>"
+          ]
         },
         "S6": {
           "scenario": "s6",

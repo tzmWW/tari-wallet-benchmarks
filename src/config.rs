@@ -62,6 +62,18 @@ pub struct BenchmarkConfig {
     pub mode2_live_max_s4_batch: u32,
     #[serde(default)]
     pub mode2_live_max_s5_txs: u32,
+    #[serde(default)]
+    pub mode3_live_topology: bool,
+    #[serde(default = "default_mode3_scenario_amount")]
+    pub mode3_scenario_amount: String,
+    #[serde(default)]
+    pub mode3_live_max_s1_batches: u32,
+    #[serde(default)]
+    pub mode3_live_max_s4_batch: u32,
+    #[serde(default)]
+    pub mode3_live_max_s5_items: u32,
+    #[serde(default = "default_mode3_worker_sleep_secs")]
+    pub mode3_worker_sleep_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +174,11 @@ impl Config {
             .context("benchmark.mode2_send_smoke_amount")?;
         parse_amount(&self.benchmark.mode2_scenario_amount)
             .context("benchmark.mode2_scenario_amount")?;
+        parse_amount(&self.benchmark.mode3_scenario_amount)
+            .context("benchmark.mode3_scenario_amount")?;
+        if self.benchmark.mode3_worker_sleep_secs == 0 {
+            bail!("benchmark.mode3_worker_sleep_secs must be greater than 0");
+        }
         if self.benchmark.s5_k == 0 || !self.benchmark.s5_m.is_multiple_of(self.benchmark.s5_k) {
             bail!("benchmark.s5_m must be a positive multiple of benchmark.s5_k");
         }
@@ -261,6 +278,30 @@ impl Config {
                 "mode2_live_max_s5_txs".to_string(),
                 serde_json::json!(self.benchmark.mode2_live_max_s5_txs),
             ),
+            (
+                "mode3_live_topology".to_string(),
+                serde_json::json!(self.benchmark.mode3_live_topology),
+            ),
+            (
+                "mode3_scenario_amount".to_string(),
+                serde_json::json!(self.benchmark.mode3_scenario_amount),
+            ),
+            (
+                "mode3_live_max_s1_batches".to_string(),
+                serde_json::json!(self.benchmark.mode3_live_max_s1_batches),
+            ),
+            (
+                "mode3_live_max_s4_batch".to_string(),
+                serde_json::json!(self.benchmark.mode3_live_max_s4_batch),
+            ),
+            (
+                "mode3_live_max_s5_items".to_string(),
+                serde_json::json!(self.benchmark.mode3_live_max_s5_items),
+            ),
+            (
+                "mode3_worker_sleep_secs".to_string(),
+                serde_json::json!(self.benchmark.mode3_worker_sleep_secs),
+            ),
         ])
     }
 
@@ -297,6 +338,12 @@ impl Default for Config {
                 mode2_live_max_s1_txs: 0,
                 mode2_live_max_s4_batch: 0,
                 mode2_live_max_s5_txs: 0,
+                mode3_live_topology: false,
+                mode3_scenario_amount: default_mode3_scenario_amount(),
+                mode3_live_max_s1_batches: 0,
+                mode3_live_max_s4_batch: 0,
+                mode3_live_max_s5_items: 0,
+                mode3_worker_sleep_secs: default_mode3_worker_sleep_secs(),
             },
             paths: PathConfig {
                 data_dir: PathBuf::from(".bench-data"),
@@ -340,6 +387,14 @@ fn default_mode2_send_smoke_amount() -> String {
 
 fn default_mode2_scenario_amount() -> String {
     "1 T".to_string()
+}
+
+fn default_mode3_scenario_amount() -> String {
+    "1 T".to_string()
+}
+
+fn default_mode3_worker_sleep_secs() -> u64 {
+    1
 }
 
 impl FundingConfig {
@@ -441,6 +496,22 @@ mod tests {
         cfg.benchmark.mode2_scenario_amount = "not money".to_string();
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("mode2_scenario_amount"));
+    }
+
+    #[test]
+    fn mode3_live_scenario_amount_must_parse() {
+        let mut cfg = Config::default();
+        cfg.benchmark.mode3_scenario_amount = "not money".to_string();
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("mode3_scenario_amount"));
+    }
+
+    #[test]
+    fn mode3_worker_sleep_must_be_positive() {
+        let mut cfg = Config::default();
+        cfg.benchmark.mode3_worker_sleep_secs = 0;
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("mode3_worker_sleep_secs"));
     }
 
     #[test]

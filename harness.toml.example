@@ -23,6 +23,12 @@ mode2_scenario_amount = "1 T"
 mode2_live_max_s1_txs = 0
 mode2_live_max_s4_batch = 0
 mode2_live_max_s5_txs = 0
+mode3_live_topology = false
+mode3_scenario_amount = "1 T"
+mode3_live_max_s1_batches = 0
+mode3_live_max_s4_batch = 0
+mode3_live_max_s5_items = 0
+mode3_worker_sleep_secs = 1
 
 [paths]
 data_dir = ".bench-data"

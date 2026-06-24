@@ -14,7 +14,7 @@ use minotari::{
     get_accounts, get_balance, init_db,
     models::PendingTransactionStatus,
     transactions::{manager::TransactionSender, one_sided_transaction::Recipient},
-    utils::init_wallet::init_with_seed_words,
+    utils::init_wallet::{init_with_seed_words, init_with_view_key},
 };
 use tari_common::configuration::Network;
 use tari_common_types::seeds::cipher_seed::CipherSeed;
@@ -31,6 +31,10 @@ use tokio::task::JoinSet;
 use crate::{
     config::{Config, parse_amount},
     modes::ScenarioName,
+    payment_processor::{
+        self, BulkPaymentItem, BulkPaymentRequest, PaymentProcessorClient,
+        PaymentProcessorDbSnapshot,
+    },
     result_profile::{CellStatus, Repetition, ResultProfile, ScenarioCell},
     seeds::{
         AddressBook, WalletRole, current_birthday, seed_from_words, seed_from_words_with_birthday,
@@ -137,6 +141,12 @@ pub async fn annotate_profile_with_library_smoke(
     } else {
         annotate_fresh_scan_cells_disabled(profile);
     }
+
+    if config.benchmark.mode3_live_topology {
+        annotate_mode3_payment_processor(config, book, profile).await?;
+    } else {
+        annotate_mode3_disabled(profile);
+    }
     Ok(())
 }
 
@@ -234,6 +244,25 @@ fn annotate_fresh_scan_cells_disabled(profile: &mut ResultProfile) {
                         .to_string(),
                 );
             }
+        }
+    }
+}
+
+fn annotate_mode3_disabled(profile: &mut ResultProfile) {
+    let Some(mode) = profile.modes.get_mut("payment_processor") else {
+        return;
+    };
+    for scenario in [
+        ScenarioName::S0,
+        ScenarioName::S1,
+        ScenarioName::S4,
+        ScenarioName::S5,
+    ] {
+        if let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) {
+            cell.notes.push(
+                "Mode 3 real payment-processor topology disabled; set benchmark.mode3_live_topology=true to spawn minotari PR daemon plus minotari_payment_processor"
+                    .to_string(),
+            );
         }
     }
 }
@@ -510,6 +539,469 @@ fn record_mode2_send_summary(
 
 fn capped_attempts(planned: u32, cap: u32) -> u32 {
     if cap == 0 { planned } else { planned.min(cap) }
+}
+
+async fn annotate_mode3_payment_processor(
+    config: &Config,
+    book: &AddressBook,
+    profile: &mut ResultProfile,
+) -> anyhow::Result<()> {
+    let Some(pp_seed) = book.addresses.get(WalletRole::PaymentProcessor.label()) else {
+        return Ok(());
+    };
+    let Some(recipient_seed) = book.addresses.get(WalletRole::OldWallet.label()) else {
+        return Ok(());
+    };
+
+    let start = Instant::now();
+    let topology = start_mode3_topology(config, pp_seed).await;
+    match topology {
+        Ok(context) => {
+            record_mode3_s0(config, profile, &context, start.elapsed().as_millis());
+            run_mode3_send_cells(config, profile, recipient_seed.address.clone(), &context).await?;
+        }
+        Err(error) => {
+            record_mode3_startup_failure(profile, start.elapsed().as_millis(), error);
+        }
+    }
+    Ok(())
+}
+
+async fn start_mode3_topology(
+    config: &Config,
+    pp_seed: &crate::seeds::SeedMaterial,
+) -> anyhow::Result<Mode3TopologyContext> {
+    let password = wallet_password(&config.seeds.wallet_password_env)?;
+    ensure_payment_receiver_wallet(config, pp_seed, &password)?;
+    payment_processor::ensure_console_wallet_base(config, pp_seed, &password).await?;
+    let unlocked = payment_processor::unlock_stale_payment_receiver_locks(config)?;
+    if unlocked > 0 {
+        println!(
+            "mode3 payment receiver startup cleanup unlocked {unlocked} stale lock request(s)"
+        );
+    }
+
+    let mut payment_receiver = payment_processor::start_payment_receiver(config, &password).await?;
+    payment_processor::wait_for_payment_receiver(config, &mut payment_receiver).await?;
+    let required_balance = config.a_fund()?.0;
+    let receiver_balance = payment_processor::wait_for_payment_receiver_balance(
+        config,
+        &mut payment_receiver,
+        required_balance,
+    )
+    .await?;
+
+    let env = payment_processor::build_env(config, pp_seed);
+    let mut payment_processor = payment_processor::start_payment_processor(config, &env).await?;
+    let version =
+        payment_processor::wait_for_payment_processor(config, &mut payment_processor).await?;
+
+    Ok(Mode3TopologyContext {
+        _payment_receiver: payment_receiver,
+        _payment_processor: payment_processor,
+        client: PaymentProcessorClient::new(format!(
+            "http://{}",
+            config.modes.payment_processor_listen
+        )),
+        receiver_balance,
+        processor_version: version.version,
+        worker_sleep_secs: config.benchmark.mode3_worker_sleep_secs,
+        receiver_birthday: mode3_receiver_birthday(pp_seed),
+    })
+}
+
+fn ensure_payment_receiver_wallet(
+    config: &Config,
+    pp_seed: &crate::seeds::SeedMaterial,
+    password: &str,
+) -> anyhow::Result<()> {
+    let db_path = payment_processor::payment_receiver_db_path(config);
+    if db_path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let birthday = mode3_receiver_birthday(pp_seed);
+    init_with_view_key(
+        &pp_seed.private_view_key_hex,
+        &pp_seed.public_spend_key_hex,
+        password,
+        &db_path,
+        birthday,
+        Some("default"),
+    )
+    .context("initializing Mode 3 payment receiver view wallet")
+}
+
+fn mode3_receiver_birthday(pp_seed: &crate::seeds::SeedMaterial) -> u16 {
+    if pp_seed.birthday == 0 {
+        current_birthday()
+    } else {
+        pp_seed.birthday
+    }
+}
+
+fn record_mode3_s0(
+    config: &Config,
+    profile: &mut ResultProfile,
+    context: &Mode3TopologyContext,
+    wall_ms: u128,
+) {
+    let available =
+        amount_field_as_microtari(&context.receiver_balance, "available").unwrap_or_default();
+    let expected = config.a_fund().map(|amount| amount.0).unwrap_or_default();
+    let (status, success_count, failure_count, error) = if available >= expected {
+        (CellStatus::Ok, 1, 0, None)
+    } else {
+        (
+            CellStatus::Failed,
+            0,
+            1,
+            Some(format!(
+                "payment receiver available balance {available} µT is below configured A_fund {expected} µT"
+            )),
+        )
+    };
+
+    let Some(mode) = profile.modes.get_mut("payment_processor") else {
+        return;
+    };
+    let Some(cell) = mode.scenarios.get_mut("S0") else {
+        return;
+    };
+    cell.record_repetition(Repetition {
+        run: 1,
+        status,
+        wall_ms: Some(wall_ms),
+        success_count,
+        failure_count,
+        fee_microtari: None,
+        error,
+    });
+    cell.notes.push(format!(
+        "Mode 3 topology started real minotari payment receiver plus minotari_payment_processor version {}; receiver_balance={}; receiver_birthday={}; worker_sleep_secs={}",
+        context.processor_version,
+        context.receiver_balance,
+        context.receiver_birthday,
+        context.worker_sleep_secs
+    ));
+    cell.notes.push(format!(
+        "payment_receiver_db={} payment_processor_db={} console_wallet_base={}",
+        payment_processor::payment_receiver_db_path(config).display(),
+        payment_processor::payment_processor_db_path(config).display(),
+        payment_processor::console_wallet_base_path(config).display()
+    ));
+    if let Some(funding) = &config.funding.payment_processor {
+        cell.notes.push(format!(
+            "funding tx_id={} height={} amount={}",
+            funding.tx_id, funding.height, funding.amount
+        ));
+    }
+}
+
+fn record_mode3_startup_failure(profile: &mut ResultProfile, wall_ms: u128, error: anyhow::Error) {
+    let Some(mode) = profile.modes.get_mut("payment_processor") else {
+        return;
+    };
+    for scenario in [
+        ScenarioName::S0,
+        ScenarioName::S1,
+        ScenarioName::S4,
+        ScenarioName::S5,
+    ] {
+        let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
+            continue;
+        };
+        cell.record_repetition(Repetition {
+            run: 1,
+            status: CellStatus::Failed,
+            wall_ms: Some(wall_ms),
+            success_count: 0,
+            failure_count: 1,
+            fee_microtari: None,
+            error: Some(format!("{error:#}")),
+        });
+        cell.notes
+            .push("Mode 3 topology startup failed before scenario dispatch".to_string());
+    }
+}
+
+async fn run_mode3_send_cells(
+    config: &Config,
+    profile: &mut ResultProfile,
+    recipient: String,
+    context: &Mode3TopologyContext,
+) -> anyhow::Result<()> {
+    let amount = parse_amount(&config.benchmark.mode3_scenario_amount)?;
+    let s1_attempts = capped_attempts(
+        config
+            .benchmark
+            .doubling_rounds
+            .saturating_mul(config.benchmark.fanout_outputs_per_tx)
+            .min(config.benchmark.volume_target),
+        config.benchmark.mode3_live_max_s1_batches,
+    );
+    let s1 = run_pp_batches_sequential(
+        config,
+        context,
+        "payment_processor/S1",
+        ScenarioName::S1,
+        s1_attempts,
+        1,
+        &recipient,
+        amount,
+    )
+    .await;
+    record_pp_summary(
+        profile,
+        ScenarioName::S1,
+        &s1,
+        vec![format!(
+            "Mode 3 S1 drove /v1/payment-batches through real PP topology; attempted_batches={} items_per_batch=1 amount={} cap={}",
+            s1.attempted_batches,
+            config.benchmark.mode3_scenario_amount,
+            config.benchmark.mode3_live_max_s1_batches
+        )],
+    );
+
+    let s4 = run_pp_s4_batches(config, context, &recipient, amount).await;
+    record_pp_summary(
+        profile,
+        ScenarioName::S4,
+        &s4,
+        vec![format!(
+            "Mode 3 S4 dispatched configured concurrent_batches={:?} through real PP /v1/payment-batches; per-batch cap={}",
+            config.benchmark.concurrent_batches, config.benchmark.mode3_live_max_s4_batch
+        )],
+    );
+
+    let s5_items = capped_attempts(
+        config.benchmark.s5_m,
+        config.benchmark.mode3_live_max_s5_items,
+    );
+    let s5 = run_pp_batches_sequential(
+        config,
+        context,
+        "payment_processor/S5",
+        ScenarioName::S5,
+        1,
+        s5_items,
+        &recipient,
+        amount,
+    )
+    .await;
+    record_pp_summary(
+        profile,
+        ScenarioName::S5,
+        &s5,
+        vec![format!(
+            "Mode 3 S5 payment-batch arm used one /v1/payment-batches request with items={} of configured S5_M={} and S5_K={}; cap={}",
+            s5_items,
+            config.benchmark.s5_m,
+            config.benchmark.s5_k,
+            config.benchmark.mode3_live_max_s5_items
+        )],
+    );
+
+    Ok(())
+}
+
+async fn run_pp_s4_batches(
+    config: &Config,
+    context: &Mode3TopologyContext,
+    recipient: &str,
+    amount: MicroMinotari,
+) -> PpScenarioSummary {
+    let start = Instant::now();
+    let mut total = PpScenarioSummary::default();
+    for configured_batch in &config.benchmark.concurrent_batches {
+        let attempts = capped_attempts(*configured_batch, config.benchmark.mode3_live_max_s4_batch);
+        let batch = run_pp_batches_concurrent(
+            config,
+            context,
+            &format!("payment_processor/S4 batch {configured_batch}"),
+            ScenarioName::S4,
+            attempts,
+            1,
+            recipient,
+            amount,
+        )
+        .await;
+        total.add_batch(*configured_batch, batch);
+    }
+    total.wall_ms = start.elapsed().as_millis();
+    total.observe_db(config).await;
+    total
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_pp_batches_sequential(
+    config: &Config,
+    context: &Mode3TopologyContext,
+    label: &str,
+    scenario: ScenarioName,
+    batch_count: u32,
+    items_per_batch: u32,
+    recipient: &str,
+    amount: MicroMinotari,
+) -> PpScenarioSummary {
+    let mut summary = PpScenarioSummary {
+        attempted_batches: batch_count,
+        attempted_payments: batch_count.saturating_mul(items_per_batch),
+        ..PpScenarioSummary::default()
+    };
+    let start = Instant::now();
+    for batch_index in 1..=batch_count {
+        println!("{label} batch {batch_index}/{batch_count} dispatching");
+        let result = submit_pp_batch(
+            &context.client,
+            scenario,
+            batch_index,
+            items_per_batch,
+            recipient,
+            amount,
+        )
+        .await;
+        summary.record_batch(batch_index, result);
+    }
+    summary.wall_ms = start.elapsed().as_millis();
+    summary.observe_db(config).await;
+    summary
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_pp_batches_concurrent(
+    config: &Config,
+    context: &Mode3TopologyContext,
+    label: &str,
+    scenario: ScenarioName,
+    batch_count: u32,
+    items_per_batch: u32,
+    recipient: &str,
+    amount: MicroMinotari,
+) -> PpScenarioSummary {
+    let mut summary = PpScenarioSummary {
+        attempted_batches: batch_count,
+        attempted_payments: batch_count.saturating_mul(items_per_batch),
+        ..PpScenarioSummary::default()
+    };
+    let start = Instant::now();
+    let mut join_set = JoinSet::new();
+    for batch_index in 1..=batch_count {
+        println!("{label} batch {batch_index}/{batch_count} dispatching");
+        let context = context.clone_for_task();
+        let recipient = recipient.to_string();
+        join_set.spawn(async move {
+            (
+                batch_index,
+                submit_pp_batch(
+                    &context.client,
+                    scenario,
+                    batch_index,
+                    items_per_batch,
+                    &recipient,
+                    amount,
+                )
+                .await,
+            )
+        });
+    }
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok((batch_index, send)) => summary.record_batch(batch_index, send),
+            Err(error) => summary.record_join_error(error.to_string()),
+        }
+    }
+    summary.wall_ms = start.elapsed().as_millis();
+    summary.observe_db(config).await;
+    summary
+}
+
+async fn submit_pp_batch(
+    client: &PaymentProcessorClient,
+    scenario: ScenarioName,
+    batch_index: u32,
+    items_per_batch: u32,
+    recipient: &str,
+    amount: MicroMinotari,
+) -> anyhow::Result<PpBatchSubmission> {
+    let amount = i64::try_from(amount.0).context("mode3 payment amount exceeds i64")?;
+    let items = (1..=items_per_batch)
+        .map(|item_index| BulkPaymentItem {
+            client_id: format!(
+                "bench-{}-{}-{}-{}",
+                scenario.as_str().to_lowercase(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+                batch_index,
+                item_index
+            ),
+            recipient_address: recipient.to_string(),
+            amount,
+            payment_id: Some(format!(
+                "wallet-bench-{}-{batch_index}-{item_index}",
+                scenario.as_str()
+            )),
+        })
+        .collect::<Vec<_>>();
+    let response = client
+        .create_payment_batch(&BulkPaymentRequest {
+            account_name: "default".to_string(),
+            items,
+        })
+        .await?;
+    let batch_id = response
+        .get("batch_id")
+        .and_then(|value| value.as_str())
+        .context("PP batch response missing batch_id")?
+        .to_string();
+    let payment_ids = response
+        .get("payments")
+        .and_then(|value| value.as_array())
+        .context("PP batch response missing payments")?
+        .iter()
+        .filter_map(|payment| {
+            payment
+                .get("payment_id")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+        })
+        .collect::<Vec<_>>();
+    Ok(PpBatchSubmission {
+        batch_id,
+        payment_ids,
+        raw_response: response,
+    })
+}
+
+fn record_pp_summary(
+    profile: &mut ResultProfile,
+    scenario: ScenarioName,
+    summary: &PpScenarioSummary,
+    mut notes: Vec<String>,
+) {
+    let Some(mode) = profile.modes.get_mut("payment_processor") else {
+        return;
+    };
+    let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
+        return;
+    };
+    let status = if summary.blocked_upstream {
+        CellStatus::BlockedUpstream
+    } else {
+        CellStatus::Ok
+    };
+    cell.record_repetition(Repetition {
+        run: 1,
+        status,
+        wall_ms: Some(summary.wall_ms),
+        success_count: summary.accepted_batches,
+        failure_count: summary.failed_batches,
+        fee_microtari: None,
+        error: summary.error_note(),
+    });
+    notes.push(summary.note(scenario));
+    cell.notes.extend(notes);
 }
 
 async fn annotate_mode_scan_cells(
@@ -789,6 +1281,218 @@ struct BatchSendSummary {
     wall_ms: u128,
 }
 
+struct Mode3TopologyContext {
+    _payment_receiver: payment_processor::ManagedProcess,
+    _payment_processor: payment_processor::ManagedProcess,
+    client: PaymentProcessorClient,
+    receiver_balance: serde_json::Value,
+    processor_version: String,
+    worker_sleep_secs: u64,
+    receiver_birthday: u16,
+}
+
+#[derive(Clone)]
+struct Mode3TopologyTaskContext {
+    client: PaymentProcessorClient,
+}
+
+impl Mode3TopologyContext {
+    fn clone_for_task(&self) -> Mode3TopologyTaskContext {
+        Mode3TopologyTaskContext {
+            client: self.client.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct PpScenarioSummary {
+    attempted_batches: u32,
+    attempted_payments: u32,
+    accepted_batches: u32,
+    failed_batches: u32,
+    wall_ms: u128,
+    batch_ids: Vec<String>,
+    payment_ids: Vec<String>,
+    errors: Vec<String>,
+    batch_summaries: Vec<PpBatchSummary>,
+    db_snapshot: Option<PaymentProcessorDbSnapshot>,
+    events: Option<serde_json::Value>,
+    blocked_upstream: bool,
+}
+
+struct PpBatchSummary {
+    configured_batch: u32,
+    attempted_batches: u32,
+    accepted_batches: u32,
+    failed_batches: u32,
+    wall_ms: u128,
+}
+
+struct PpBatchSubmission {
+    batch_id: String,
+    payment_ids: Vec<String>,
+    raw_response: serde_json::Value,
+}
+
+impl PpScenarioSummary {
+    fn record_batch(&mut self, batch_index: u32, result: anyhow::Result<PpBatchSubmission>) {
+        match result {
+            Ok(submission) => {
+                println!(
+                    "mode3 PP batch {batch_index} accepted: batch_id={} payments={}",
+                    submission.batch_id,
+                    submission.payment_ids.len()
+                );
+                self.accepted_batches += 1;
+                self.batch_ids.push(submission.batch_id);
+                self.payment_ids.extend(submission.payment_ids);
+                self.events = Some(submission.raw_response);
+            }
+            Err(error) => {
+                println!("mode3 PP batch {batch_index} failed: {error:#}");
+                self.failed_batches += 1;
+                self.errors.push(format!("{error:#}"));
+            }
+        }
+    }
+
+    fn record_join_error(&mut self, error: String) {
+        println!("mode3 PP concurrent task failed: {error}");
+        self.failed_batches += 1;
+        self.errors.push(format!("task join error: {error}"));
+    }
+
+    fn add_batch(&mut self, configured_batch: u32, batch: Self) {
+        self.attempted_batches = self
+            .attempted_batches
+            .saturating_add(batch.attempted_batches);
+        self.attempted_payments = self
+            .attempted_payments
+            .saturating_add(batch.attempted_payments);
+        self.accepted_batches = self.accepted_batches.saturating_add(batch.accepted_batches);
+        self.failed_batches = self.failed_batches.saturating_add(batch.failed_batches);
+        self.batch_ids.extend(batch.batch_ids);
+        self.payment_ids.extend(batch.payment_ids);
+        self.errors.extend(batch.errors);
+        self.blocked_upstream |= batch.blocked_upstream;
+        self.batch_summaries.push(PpBatchSummary {
+            configured_batch,
+            attempted_batches: batch.attempted_batches,
+            accepted_batches: batch.accepted_batches,
+            failed_batches: batch.failed_batches,
+            wall_ms: batch.wall_ms,
+        });
+    }
+
+    async fn observe_db(&mut self, config: &Config) {
+        if self.batch_ids.is_empty() && self.payment_ids.is_empty() {
+            return;
+        }
+        let timeout = Duration::from_secs(
+            config
+                .timeouts
+                .transaction_lock_secs
+                .max(30)
+                .min(config.timeouts.confirmation_secs),
+        );
+        let start = Instant::now();
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let mut latest = None;
+        loop {
+            interval.tick().await;
+            match payment_processor::inspect_payment_processor_db(
+                config,
+                &self.batch_ids,
+                &self.payment_ids,
+            ) {
+                Ok(snapshot) => {
+                    let done = pp_snapshot_has_progress_or_error(&snapshot);
+                    latest = Some(snapshot);
+                    if done {
+                        break;
+                    }
+                }
+                Err(error) => self
+                    .errors
+                    .push(format!("PP DB inspection failed: {error:#}")),
+            }
+            if start.elapsed() > timeout {
+                break;
+            }
+        }
+        if let Some(snapshot) = latest {
+            self.blocked_upstream = snapshot.has_upstream_signing_or_broadcast_error();
+            self.db_snapshot = Some(snapshot);
+        }
+    }
+
+    fn note(&self, scenario: ScenarioName) -> String {
+        let mut parts = vec![
+            format!(
+                "{} PP summary: attempted_batches={} attempted_payments={} accepted_batches={} failed_batches={} wall_ms={}",
+                scenario.as_str(),
+                self.attempted_batches,
+                self.attempted_payments,
+                self.accepted_batches,
+                self.failed_batches,
+                self.wall_ms
+            ),
+            format!("batch_ids={}", limited_list(&self.batch_ids)),
+            format!("payment_ids={}", limited_list(&self.payment_ids)),
+        ];
+        if let Some(snapshot) = &self.db_snapshot {
+            parts.push(format!("db_snapshot={}", snapshot.status_summary()));
+        }
+        if let Some(response) = &self.events {
+            parts.push(format!("last_pp_response={}", compact_json(response, 512)));
+        }
+        if !self.errors.is_empty() {
+            parts.push(format!("errors={}", limited_list(&self.errors)));
+        }
+        if !self.batch_summaries.is_empty() {
+            let batches = self
+                .batch_summaries
+                .iter()
+                .map(|batch| {
+                    format!(
+                        "configured_batch:{} attempted:{} accepted:{} failed:{} wall_ms:{}",
+                        batch.configured_batch,
+                        batch.attempted_batches,
+                        batch.accepted_batches,
+                        batch.failed_batches,
+                        batch.wall_ms
+                    )
+                })
+                .collect::<Vec<_>>();
+            parts.push(format!("batches={}", batches.join("; ")));
+        }
+        parts.join("; ")
+    }
+
+    fn error_note(&self) -> Option<String> {
+        if self.blocked_upstream {
+            return Some(
+                self.db_snapshot
+                    .as_ref()
+                    .map(PaymentProcessorDbSnapshot::status_summary)
+                    .unwrap_or_else(|| "PP upstream signing/broadcast error".to_string()),
+            );
+        }
+        None
+    }
+}
+
+fn pp_snapshot_has_progress_or_error(snapshot: &PaymentProcessorDbSnapshot) -> bool {
+    snapshot.has_upstream_signing_or_broadcast_error()
+        || snapshot.batches.iter().all(|batch| {
+            matches!(
+                batch.status.as_str(),
+                "AWAITING_CONFIRMATION" | "CONFIRMED" | "FAILED" | "CANCELLED"
+            ) || batch.has_signed_tx
+                || batch.retry_count > 0
+        })
+}
+
 impl ScenarioSendSummary {
     fn record_attempt(&mut self, attempt: u32, result: anyhow::Result<OneSidedSendOutcome>) {
         match result {
@@ -875,6 +1579,14 @@ fn limited_list(values: &[String]) -> String {
         visible.push(format!("... {} more", values.len() - LIMIT));
     }
     format!("[{}]", visible.join(", "))
+}
+
+fn compact_json(value: &serde_json::Value, limit: usize) -> String {
+    let rendered = value.to_string();
+    if rendered.len() <= limit {
+        return rendered;
+    }
+    format!("{}...<truncated>", &rendered[..limit])
 }
 
 async fn construct_sign_broadcast_one_sided_owned(

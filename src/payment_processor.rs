@@ -1,6 +1,15 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs::{self, OpenOptions},
+    path::{Path, PathBuf},
+    process::{ExitStatus, Stdio},
+    time::{Duration, Instant},
+};
 
+use anyhow::{Context, bail};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use tokio::{process::Command, time};
 
 use crate::{config::Config, seeds::SeedMaterial};
 
@@ -14,14 +23,7 @@ pub fn build_env(config: &Config, pp_seed: &SeedMaterial) -> PaymentProcessorEnv
     vars.insert("TARI_NETWORK".to_string(), "Esmeralda".to_string());
     vars.insert(
         "DATABASE_URL".to_string(),
-        format!(
-            "sqlite://{}",
-            config
-                .paths
-                .data_dir
-                .join("payment-processor/payments.db")
-                .display()
-        ),
+        sqlite_url(&payment_processor_db_path(config)),
     );
     vars.insert(
         "PAYMENT_RECEIVER".to_string(),
@@ -33,14 +35,13 @@ pub fn build_env(config: &Config, pp_seed: &SeedMaterial) -> PaymentProcessorEnv
     );
     vars.insert(
         "CONSOLE_WALLET_PATH".to_string(),
-        config.paths.minotari_console_wallet.display().to_string(),
+        absolute_path(&config.paths.minotari_console_wallet)
+            .display()
+            .to_string(),
     );
     vars.insert(
         "CONSOLE_WALLET_BASE_PATH".to_string(),
-        config
-            .paths
-            .data_dir
-            .join("payment-processor-console-wallet")
+        absolute_path(&console_wallet_base_path(config))
             .display()
             .to_string(),
     );
@@ -69,6 +70,30 @@ pub fn build_env(config: &Config, pp_seed: &SeedMaterial) -> PaymentProcessorEnv
             .unwrap_or("9145")
             .to_string(),
     );
+    vars.insert(
+        "BATCH_CREATOR_SLEEP_SECS".to_string(),
+        config.benchmark.mode3_worker_sleep_secs.to_string(),
+    );
+    vars.insert(
+        "UNSIGNED_TX_CREATOR_SLEEP_SECS".to_string(),
+        config.benchmark.mode3_worker_sleep_secs.to_string(),
+    );
+    vars.insert(
+        "TRANSACTION_SIGNER_SLEEP_SECS".to_string(),
+        config.benchmark.mode3_worker_sleep_secs.to_string(),
+    );
+    vars.insert(
+        "BROADCASTER_SLEEP_SECS".to_string(),
+        config.benchmark.mode3_worker_sleep_secs.to_string(),
+    );
+    vars.insert(
+        "CONFIRMATION_CHECKER_SLEEP_SECS".to_string(),
+        config.benchmark.mode3_worker_sleep_secs.to_string(),
+    );
+    vars.insert(
+        "CONFIRMATION_CHECKER_REQUIRED_CONFIRMATIONS".to_string(),
+        config.benchmark.c_min.to_string(),
+    );
     vars.insert("ACCOUNTS__DEFAULT__NAME".to_string(), "default".to_string());
     vars.insert(
         "ACCOUNTS__DEFAULT__VIEW_KEY".to_string(),
@@ -79,6 +104,379 @@ pub fn build_env(config: &Config, pp_seed: &SeedMaterial) -> PaymentProcessorEnv
         pp_seed.public_spend_key_hex.clone(),
     );
     PaymentProcessorEnv { vars }
+}
+
+pub fn payment_receiver_db_path(config: &Config) -> PathBuf {
+    config.paths.data_dir.join("payment-receiver/wallet.db")
+}
+
+pub fn payment_processor_db_path(config: &Config) -> PathBuf {
+    config.paths.data_dir.join("payment-processor/payments.db")
+}
+
+pub fn unlock_stale_payment_receiver_locks(config: &Config) -> anyhow::Result<usize> {
+    let db_path = payment_receiver_db_path(config);
+    if !db_path.exists() {
+        return Ok(0);
+    }
+    let mut conn = Connection::open(&db_path)
+        .with_context(|| format!("opening payment receiver database {}", db_path.display()))?;
+    let locked_request_ids = {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT DISTINCT locked_by_request_id
+            FROM outputs
+            WHERE status = 'LOCKED' AND locked_by_request_id IS NOT NULL
+            "#,
+        )?;
+        stmt.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if locked_request_ids.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.transaction()?;
+    for request_id in &locked_request_ids {
+        tx.execute(
+            "UPDATE pending_transactions SET status = 'EXPIRED' WHERE id = ?1 AND status = 'PENDING'",
+            params![request_id],
+        )?;
+        tx.execute(
+            r#"
+            UPDATE outputs
+            SET status = 'UNSPENT', locked_at = NULL, locked_by_request_id = NULL
+            WHERE locked_by_request_id = ?1 AND status = 'LOCKED'
+            "#,
+            params![request_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(locked_request_ids.len())
+}
+
+pub fn console_wallet_base_path(config: &Config) -> PathBuf {
+    config
+        .paths
+        .data_dir
+        .join("payment-processor-console-wallet")
+}
+
+pub async fn ensure_console_wallet_base(
+    config: &Config,
+    pp_seed: &SeedMaterial,
+    password: &str,
+) -> anyhow::Result<()> {
+    let base_path = console_wallet_base_path(config);
+    if console_wallet_db_path(&base_path).exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(&base_path)?;
+    let output = Command::new(&config.paths.minotari_console_wallet)
+        .env("MINOTARI_WALLET_SEED_WORDS", &pp_seed.seed_words)
+        .env("MINOTARI_WALLET_PASSWORD", password)
+        .arg("--base-path")
+        .arg(&base_path)
+        .arg("--network")
+        .arg("Esmeralda")
+        .arg("--non-interactive-mode")
+        .arg("--command-mode-auto-exit")
+        .arg("--skip-recovery")
+        .arg("--command")
+        .arg("get-balance")
+        .output()
+        .await
+        .context("initializing payment-processor console wallet signer base path")?;
+
+    if !output.status.success() {
+        bail!(
+            "console wallet signer initialization failed: status={} stderr={} stdout={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    Ok(())
+}
+
+fn console_wallet_db_path(base_path: &Path) -> PathBuf {
+    base_path
+        .join("esmeralda")
+        .join("data/wallet/db/console_wallet.db")
+}
+
+pub async fn start_payment_receiver(
+    config: &Config,
+    password: &str,
+) -> anyhow::Result<ManagedProcess> {
+    let db_path = payment_receiver_db_path(config);
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let api_port = listen_port(&config.modes.payment_receiver_listen, 9146);
+    let mut command = Command::new(&config.paths.minotari_binary);
+    command
+        .arg("--network")
+        .arg("esmeralda")
+        .arg("daemon")
+        .arg("--password")
+        .arg(password)
+        .arg("--base-url")
+        .arg(&config.network.base_node_http_url)
+        .arg("--batch-size")
+        .arg(config.benchmark.scan_batch_size.to_string())
+        .arg("--database-path")
+        .arg(db_path)
+        .arg("--scan-interval-secs")
+        .arg(config.timeouts.scan_batch_secs.to_string())
+        .arg("--api-port")
+        .arg(api_port.to_string());
+    spawn_logged_process("mode3-payment-receiver", command)
+}
+
+pub async fn start_payment_processor(
+    config: &Config,
+    env: &PaymentProcessorEnv,
+) -> anyhow::Result<ManagedProcess> {
+    let db_path = payment_processor_db_path(config);
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&db_path)
+        .with_context(|| format!("creating PP database file {}", db_path.display()))?;
+    let mut command = Command::new(&config.paths.payment_processor_binary);
+    command.envs(&env.vars);
+    spawn_logged_process("mode3-payment-processor", command)
+}
+
+fn sqlite_url(path: &Path) -> String {
+    format!("sqlite://{}", absolute_path(path).display())
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn spawn_logged_process(label: &str, mut command: Command) -> anyhow::Result<ManagedProcess> {
+    fs::create_dir_all("logs")?;
+    let stdout_path = PathBuf::from("logs").join(format!("{label}.stdout.log"));
+    let stderr_path = PathBuf::from("logs").join(format!("{label}.stderr.log"));
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stdout_path)?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_path)?;
+    let child = command
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .with_context(|| format!("spawning {label}"))?;
+    Ok(ManagedProcess {
+        label: label.to_string(),
+        child,
+        stdout_path,
+        stderr_path,
+    })
+}
+
+pub struct ManagedProcess {
+    label: String,
+    child: tokio::process::Child,
+    pub stdout_path: PathBuf,
+    pub stderr_path: PathBuf,
+}
+
+impl ManagedProcess {
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn try_wait(&mut self) -> anyhow::Result<Option<ExitStatus>> {
+        self.child
+            .try_wait()
+            .with_context(|| format!("checking {} process status", self.label))
+    }
+}
+
+impl Drop for ManagedProcess {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
+pub async fn wait_for_payment_receiver(
+    config: &Config,
+    process: &mut ManagedProcess,
+) -> anyhow::Result<serde_json::Value> {
+    let base_url = format!("http://{}", config.modes.payment_receiver_listen);
+    wait_for_json(
+        format!("{base_url}/accounts/default/balance"),
+        config.timeout(config.timeouts.startup_secs),
+        process,
+    )
+    .await
+}
+
+pub async fn wait_for_payment_receiver_balance(
+    config: &Config,
+    process: &mut ManagedProcess,
+    min_available: u64,
+) -> anyhow::Result<serde_json::Value> {
+    let url = format!(
+        "http://{}/accounts/default/balance",
+        config.modes.payment_receiver_listen
+    );
+    let timeout = config.timeout(config.timeouts.startup_secs);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let start = Instant::now();
+    let mut last_report = Instant::now();
+    let mut interval = time::interval(Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        if let Some(status) = process.try_wait()? {
+            bail!("{}", process_exit_message(process, status));
+        }
+        let balance = match client.get(&url).send().await {
+            Ok(response) => match response.error_for_status() {
+                Ok(response) => response.json::<serde_json::Value>().await?,
+                Err(error) => {
+                    if start.elapsed() > timeout {
+                        bail!(
+                            "payment receiver balance endpoint did not recover within {:?}: {}",
+                            timeout,
+                            error
+                        );
+                    }
+                    continue;
+                }
+            },
+            Err(error) => {
+                if start.elapsed() > timeout {
+                    bail!(
+                        "payment receiver balance endpoint did not respond within {:?}: {}",
+                        timeout,
+                        error
+                    );
+                }
+                continue;
+            }
+        };
+        let available = balance_amount_field(&balance, "available").unwrap_or_default();
+        if available >= min_available {
+            return Ok(balance);
+        }
+        if last_report.elapsed() >= Duration::from_secs(30) {
+            println!(
+                "mode3 payment receiver scan wait: available={} required={} balance={}",
+                available, min_available, balance
+            );
+            last_report = Instant::now();
+        }
+        if start.elapsed() > timeout {
+            bail!(
+                "payment receiver did not reach required available balance {} within {:?}; last_balance={}",
+                min_available,
+                timeout,
+                balance
+            );
+        }
+    }
+}
+
+pub async fn wait_for_payment_processor(
+    config: &Config,
+    process: &mut ManagedProcess,
+) -> anyhow::Result<ServiceVersion> {
+    let client =
+        PaymentProcessorClient::new(format!("http://{}", config.modes.payment_processor_listen));
+    let start = Instant::now();
+    let timeout = config.timeout(config.timeouts.startup_secs);
+    let mut interval = time::interval(Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        if let Some(status) = process.try_wait()? {
+            bail!("{}", process_exit_message(process, status));
+        }
+        let attempt_error = match client.health_version().await {
+            Ok(version) => return Ok(version),
+            Err(error) => error.to_string(),
+        };
+        if start.elapsed() > timeout {
+            bail!(
+                "payment processor did not become healthy within {:?}: {}",
+                timeout,
+                attempt_error
+            );
+        }
+    }
+}
+
+async fn wait_for_json(
+    url: String,
+    timeout: Duration,
+    process: &mut ManagedProcess,
+) -> anyhow::Result<serde_json::Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let start = Instant::now();
+    let mut interval = time::interval(Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        if let Some(status) = process.try_wait()? {
+            bail!("{}", process_exit_message(process, status));
+        }
+        let attempt_error = match client.get(&url).send().await {
+            Ok(response) => match response.error_for_status() {
+                Ok(response) => return Ok(response.json().await?),
+                Err(error) => error.to_string(),
+            },
+            Err(error) => error.to_string(),
+        };
+        if start.elapsed() > timeout {
+            bail!(
+                "{url} did not return JSON within {:?}: {}",
+                timeout,
+                attempt_error
+            );
+        }
+    }
+}
+
+fn process_exit_message(process: &ManagedProcess, status: ExitStatus) -> String {
+    format!(
+        "{} exited during startup with status {status}; stdout_log={} stderr_log={}",
+        process.label(),
+        process.stdout_path.display(),
+        process.stderr_path.display()
+    )
+}
+
+fn balance_amount_field(value: &serde_json::Value, key: &str) -> Option<u64> {
+    value
+        .get(key)
+        .and_then(|field| field.as_u64().or_else(|| field.as_str()?.parse().ok()))
+}
+
+fn listen_port(listen: &str, default: u16) -> u16 {
+    listen
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(default)
 }
 
 #[derive(Debug, Clone)]
@@ -115,10 +513,157 @@ pub struct ServiceVersion {
     pub version: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentBatchSnapshot {
+    pub id: String,
+    pub status: String,
+    pub retry_count: i64,
+    pub error_message: Option<String>,
+    pub has_unsigned_tx: bool,
+    pub has_signed_tx: bool,
+    pub mined_height: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentSnapshot {
+    pub id: String,
+    pub status: String,
+    pub payment_batch_id: Option<String>,
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentProcessorDbSnapshot {
+    pub batches: Vec<PaymentBatchSnapshot>,
+    pub payments: Vec<PaymentSnapshot>,
+}
+
+impl PaymentProcessorDbSnapshot {
+    pub fn status_summary(&self) -> String {
+        let batches = self
+            .batches
+            .iter()
+            .map(|batch| {
+                format!(
+                    "batch:{} status:{} retries:{} unsigned:{} signed:{} error:{}",
+                    batch.id,
+                    batch.status,
+                    batch.retry_count,
+                    batch.has_unsigned_tx,
+                    batch.has_signed_tx,
+                    batch.error_message.as_deref().unwrap_or("none")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let payments = self
+            .payments
+            .iter()
+            .map(|payment| {
+                format!(
+                    "payment:{} status:{} batch:{} failure:{}",
+                    payment.id,
+                    payment.status,
+                    payment.payment_batch_id.as_deref().unwrap_or("none"),
+                    payment.failure_reason.as_deref().unwrap_or("none")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        format!("batches=[{batches}] payments=[{payments}]")
+    }
+
+    pub fn has_upstream_signing_or_broadcast_error(&self) -> bool {
+        self.batches.iter().any(|batch| {
+            batch.error_message.as_ref().is_some_and(|error| {
+                let error = error.to_lowercase();
+                error.contains("sign")
+                    || error.contains("deserialize")
+                    || error.contains("broadcast")
+                    || error.contains("submit")
+                    || error.contains("cli exited")
+            })
+        })
+    }
+}
+
+pub fn inspect_payment_processor_db(
+    config: &Config,
+    batch_ids: &[String],
+    payment_ids: &[String],
+) -> anyhow::Result<PaymentProcessorDbSnapshot> {
+    let db_path = payment_processor_db_path(config);
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("opening PP database {}", db_path.display()))?;
+
+    let batches = batch_ids
+        .iter()
+        .map(|id| inspect_batch(&conn, id))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let payments = payment_ids
+        .iter()
+        .map(|id| inspect_payment(&conn, id))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(PaymentProcessorDbSnapshot { batches, payments })
+}
+
+fn inspect_batch(conn: &Connection, id: &str) -> anyhow::Result<PaymentBatchSnapshot> {
+    conn.query_row(
+        r#"
+        SELECT
+            id,
+            status,
+            retry_count,
+            error_message,
+            unsigned_tx_json IS NOT NULL,
+            signed_tx_json IS NOT NULL,
+            mined_height
+        FROM payment_batches
+        WHERE id = ?1
+        "#,
+        params![id],
+        |row| {
+            Ok(PaymentBatchSnapshot {
+                id: row.get(0)?,
+                status: row.get(1)?,
+                retry_count: row.get(2)?,
+                error_message: row.get(3)?,
+                has_unsigned_tx: row.get::<_, i64>(4)? != 0,
+                has_signed_tx: row.get::<_, i64>(5)? != 0,
+                mined_height: row.get(6)?,
+            })
+        },
+    )
+    .with_context(|| format!("reading PP batch {id}"))
+}
+
+fn inspect_payment(conn: &Connection, id: &str) -> anyhow::Result<PaymentSnapshot> {
+    conn.query_row(
+        r#"
+        SELECT id, status, payment_batch_id, failure_reason
+        FROM payments
+        WHERE id = ?1
+        "#,
+        params![id],
+        |row| {
+            Ok(PaymentSnapshot {
+                id: row.get(0)?,
+                status: row.get(1)?,
+                payment_batch_id: row.get(2)?,
+                failure_reason: row.get(3)?,
+            })
+        },
+    )
+    .with_context(|| format!("reading PP payment {id}"))
+}
+
 impl PaymentProcessorClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("valid reqwest client"),
             base_url: base_url.into().trim_end_matches('/').to_string(),
         }
     }

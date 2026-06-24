@@ -84,6 +84,13 @@ mode2_scenario_amount = "1 T"
 mode2_live_max_s1_txs = 2       # 0 means full doubling/fanout target
 mode2_live_max_s4_batch = 2     # 0 means use each concurrent_batches value
 mode2_live_max_s5_txs = 2       # 0 means use S5_M
+
+mode3_live_topology = true      # runs real PP plus minotari payment receiver
+mode3_scenario_amount = "1 T"
+mode3_live_max_s1_batches = 1   # 0 means full doubling/fanout target
+mode3_live_max_s4_batch = 1     # 0 means use each concurrent_batches value
+mode3_live_max_s5_items = 2     # 0 means use S5_M
+mode3_worker_sleep_secs = 1     # PP worker cadence during live runs
 ```
 
 ```sh
@@ -122,6 +129,20 @@ S5 from the same direct one-sided send primitive:
 - S5 measures the Mode 2 individual-send arm, capped by
   `mode2_live_max_s5_txs` when non-zero. The PP Mode 3 surface is responsible
   for the payment-batch arm.
+
+When `mode3_live_topology` is enabled, the harness starts a real
+`minotari_payment_processor` process plus a parallel `minotari daemon` payment
+receiver. The PP companion view wallet is initialized with a current birthday
+when the generated PP seed is genesis-dated, so fresh benchmark funding does not
+force an accidental genesis scan. Before the daemon starts, the harness expires
+and unlocks stale payment-receiver locks left by previously interrupted local
+runs; it does not unlock between scenarios inside a run.
+
+Mode 3 S1/S4/S5 drive `/v1/payment-batches` with the configured caps. With a
+single large funded UTXO, the first signed/broadcast PP batch can lock the wallet
+change while it waits for confirmation, and later PP batches may remain
+`PENDING_BATCHING` with worker logs reporting insufficient available funds. That
+is real topology behavior and is preserved as benchmark signal.
 
 ## Schema
 
