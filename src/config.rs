@@ -52,6 +52,16 @@ pub struct BenchmarkConfig {
     pub mode2_send_smoke: bool,
     #[serde(default = "default_mode2_send_smoke_amount")]
     pub mode2_send_smoke_amount: String,
+    #[serde(default)]
+    pub mode2_live_scenarios: bool,
+    #[serde(default = "default_mode2_scenario_amount")]
+    pub mode2_scenario_amount: String,
+    #[serde(default)]
+    pub mode2_live_max_s1_txs: u32,
+    #[serde(default)]
+    pub mode2_live_max_s4_batch: u32,
+    #[serde(default)]
+    pub mode2_live_max_s5_txs: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,8 +153,15 @@ impl Config {
         if self.benchmark.scan_batch_size == 0 {
             bail!("benchmark.scan_batch_size must be greater than 0");
         }
+        if self.benchmark.mode2_send_smoke && self.benchmark.mode2_live_scenarios {
+            bail!(
+                "benchmark.mode2_send_smoke and benchmark.mode2_live_scenarios are mutually exclusive"
+            );
+        }
         parse_amount(&self.benchmark.mode2_send_smoke_amount)
             .context("benchmark.mode2_send_smoke_amount")?;
+        parse_amount(&self.benchmark.mode2_scenario_amount)
+            .context("benchmark.mode2_scenario_amount")?;
         if self.benchmark.s5_k == 0 || !self.benchmark.s5_m.is_multiple_of(self.benchmark.s5_k) {
             bail!("benchmark.s5_m must be a positive multiple of benchmark.s5_k");
         }
@@ -153,6 +170,9 @@ impl Config {
         }
         if self.benchmark.concurrent_batches.is_empty() {
             bail!("benchmark.concurrent_batches must not be empty");
+        }
+        if self.benchmark.concurrent_batches.contains(&0) {
+            bail!("benchmark.concurrent_batches entries must be greater than 0");
         }
         self.a_fund()?;
         self.fee_rate()?;
@@ -221,6 +241,26 @@ impl Config {
                 "mode2_send_smoke_amount".to_string(),
                 serde_json::json!(self.benchmark.mode2_send_smoke_amount),
             ),
+            (
+                "mode2_live_scenarios".to_string(),
+                serde_json::json!(self.benchmark.mode2_live_scenarios),
+            ),
+            (
+                "mode2_scenario_amount".to_string(),
+                serde_json::json!(self.benchmark.mode2_scenario_amount),
+            ),
+            (
+                "mode2_live_max_s1_txs".to_string(),
+                serde_json::json!(self.benchmark.mode2_live_max_s1_txs),
+            ),
+            (
+                "mode2_live_max_s4_batch".to_string(),
+                serde_json::json!(self.benchmark.mode2_live_max_s4_batch),
+            ),
+            (
+                "mode2_live_max_s5_txs".to_string(),
+                serde_json::json!(self.benchmark.mode2_live_max_s5_txs),
+            ),
         ])
     }
 
@@ -252,6 +292,11 @@ impl Default for Config {
                 live_fresh_scan_cells: false,
                 mode2_send_smoke: false,
                 mode2_send_smoke_amount: default_mode2_send_smoke_amount(),
+                mode2_live_scenarios: false,
+                mode2_scenario_amount: default_mode2_scenario_amount(),
+                mode2_live_max_s1_txs: 0,
+                mode2_live_max_s4_batch: 0,
+                mode2_live_max_s5_txs: 0,
             },
             paths: PathConfig {
                 data_dir: PathBuf::from(".bench-data"),
@@ -290,6 +335,10 @@ fn default_scan_batch_size() -> u64 {
 }
 
 fn default_mode2_send_smoke_amount() -> String {
+    "1 T".to_string()
+}
+
+fn default_mode2_scenario_amount() -> String {
     "1 T".to_string()
 }
 
@@ -384,5 +433,30 @@ mod tests {
         cfg.benchmark.mode2_send_smoke_amount = "not money".to_string();
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("mode2_send_smoke_amount"));
+    }
+
+    #[test]
+    fn mode2_live_scenario_amount_must_parse() {
+        let mut cfg = Config::default();
+        cfg.benchmark.mode2_scenario_amount = "not money".to_string();
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("mode2_scenario_amount"));
+    }
+
+    #[test]
+    fn mode2_smoke_and_live_scenarios_are_exclusive() {
+        let mut cfg = Config::default();
+        cfg.benchmark.mode2_send_smoke = true;
+        cfg.benchmark.mode2_live_scenarios = true;
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn concurrent_batches_must_be_positive() {
+        let mut cfg = Config::default();
+        cfg.benchmark.concurrent_batches = vec![8, 0, 16];
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("concurrent_batches"));
     }
 }

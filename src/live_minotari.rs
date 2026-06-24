@@ -26,6 +26,7 @@ use tari_transaction_components::{
     rpc::models::{TxSubmissionRejectionReason, TxSubmissionResponse},
 };
 use tari_utilities::ByteArray;
+use tokio::task::JoinSet;
 
 use crate::{
     config::{Config, parse_amount},
@@ -106,7 +107,9 @@ pub async fn annotate_profile_with_library_smoke(
         }
     }
 
-    if config.benchmark.mode2_send_smoke {
+    if config.benchmark.mode2_live_scenarios {
+        annotate_mode2_live_scenarios(config, book, profile).await?;
+    } else if config.benchmark.mode2_send_smoke {
         annotate_mode2_send_smoke(config, book, profile).await?;
     } else if let Some(mode) = profile.modes.get_mut("new_wallet")
         && let Some(cell) = mode.scenarios.get_mut("S1")
@@ -115,6 +118,18 @@ pub async fn annotate_profile_with_library_smoke(
             "Mode 2 send smoke disabled; set benchmark.mode2_send_smoke=true to run the opt-in tiny spend"
                 .to_string(),
         );
+        if let Some(cell) = mode.scenarios.get_mut("S4") {
+            cell.notes.push(
+                "Mode 2 live scenarios disabled; set benchmark.mode2_live_scenarios=true to run concurrent send batches"
+                    .to_string(),
+            );
+        }
+        if let Some(cell) = mode.scenarios.get_mut("S5") {
+            cell.notes.push(
+                "Mode 2 live scenarios disabled; set benchmark.mode2_live_scenarios=true to run the individual-send arm"
+                    .to_string(),
+            );
+        }
     }
 
     if config.benchmark.live_fresh_scan_cells {
@@ -295,6 +310,206 @@ async fn annotate_mode2_send_smoke(
     }
 
     Ok(())
+}
+
+async fn annotate_mode2_live_scenarios(
+    config: &Config,
+    book: &AddressBook,
+    profile: &mut ResultProfile,
+) -> anyhow::Result<()> {
+    let Some(sender_seed) = book.addresses.get(WalletRole::NewWallet.label()) else {
+        return Ok(());
+    };
+    let Some(recipient_seed) = book.addresses.get(WalletRole::OldWallet.label()) else {
+        return Ok(());
+    };
+
+    ensure_signing_wallet(
+        &config.modes.new_wallet_database,
+        &sender_seed.seed_words,
+        &config.seeds.wallet_password_env,
+    )?;
+
+    let request = OwnedOneSidedSendRequest {
+        db_path: config.modes.new_wallet_database.clone(),
+        password: wallet_password(&config.seeds.wallet_password_env)?,
+        base_node_url: config.network.base_node_http_url.clone(),
+        recipient: recipient_seed.address.clone(),
+        amount: parse_amount(&config.benchmark.mode2_scenario_amount)?,
+        fee_rate: config.fee_rate()?,
+        seconds_to_lock: config.timeouts.transaction_lock_secs,
+        confirmation_window: config.benchmark.c_min,
+        request_timeout: Duration::from_secs(30),
+    };
+
+    let s1_attempts = capped_attempts(
+        config
+            .benchmark
+            .doubling_rounds
+            .saturating_mul(config.benchmark.fanout_outputs_per_tx)
+            .min(config.benchmark.volume_target),
+        config.benchmark.mode2_live_max_s1_txs,
+    );
+    let s1 = run_send_attempts_sequential("new_wallet/S1", s1_attempts, request.clone()).await;
+    record_mode2_send_summary(
+        profile,
+        ScenarioName::S1,
+        &s1,
+        vec![
+            format!(
+                "Mode 2 S1 live scenario: attempted {} one-sided sends of {} to recipient {}; planned_doubling_fanout={} capped_by_mode2_live_max_s1_txs={}",
+                s1.attempted,
+                config.benchmark.mode2_scenario_amount,
+                recipient_seed.address,
+                config
+                    .benchmark
+                    .doubling_rounds
+                    .saturating_mul(config.benchmark.fanout_outputs_per_tx)
+                    .min(config.benchmark.volume_target),
+                config.benchmark.mode2_live_max_s1_txs
+            ),
+            "Pinned minotari one-sided API is currently single-recipient, so this records configured send attempts rather than true multi-recipient fanout."
+                .to_string(),
+        ],
+    );
+
+    let s4 = run_s4_batches(config, request.clone()).await;
+    record_mode2_send_summary(
+        profile,
+        ScenarioName::S4,
+        &s4,
+        vec![
+            format!(
+                "Mode 2 S4 live scenario: configured concurrent_batches={:?}, per-batch cap={}, S4_T_budget_secs={}",
+                config.benchmark.concurrent_batches,
+                config.benchmark.mode2_live_max_s4_batch,
+                config.benchmark.s4_t_budget_secs
+            ),
+            "Each S4 batch is dispatched concurrently against the same wallet database; UTXO lock contention and send failures are benchmark signal."
+                .to_string(),
+        ],
+    );
+
+    let s5_attempts = capped_attempts(
+        config.benchmark.s5_m,
+        config.benchmark.mode2_live_max_s5_txs,
+    );
+    let s5 = run_send_attempts_sequential("new_wallet/S5", s5_attempts, request).await;
+    record_mode2_send_summary(
+        profile,
+        ScenarioName::S5,
+        &s5,
+        vec![
+            format!(
+                "Mode 2 S5 individual-send arm: attempted {} of configured S5_M={} sends with S5_K={}; cap={}",
+                s5.attempted,
+                config.benchmark.s5_m,
+                config.benchmark.s5_k,
+                config.benchmark.mode2_live_max_s5_txs
+            ),
+            "Mode 2 has no batch endpoint at this layer; PP Mode 3 is responsible for the payment-batch arm."
+                .to_string(),
+        ],
+    );
+
+    Ok(())
+}
+
+async fn run_s4_batches(config: &Config, request: OwnedOneSidedSendRequest) -> ScenarioSendSummary {
+    let mut total = ScenarioSendSummary::default();
+    let start = Instant::now();
+    for configured_batch in &config.benchmark.concurrent_batches {
+        let attempts = capped_attempts(*configured_batch, config.benchmark.mode2_live_max_s4_batch);
+        let batch = run_send_attempts_concurrent(
+            &format!("new_wallet/S4 batch {configured_batch}"),
+            attempts,
+            request.clone(),
+        )
+        .await;
+        total.add_batch(*configured_batch, batch);
+    }
+    total.wall_ms = start.elapsed().as_millis();
+    total
+}
+
+async fn run_send_attempts_sequential(
+    label: &str,
+    attempts: u32,
+    request: OwnedOneSidedSendRequest,
+) -> ScenarioSendSummary {
+    let mut summary = ScenarioSendSummary {
+        attempted: attempts,
+        ..ScenarioSendSummary::default()
+    };
+    let start = Instant::now();
+    for attempt in 1..=attempts {
+        println!("{label} attempt {attempt}/{attempts} dispatching");
+        let result = construct_sign_broadcast_one_sided_owned(request.clone()).await;
+        summary.record_attempt(attempt, result);
+    }
+    summary.wall_ms = start.elapsed().as_millis();
+    summary
+}
+
+async fn run_send_attempts_concurrent(
+    label: &str,
+    attempts: u32,
+    request: OwnedOneSidedSendRequest,
+) -> ScenarioSendSummary {
+    let mut summary = ScenarioSendSummary {
+        attempted: attempts,
+        ..ScenarioSendSummary::default()
+    };
+    let start = Instant::now();
+    let mut join_set = JoinSet::new();
+    for attempt in 1..=attempts {
+        println!("{label} attempt {attempt}/{attempts} dispatching");
+        let request = request.clone();
+        join_set.spawn(async move {
+            (
+                attempt,
+                construct_sign_broadcast_one_sided_owned(request).await,
+            )
+        });
+    }
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok((attempt, send)) => summary.record_attempt(attempt, send),
+            Err(error) => summary.record_join_error(error.to_string()),
+        }
+    }
+    summary.wall_ms = start.elapsed().as_millis();
+    summary
+}
+
+fn record_mode2_send_summary(
+    profile: &mut ResultProfile,
+    scenario: ScenarioName,
+    summary: &ScenarioSendSummary,
+    mut notes: Vec<String>,
+) {
+    let Some(mode) = profile.modes.get_mut("new_wallet") else {
+        return;
+    };
+    let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
+        return;
+    };
+
+    cell.record_repetition(Repetition {
+        run: 1,
+        status: CellStatus::Ok,
+        wall_ms: Some(summary.wall_ms),
+        success_count: summary.success_count,
+        failure_count: summary.failure_count,
+        fee_microtari: Some(summary.fee_microtari),
+        error: None,
+    });
+    notes.push(summary.note(scenario));
+    cell.notes.extend(notes);
+}
+
+fn capped_attempts(planned: u32, cap: u32) -> u32 {
+    if cap == 0 { planned } else { planned.min(cap) }
 }
 
 async fn annotate_mode_scan_cells(
@@ -518,11 +733,154 @@ pub struct OneSidedSendRequest<'a> {
     pub request_timeout: Duration,
 }
 
+#[derive(Clone)]
+struct OwnedOneSidedSendRequest {
+    db_path: PathBuf,
+    password: String,
+    base_node_url: String,
+    recipient: String,
+    amount: MicroMinotari,
+    fee_rate: MicroMinotari,
+    seconds_to_lock: u64,
+    confirmation_window: u64,
+    request_timeout: Duration,
+}
+
+impl OwnedOneSidedSendRequest {
+    fn as_borrowed(&self) -> OneSidedSendRequest<'_> {
+        OneSidedSendRequest {
+            db_path: &self.db_path,
+            password: &self.password,
+            base_node_url: &self.base_node_url,
+            recipient: &self.recipient,
+            amount: self.amount,
+            fee_rate: self.fee_rate,
+            seconds_to_lock: self.seconds_to_lock,
+            confirmation_window: self.confirmation_window,
+            request_timeout: self.request_timeout,
+        }
+    }
+}
+
 pub struct OneSidedSendOutcome {
     pub tx_id: String,
     pub fee_microtari: u64,
     pub accepted: bool,
     pub is_synced: bool,
+}
+
+#[derive(Default)]
+struct ScenarioSendSummary {
+    attempted: u32,
+    success_count: u32,
+    failure_count: u32,
+    wall_ms: u128,
+    fee_microtari: u64,
+    tx_ids: Vec<String>,
+    errors: Vec<String>,
+    batch_summaries: Vec<BatchSendSummary>,
+}
+
+struct BatchSendSummary {
+    configured_batch: u32,
+    attempted: u32,
+    success_count: u32,
+    failure_count: u32,
+    wall_ms: u128,
+}
+
+impl ScenarioSendSummary {
+    fn record_attempt(&mut self, attempt: u32, result: anyhow::Result<OneSidedSendOutcome>) {
+        match result {
+            Ok(outcome) => {
+                println!(
+                    "mode2 send attempt {attempt} ok: tx_id={} accepted={} is_synced={}",
+                    outcome.tx_id, outcome.accepted, outcome.is_synced
+                );
+                self.success_count += 1;
+                self.fee_microtari = self.fee_microtari.saturating_add(outcome.fee_microtari);
+                self.tx_ids.push(outcome.tx_id);
+            }
+            Err(error) => {
+                println!("mode2 send attempt {attempt} failed: {error:#}");
+                self.failure_count += 1;
+                self.errors.push(format!("{error:#}"));
+            }
+        }
+    }
+
+    fn record_join_error(&mut self, error: String) {
+        println!("mode2 concurrent send task failed: {error}");
+        self.failure_count += 1;
+        self.errors.push(format!("task join error: {error}"));
+    }
+
+    fn add_batch(&mut self, configured_batch: u32, batch: Self) {
+        self.attempted = self.attempted.saturating_add(batch.attempted);
+        self.success_count = self.success_count.saturating_add(batch.success_count);
+        self.failure_count = self.failure_count.saturating_add(batch.failure_count);
+        self.fee_microtari = self.fee_microtari.saturating_add(batch.fee_microtari);
+        self.tx_ids.extend(batch.tx_ids);
+        self.errors.extend(batch.errors);
+        self.batch_summaries.push(BatchSendSummary {
+            configured_batch,
+            attempted: batch.attempted,
+            success_count: batch.success_count,
+            failure_count: batch.failure_count,
+            wall_ms: batch.wall_ms,
+        });
+    }
+
+    fn note(&self, scenario: ScenarioName) -> String {
+        let mut parts = vec![
+            format!(
+                "{} summary: attempted={} successes={} failures={} wall_ms={} fee_microtari={}",
+                scenario.as_str(),
+                self.attempted,
+                self.success_count,
+                self.failure_count,
+                self.wall_ms,
+                self.fee_microtari
+            ),
+            format!("tx_ids={}", limited_list(&self.tx_ids)),
+        ];
+        if !self.errors.is_empty() {
+            parts.push(format!("errors={}", limited_list(&self.errors)));
+        }
+        if !self.batch_summaries.is_empty() {
+            let batches = self
+                .batch_summaries
+                .iter()
+                .map(|batch| {
+                    format!(
+                        "configured_batch:{} attempted:{} successes:{} failures:{} wall_ms:{}",
+                        batch.configured_batch,
+                        batch.attempted,
+                        batch.success_count,
+                        batch.failure_count,
+                        batch.wall_ms
+                    )
+                })
+                .collect::<Vec<_>>();
+            parts.push(format!("batches={}", batches.join("; ")));
+        }
+        parts.join("; ")
+    }
+}
+
+fn limited_list(values: &[String]) -> String {
+    const LIMIT: usize = 12;
+    let mut visible = values.iter().take(LIMIT).cloned().collect::<Vec<_>>();
+    if values.len() > LIMIT {
+        visible.push(format!("... {} more", values.len() - LIMIT));
+    }
+    format!("[{}]", visible.join(", "))
+}
+
+async fn construct_sign_broadcast_one_sided_owned(
+    request: OwnedOneSidedSendRequest,
+) -> anyhow::Result<OneSidedSendOutcome> {
+    construct_sign_broadcast_one_sided(request.as_borrowed()).await
 }
 
 pub async fn construct_sign_broadcast_one_sided(
@@ -549,7 +907,18 @@ pub async fn construct_sign_broadcast_one_sided(
     )?;
     let key_manager = sender.account.get_key_manager(request.password)?;
     let constants = ConsensusConstantsBuilder::new(Network::Esmeralda).build();
-    let signed = sign_locked_transaction(&key_manager, constants, Network::Esmeralda, unsigned)?;
+    let signed =
+        match sign_locked_transaction(&key_manager, constants, Network::Esmeralda, unsigned) {
+            Ok(signed) => signed,
+            Err(error) => {
+                if let Err(cleanup) = expire_and_unlock_processed_transaction(&sender) {
+                    anyhow::bail!(
+                        "signing locked transaction failed: {error}; cleanup failed: {cleanup:#}"
+                    );
+                }
+                anyhow::bail!("signing locked transaction failed: {error}");
+            }
+        };
     finalize_transaction_and_broadcast_without_retry(&sender, signed, request).await
 }
 
@@ -558,7 +927,14 @@ async fn finalize_transaction_and_broadcast_without_retry(
     signed: SignedOneSidedTransactionResult,
     request: OneSidedSendRequest<'_>,
 ) -> anyhow::Result<OneSidedSendOutcome> {
-    persist_signed_transaction(sender, &signed)?;
+    if let Err(error) = persist_signed_transaction(sender, &signed) {
+        if let Err(cleanup) = expire_and_unlock_processed_transaction(sender) {
+            anyhow::bail!(
+                "persisting signed transaction failed: {error:#}; cleanup failed: {cleanup:#}"
+            );
+        }
+        return Err(error);
+    }
     let tx_id = signed.signed_transaction.tx_id;
     let fee_microtari = signed.request.info.fee.0;
     let submission = submit_transaction_without_retry(
@@ -619,6 +995,17 @@ async fn finalize_transaction_and_broadcast_without_retry(
             Err(error)
         }
     }
+}
+
+fn expire_and_unlock_processed_transaction(sender: &TransactionSender) -> anyhow::Result<()> {
+    let pending_tx_id = sender.processed_transactions.id();
+    if pending_tx_id.is_empty() {
+        return Ok(());
+    }
+    let conn = sender.db_pool.get()?;
+    db::update_pending_transaction_status(&conn, pending_tx_id, PendingTransactionStatus::Expired)?;
+    db::unlock_outputs_for_pending_transaction(&conn, pending_tx_id)?;
+    Ok(())
 }
 
 fn persist_signed_transaction(

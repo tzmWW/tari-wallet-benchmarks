@@ -18,6 +18,11 @@ scan_batch_size = 1000
 live_fresh_scan_cells = false
 mode2_send_smoke = false
 mode2_send_smoke_amount = "1 T"
+mode2_live_scenarios = false
+mode2_scenario_amount = "1 T"
+mode2_live_max_s1_txs = 0
+mode2_live_max_s4_batch = 0
+mode2_live_max_s5_txs = 0
 
 [paths]
 data_dir = ".bench-data"

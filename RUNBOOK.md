@@ -70,12 +70,20 @@ missing.
 
 By default, live profile generation will verify the funded Mode 2 wallet balance
 but will not spend funds and will not run the long fresh-scan matrix. Enable the
-extra live gates intentionally in `[benchmark]`:
+extra live gates intentionally in `[benchmark]`. The scenario caps default to
+`0`, which means "use the configured benchmark size"; set small positive caps
+for compatibility or development runs.
 
 ```toml
 live_fresh_scan_cells = true    # long-running B0/S2/S3 fresh database scans
 mode2_send_smoke = true         # spends mode2_send_smoke_amount once
 mode2_send_smoke_amount = "1 T"
+
+mode2_live_scenarios = true     # spends via Mode 2 S1/S4/S5 cells
+mode2_scenario_amount = "1 T"
+mode2_live_max_s1_txs = 2       # 0 means full doubling/fanout target
+mode2_live_max_s4_batch = 2     # 0 means use each concurrent_batches value
+mode2_live_max_s5_txs = 2       # 0 means use S5_M
 ```
 
 ```sh
@@ -98,9 +106,22 @@ per-cell progress while they execute.
 When `mode2_send_smoke` is enabled, the harness constructs, signs, persists, and
 submits one one-sided transaction from the Mode 2 wallet using a direct JSON-RPC
 request. This avoids `WalletHttpClient::new`, whose default transport retries
-transient failures. The smoke is compatibility evidence only; the funded
-send-side B0/S0-S7 runner still has to be completed before the profile can be
-used as final bounty performance evidence.
+transient failures. `mode2_send_smoke` and `mode2_live_scenarios` are mutually
+exclusive.
+
+When `mode2_live_scenarios` is enabled, the harness records Mode 2 S1, S4, and
+S5 from the same direct one-sided send primitive:
+
+- S1 attempts the configured doubling/fanout send count, capped by
+  `mode2_live_max_s1_txs` when non-zero. The pinned `minotari` one-sided API is
+  single-recipient, so the result is recorded as send attempts rather than fake
+  multi-recipient fanout.
+- S4 dispatches each configured concurrent batch against the same wallet
+  database, capped by `mode2_live_max_s4_batch` when non-zero. Wallet lock
+  contention and failed sends are counted as benchmark signal.
+- S5 measures the Mode 2 individual-send arm, capped by
+  `mode2_live_max_s5_txs` when non-zero. The PP Mode 3 surface is responsible
+  for the payment-batch arm.
 
 ## Schema
 
