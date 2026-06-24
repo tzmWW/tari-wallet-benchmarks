@@ -607,7 +607,20 @@ async fn run_mode1_send_cells(
         )],
     );
 
-    let s4 = run_mode1_s4_batches(config, &context.client, &recipient, amount, fee_rate).await;
+    let mut s4 = run_mode1_s4_batches(config, &context.client, &recipient, amount, fee_rate).await;
+    wait_for_mode1_scan_advance(
+        &mut context.client,
+        config.settle_wait_blocks(),
+        config.timeout(config.timeouts.confirmation_secs),
+    )
+    .await;
+    wait_for_mode1_summary_verification(
+        &mut context.client,
+        &mut s4,
+        ScenarioName::S4,
+        config.timeout(config.timeouts.confirmation_secs),
+    )
+    .await;
     record_mode1_transfer_summary(
         profile,
         ScenarioName::S4,
@@ -617,13 +630,6 @@ async fn run_mode1_send_cells(
             config.benchmark.concurrent_batches, config.benchmark.mode1_live_max_s4_batch
         )],
     );
-
-    wait_for_mode1_scan_advance(
-        &mut context.client,
-        config.settle_wait_blocks(),
-        config.timeout(config.timeouts.confirmation_secs),
-    )
-    .await;
 
     let s5_recipients = derive_distinct_recipient_pool(config.benchmark.s5_m)?;
     let s5 = run_mode1_s5(
@@ -691,14 +697,13 @@ async fn run_mode1_s1(
             config.timeout(config.timeouts.confirmation_secs),
         )
         .await;
-        if !round_summary.tx_ids.is_empty() {
-            match verify_mode1_transactions(client, &round_summary.tx_ids, ScenarioName::S1).await {
-                Ok(verified) => round_summary.tx_infos.extend(verified),
-                Err(error) => round_summary
-                    .errors
-                    .push(format!("S1 round chain verification failed: {error:#}")),
-            }
-        }
+        wait_for_mode1_summary_verification(
+            client,
+            &mut round_summary,
+            ScenarioName::S1,
+            config.timeout(config.timeouts.confirmation_secs),
+        )
+        .await;
         let observed_utxos = mode1_unspent_count(client).await.ok();
         let balance_after = mode1_available_balance(client).await.ok();
         round_summary.extra_metrics.insert(
@@ -794,6 +799,19 @@ async fn run_mode1_s5(
     .await;
     total.add_batch(config.benchmark.s5_k, batch_arm);
     total.add_batch(1, individual_arm);
+    wait_for_mode1_scan_advance(
+        client,
+        config.settle_wait_blocks(),
+        config.timeout(config.timeouts.confirmation_secs),
+    )
+    .await;
+    wait_for_mode1_summary_verification(
+        client,
+        &mut total,
+        ScenarioName::S5,
+        config.timeout(config.timeouts.confirmation_secs),
+    )
+    .await;
     total.wall_ms = start.elapsed().as_millis();
     total.extra_metrics.insert(
         "s5_arms".to_string(),
@@ -930,14 +948,6 @@ async fn run_mode1_recipient_batches_sequential(
         summary.record_batch(batch_index, items_per_batch, result);
     }
     summary.wall_ms = start.elapsed().as_millis();
-    if !summary.tx_ids.is_empty() {
-        match verify_mode1_transactions(client, &summary.tx_ids, scenario).await {
-            Ok(verified) => summary.tx_infos.extend(verified),
-            Err(error) => summary
-                .errors
-                .push(format!("mode1 chain verification failed: {error:#}")),
-        }
-    }
     summary
 }
 
@@ -1121,6 +1131,70 @@ async fn verify_mode1_transactions(
             }
         })
         .collect())
+}
+
+async fn wait_for_mode1_summary_verification(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    summary: &mut Mode1TransferSummary,
+    scenario: ScenarioName,
+    timeout: Duration,
+) {
+    if summary.tx_ids.is_empty() {
+        return;
+    }
+    let start = Instant::now();
+    let mut interval = time::interval(Duration::from_secs(10));
+    let mut latest = Vec::new();
+    loop {
+        let remaining = timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        let call_timeout = remaining.min(Duration::from_secs(30));
+        match time::timeout(
+            call_timeout,
+            verify_mode1_transactions(client, &summary.tx_ids, scenario),
+        )
+        .await
+        {
+            Ok(Ok(verified)) => {
+                let all_terminal = !verified.is_empty()
+                    && verified.len() >= summary.tx_ids.len()
+                    && verified.iter().all(|tx| tx.confirmed);
+                println!(
+                    "mode1 verification wait: scenario={} confirmed={}/{} statuses={}",
+                    scenario.as_str(),
+                    verified.iter().filter(|tx| tx.confirmed).count(),
+                    summary.tx_ids.len(),
+                    verified
+                        .iter()
+                        .map(|tx| format!("{}:{}", tx.tx_id, tx.status_value))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+                latest = verified;
+                if all_terminal {
+                    break;
+                }
+            }
+            Ok(Err(error)) => {
+                summary
+                    .errors
+                    .push(format!("mode1 chain verification failed: {error:#}"));
+                break;
+            }
+            Err(_) => {
+                summary.errors.push(format!(
+                    "mode1 chain verification timed out after {}s for {} tx ids",
+                    call_timeout.as_secs(),
+                    summary.tx_ids.len()
+                ));
+                break;
+            }
+        }
+        interval.tick().await;
+    }
+    summary.tx_infos.extend(latest);
 }
 
 fn verify_mode2_transactions_from_db(
