@@ -12,12 +12,19 @@ The harness targets Esmeralda only and models the three required wallet surfaces
 Current implementation status: CLI/config/schema/seed handling, Esmeralda
 guarding, result-profile generation, PP environment/API contract, static
 "no hidden wallet pain" rules, and the Mode 2 `live-minotari` scan/signing smoke
-path are in place. Fresh Mode 2 and PP companion scan cells are measured from
-new databases so warmed scan state does not leak into the baseline. The checked
-baseline includes capped real Mode 1 `minotari_console_wallet` gRPC S0/S1/S4/S5
-evidence, capped Mode 2 live S1/S4/S5 send-side cells, and capped real Mode 3
-payment-processor S0/S1/S4/S5 coverage through the pinned PP daemon. The
-remaining bounty-critical work is running the full funded B0/S0-S7 matrix.
+path are in place. Mode 2 submitted transactions are independently queried
+through the public base-node `/transactions` endpoint by extracting kernel
+signature data from the wallet DB's serialized transaction. Top-level chain
+verification rows are emitted only for mined transactions that are at least
+`C_min` deep. Fresh scan cells are checkpointed: B0 uses an empty genesis seed,
+S2/S3 run after a valid S1 checkpoint, and S6/S7 run after S5. Mode 1 scan cells
+use real `minotari_console_wallet --recovery`; Mode 2 and PP companion scans use
+fresh minotari scanner databases. The checked baseline includes capped real Mode
+1 `minotari_console_wallet` gRPC S0/S1/S4/S5 evidence, capped Mode 2 live
+S1/S4/S5 send-side cells, and capped real Mode 3 payment-processor S0/S1/S4/S5
+coverage through the pinned PP daemon. The remaining bounty-critical work is
+promoting a fresh-funded Mode 2 proof and running the full funded B0/S0-S7
+matrix with repetitions where wallet state supports it.
 
 Start by generating fundable addresses:
 
@@ -41,4 +48,4 @@ Full operator detail is in [RUNBOOK.md](RUNBOOK.md).
 The committed baseline JSON is schema-valid harness output and deliberately
 contains no secrets. It includes funding evidence plus capped Mode 1, Mode 2,
 and real Mode 3 live evidence, but not the completed all-mode benchmark matrix
-yet.
+or the fresh-funded Mode 2 proof yet.

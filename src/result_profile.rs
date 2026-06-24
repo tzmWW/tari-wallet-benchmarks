@@ -277,7 +277,28 @@ pub fn write_schema(path: &PathBuf) -> anyhow::Result<()> {
         ],
         "tx_mined_confirmed_status_value": TX_MINED_CONFIRMED_STATUS
         ,
-        "repetition_optional_metrics": "scenario-specific structured metrics",
+        "repetition_optional_metrics": {
+            "description": "scenario-specific structured metrics; fields are optional and cells only emit values they observed",
+            "common_keys": [
+                "verification_source",
+                "verification_observations",
+                "observed_transactions",
+                "scan_checkpoint",
+                "birthday",
+                "tip_start",
+                "tip_end",
+                "blocks_scanned",
+                "blocks_per_sec",
+                "detected_outputs",
+                "available_microtari"
+            ],
+            "verification_source_values": [
+                "base_node_transaction_query",
+                "wallet_db_observed",
+                "payment_processor_db_observed",
+                "wallet_scan_observed"
+            ]
+        },
         "verified_transaction_optional_keys": [
             "amount_microtari",
             "fee_microtari",

@@ -17,7 +17,28 @@
     "base_node_host",
     "base_node_network_path"
   ],
-  "repetition_optional_metrics": "scenario-specific structured metrics",
+  "repetition_optional_metrics": {
+    "common_keys": [
+      "verification_source",
+      "verification_observations",
+      "observed_transactions",
+      "scan_checkpoint",
+      "birthday",
+      "tip_start",
+      "tip_end",
+      "blocks_scanned",
+      "blocks_per_sec",
+      "detected_outputs",
+      "available_microtari"
+    ],
+    "description": "scenario-specific structured metrics; fields are optional and cells only emit values they observed",
+    "verification_source_values": [
+      "base_node_transaction_query",
+      "wallet_db_observed",
+      "payment_processor_db_observed",
+      "wallet_scan_observed"
+    ]
+  },
   "required_top_level_keys": [
     "schema_version",
     "generated_at",

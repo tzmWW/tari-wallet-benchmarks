@@ -30,7 +30,8 @@ use tari_transaction_components::{
     MicroMinotari,
     consensus::ConsensusConstantsBuilder,
     offline_signing::{models::SignedOneSidedTransactionResult, sign_locked_transaction},
-    rpc::models::{TxSubmissionRejectionReason, TxSubmissionResponse},
+    rpc::models::{TxLocation, TxQueryResponse, TxSubmissionRejectionReason, TxSubmissionResponse},
+    transaction_components::Transaction,
 };
 use tari_utilities::ByteArray;
 use tokio::{process::Command, task::JoinSet, time};
@@ -154,7 +155,7 @@ pub async fn annotate_profile_with_library_smoke(
     }
 
     if config.benchmark.live_fresh_scan_cells {
-        annotate_fresh_scan_cells(config, book, profile).await?;
+        annotate_fresh_scan_b0_cells(config, book, profile).await?;
     } else {
         annotate_fresh_scan_cells_disabled(profile);
     }
@@ -211,31 +212,39 @@ pub async fn scan_to_tip(
     Ok(start.elapsed().as_millis())
 }
 
-async fn annotate_fresh_scan_cells(
+async fn annotate_fresh_scan_b0_cells(
     config: &Config,
     book: &AddressBook,
     profile: &mut ResultProfile,
 ) -> anyhow::Result<()> {
-    let birthday = current_birthday();
+    let spec = FreshScanSpec {
+        scenario: ScenarioName::B0,
+        wallet_state: FreshScanWalletState::EmptyGenesis,
+        checkpoint: ScanCheckpoint::Empty,
+    };
+
+    if let Some(old_wallet) = book.addresses.get(WalletRole::OldWallet.label()) {
+        run_mode1_fresh_scan_for_cell(config, profile, old_wallet, spec).await?;
+    }
 
     if let Some(new_wallet) = book.addresses.get(WalletRole::NewWallet.label()) {
-        annotate_mode_scan_cells(
+        run_library_fresh_scan_for_cell(
             config,
             profile,
             "new_wallet",
             Some(&new_wallet.seed_words),
-            birthday,
+            spec,
         )
         .await?;
     }
 
     if let Some(pp_wallet) = book.addresses.get(WalletRole::PaymentProcessor.label()) {
-        annotate_mode_scan_cells(
+        run_library_fresh_scan_for_cell(
             config,
             profile,
             "payment_processor",
             Some(&pp_wallet.seed_words),
-            birthday,
+            spec,
         )
         .await?;
     }
@@ -334,6 +343,7 @@ async fn annotate_mode1_console_wallet(
             run_mode1_send_cells(
                 config,
                 profile,
+                old_seed,
                 recipient_seed.address.clone(),
                 &mut context,
             )
@@ -445,9 +455,43 @@ fn grpc_bind_multiaddr(address: &str) -> anyhow::Result<String> {
     Ok(format!("/ip4/{host}/tcp/{port}"))
 }
 
+fn mode1_scan_grpc_address(
+    base_address: &str,
+    spec: FreshScanSpec,
+    run: u32,
+) -> anyhow::Result<String> {
+    let trimmed = base_address
+        .strip_prefix("http://")
+        .or_else(|| base_address.strip_prefix("https://"))
+        .unwrap_or(base_address);
+    let (host, port) = trimmed
+        .rsplit_once(':')
+        .with_context(|| format!("invalid gRPC address {base_address}"))?;
+    let port = port.parse::<u16>()?;
+    let offset = spec.port_offset(run);
+    let scheme = if base_address.starts_with("https://") {
+        "https"
+    } else {
+        "http"
+    };
+    Ok(format!(
+        "{scheme}://{host}:{}",
+        port.checked_add(offset)
+            .with_context(|| format!("scan gRPC port overflow for {base_address}"))?
+    ))
+}
+
 async fn wait_for_mode1_grpc(
     config: &Config,
     process: &mut Mode1ConsoleProcess,
+) -> anyhow::Result<WalletGrpcClient<tonic::transport::Channel>> {
+    wait_for_mode1_grpc_address(config, process, &config.modes.old_wallet_grpc_address).await
+}
+
+async fn wait_for_mode1_grpc_address(
+    config: &Config,
+    process: &mut Mode1ConsoleProcess,
+    grpc_address: &str,
 ) -> anyhow::Result<WalletGrpcClient<tonic::transport::Channel>> {
     let start = Instant::now();
     let timeout = config.timeout(config.timeouts.startup_secs);
@@ -463,7 +507,7 @@ async fn wait_for_mode1_grpc(
         }
         match time::timeout(
             Duration::from_secs(5),
-            WalletGrpcClient::connect(&config.modes.old_wallet_grpc_address),
+            WalletGrpcClient::connect(grpc_address),
         )
         .await
         {
@@ -479,6 +523,42 @@ async fn wait_for_mode1_grpc(
                 }
             }
         }
+    }
+}
+
+async fn wait_for_mode1_scan_to_tip(
+    process: &mut Mode1ConsoleProcess,
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    target_tip: Option<u64>,
+    timeout: Duration,
+) -> anyhow::Result<u64> {
+    let start = Instant::now();
+    let mut interval = time::interval(Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        if let Some(status) = process.try_wait()? {
+            bail!(
+                "minotari_console_wallet exited during fresh scan with status {status}; stdout_log={} stderr_log={}",
+                process.stdout_path.display(),
+                process.stderr_path.display()
+            );
+        }
+        let state = client
+            .get_state(grpc::GetStateRequest {})
+            .await?
+            .into_inner();
+        let scanned_height = state.scanned_height;
+        let target = target_tip.unwrap_or_else(|| scanned_height.saturating_add(1));
+        if scanned_height >= target {
+            return Ok(scanned_height);
+        }
+        if start.elapsed() > timeout {
+            bail!(
+                "console wallet fresh scan did not reach target tip {target} within {:?}; scanned_height={scanned_height}",
+                timeout
+            );
+        }
+        println!("mode1 fresh scan wait: scanned_height={scanned_height} target={target}");
     }
 }
 
@@ -604,6 +684,7 @@ fn record_mode1_startup_failure(profile: &mut ResultProfile, wall_ms: u128, erro
 async fn run_mode1_send_cells(
     config: &Config,
     profile: &mut ResultProfile,
+    old_seed: &crate::seeds::SeedMaterial,
     recipient: String,
     context: &mut Mode1ConsoleContext,
 ) -> anyhow::Result<()> {
@@ -621,6 +702,17 @@ async fn run_mode1_send_cells(
             config.benchmark.mode1_live_max_s1_txs
         )],
     );
+    if config.benchmark.live_fresh_scan_cells {
+        let checkpoint = checkpoint_from_mode1_summary(&s1, ScanCheckpoint::PostS1);
+        run_mode1_checkpoint_scan_cells(
+            config,
+            profile,
+            old_seed,
+            &[ScenarioName::S2, ScenarioName::S3],
+            checkpoint,
+        )
+        .await?;
+    }
 
     let mut s4 = run_mode1_s4_batches(config, &context.client, &recipient, amount, fee_rate).await;
     wait_for_mode1_scan_advance(
@@ -667,6 +759,17 @@ async fn run_mode1_send_cells(
             config.benchmark.mode1_live_max_s5_items
         )],
     );
+    if config.benchmark.live_fresh_scan_cells {
+        let checkpoint = checkpoint_from_mode1_summary(&s5, ScanCheckpoint::PostS5Complete);
+        run_mode1_checkpoint_scan_cells(
+            config,
+            profile,
+            old_seed,
+            &[ScenarioName::S6, ScenarioName::S7],
+            checkpoint,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -1214,54 +1317,145 @@ async fn wait_for_mode1_summary_verification(
     summary.backfill_verified_fee_total();
 }
 
-fn verify_mode2_transactions_from_db(
+async fn verify_mode2_transactions(
+    config: &Config,
     db_path: &Path,
     tx_ids: &[String],
     scenario: ScenarioName,
-) -> anyhow::Result<Vec<VerifiedTransaction>> {
+) -> anyhow::Result<Mode2VerificationResult> {
     if tx_ids.is_empty() || !db_path.exists() {
-        return Ok(Vec::new());
+        return Ok(Mode2VerificationResult::default());
     }
     let conn = Connection::open(db_path)?;
-    let mut verified = Vec::new();
+    let tip_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let mut result = Mode2VerificationResult::default();
     for tx_id in tx_ids {
         let Ok(parsed) = tx_id.parse::<u64>() else {
             continue;
         };
-        let row = conn.query_row(
-            r#"
-            SELECT status, mined_height, confirmation_height
-            FROM completed_transactions
-            WHERE id = ?1
-            "#,
-            [parsed as i64],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                ))
-            },
-        );
-        let (status, mined_height, confirmation_height) = match row {
-            Ok(row) => row,
-            Err(_) => ("not_found".to_string(), None, None),
+        let row = mode2_completed_transaction_row(&conn, parsed as i64)?;
+        let (status_value, confirmed, mined_height, source, query_observation) = match row.as_ref()
+        {
+            Some(row) => {
+                let kernel_query =
+                    mode2_kernel_query_from_serialized_transaction(&row.serialized_transaction);
+                match kernel_query {
+                    Ok(kernel_query) => {
+                        let query = query_mode2_transaction(
+                            &config.network.base_node_http_url,
+                            &kernel_query,
+                        )
+                        .await;
+                        match query {
+                            Ok(response) => {
+                                let (status_value, confirmed) = mode2_transaction_query_status(
+                                    &response,
+                                    tip_height,
+                                    config.benchmark.c_min,
+                                );
+                                let mined_height = response.mined_height.or(row
+                                    .confirmation_height
+                                    .or(row.mined_height)
+                                    .and_then(|height| u64::try_from(height).ok()));
+                                (
+                                    status_value,
+                                    confirmed,
+                                    mined_height,
+                                    "base_node_transaction_query",
+                                    mode2_query_observation(
+                                        tx_id,
+                                        row,
+                                        Some(&kernel_query),
+                                        Some(&response),
+                                        tip_height,
+                                        confirmed,
+                                        None,
+                                    ),
+                                )
+                            }
+                            Err(error) => {
+                                let (status_value, db_confirmed) =
+                                    mode2_completed_transaction_status(&row.status);
+                                (
+                                    status_value,
+                                    false,
+                                    row.confirmation_height
+                                        .or(row.mined_height)
+                                        .and_then(|height| u64::try_from(height).ok()),
+                                    "wallet_db_observed",
+                                    mode2_query_observation(
+                                        tx_id,
+                                        row,
+                                        Some(&kernel_query),
+                                        None,
+                                        tip_height,
+                                        db_confirmed,
+                                        Some(format!("{error:#}")),
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let (status_value, db_confirmed) =
+                            mode2_completed_transaction_status(&row.status);
+                        (
+                            status_value,
+                            false,
+                            row.confirmation_height
+                                .or(row.mined_height)
+                                .and_then(|height| u64::try_from(height).ok()),
+                            "wallet_db_observed",
+                            mode2_query_observation(
+                                tx_id,
+                                row,
+                                None,
+                                None,
+                                tip_height,
+                                db_confirmed,
+                                Some(format!("{error:#}")),
+                            ),
+                        )
+                    }
+                }
+            }
+            None => (
+                0,
+                false,
+                None,
+                "wallet_db_observed",
+                serde_json::json!({
+                    "tx_id": tx_id,
+                    "verification_source": "wallet_db_observed",
+                    "wallet_db_status": "not_found",
+                    "confirmed": false
+                }),
+            ),
         };
-        let (status_value, confirmed) = mode2_completed_transaction_status(status.as_str());
-        verified.push(VerifiedTransaction {
+
+        result.observed_transactions.push(VerifiedTransaction {
             tx_id: tx_id.clone(),
             status_value,
             mode: "new_wallet".to_string(),
             scenario: scenario.as_str().to_string(),
             amount_microtari: None,
-            fee_microtari: None,
-            mined_height: confirmation_height
-                .or(mined_height)
-                .and_then(|height| u64::try_from(height).ok()),
+            fee_microtari: row
+                .as_ref()
+                .and_then(|row| {
+                    mode2_kernel_query_from_serialized_transaction(&row.serialized_transaction).ok()
+                })
+                .and_then(|query| query.fee_microtari),
+            mined_height,
             confirmed,
         });
+        result.observations.push(query_observation);
+        if source == "base_node_transaction_query" {
+            result.used_base_node_query = true;
+        }
     }
-    Ok(verified)
+    Ok(result)
 }
 
 fn mode2_completed_transaction_status(status: &str) -> (u32, bool) {
@@ -1274,6 +1468,138 @@ fn mode2_completed_transaction_status(status: &str) -> (u32, bool) {
         "canceled" => (14, false),
         _ => (0, false),
     }
+}
+
+fn mode2_completed_transaction_row(
+    conn: &Connection,
+    tx_id: i64,
+) -> anyhow::Result<Option<Mode2CompletedTransactionRow>> {
+    let row = conn.query_row(
+        r#"
+        SELECT pending_tx_id, status, mined_height, confirmation_height, sent_payref, serialized_transaction
+        FROM completed_transactions
+        WHERE id = ?1
+        "#,
+        [tx_id],
+        |row| {
+            Ok(Mode2CompletedTransactionRow {
+                pending_tx_id: row.get::<_, String>(0)?,
+                status: row.get::<_, String>(1)?,
+                mined_height: row.get::<_, Option<i64>>(2)?,
+                confirmation_height: row.get::<_, Option<i64>>(3)?,
+                sent_payref: row.get::<_, Option<String>>(4)?,
+                serialized_transaction: row.get::<_, Vec<u8>>(5)?,
+            })
+        },
+    );
+    match row {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn mode2_kernel_query_from_serialized_transaction(
+    serialized_transaction: &[u8],
+) -> anyhow::Result<Mode2KernelQuery> {
+    let transaction: Transaction = serde_json::from_slice(serialized_transaction)
+        .context("deserializing Mode 2 transaction")?;
+    let kernel = transaction
+        .body()
+        .kernels()
+        .first()
+        .context("Mode 2 transaction has no kernel")?;
+    Ok(Mode2KernelQuery {
+        excess_sig_nonce: kernel
+            .excess_sig
+            .get_compressed_public_nonce()
+            .as_bytes()
+            .to_vec(),
+        excess_sig: kernel.excess_sig.get_signature().as_bytes().to_vec(),
+        fee_microtari: Some(kernel.fee.0),
+    })
+}
+
+async fn query_mode2_transaction(
+    base_node_url: &str,
+    query: &Mode2KernelQuery,
+) -> anyhow::Result<TxQueryResponse> {
+    let url = mode2_transaction_query_url(base_node_url, query)?;
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?
+        .get(url)
+        .send()
+        .await
+        .context("requesting base-node transaction query")?
+        .error_for_status()
+        .context("base-node transaction query HTTP status")?
+        .json::<TxQueryResponse>()
+        .await
+        .context("decoding base-node transaction query")?;
+    Ok(response)
+}
+
+fn mode2_transaction_query_url(
+    base_node_url: &str,
+    query: &Mode2KernelQuery,
+) -> anyhow::Result<url::Url> {
+    let mut url = base_node_endpoint_url(base_node_url, "/transactions")?;
+    url.query_pairs_mut()
+        .append_pair("excess_sig_nonce", &hex::encode(&query.excess_sig_nonce))
+        .append_pair("excess_sig_sig", &hex::encode(&query.excess_sig));
+    Ok(url)
+}
+
+fn mode2_transaction_query_status(
+    response: &TxQueryResponse,
+    tip_height: Option<u64>,
+    required_depth: u64,
+) -> (u32, bool) {
+    match response.location {
+        TxLocation::Mined => {
+            let confirmed = response
+                .mined_height
+                .zip(tip_height)
+                .is_some_and(|(mined, tip)| tip >= mined.saturating_add(required_depth));
+            if confirmed {
+                (TX_MINED_CONFIRMED_STATUS, true)
+            } else {
+                (2, false)
+            }
+        }
+        TxLocation::InMempool => (1, false),
+        TxLocation::NotStored | TxLocation::None => (0, false),
+    }
+}
+
+fn mode2_query_observation(
+    tx_id: &str,
+    row: &Mode2CompletedTransactionRow,
+    kernel_query: Option<&Mode2KernelQuery>,
+    response: Option<&TxQueryResponse>,
+    tip_height: Option<u64>,
+    confirmed: bool,
+    query_error: Option<String>,
+) -> serde_json::Value {
+    let (db_status_value, db_confirmed) = mode2_completed_transaction_status(&row.status);
+    serde_json::json!({
+        "tx_id": tx_id,
+        "pending_tx_id": row.pending_tx_id,
+        "sent_payref": row.sent_payref,
+        "verification_source": if response.is_some() { "base_node_transaction_query" } else { "wallet_db_observed" },
+        "wallet_db_status": row.status,
+        "wallet_db_status_value": db_status_value,
+        "wallet_db_confirmed": db_confirmed,
+        "wallet_db_mined_height": row.mined_height,
+        "wallet_db_confirmation_height": row.confirmation_height,
+        "base_node_query_location": response.map(|response| format!("{:?}", response.location)),
+        "base_node_query_mined_height": response.and_then(|response| response.mined_height),
+        "base_node_tip_height": tip_height,
+        "fee_microtari": kernel_query.and_then(|query| query.fee_microtari),
+        "confirmed": confirmed,
+        "query_error": query_error
+    })
 }
 
 fn record_mode1_transfer_summary(
@@ -1431,11 +1757,14 @@ async fn annotate_mode2_live_scenarios(
     let mut s1_request = request.clone();
     s1_request.recipient = sender_seed.address.clone();
     let mut s1 = run_mode2_s1_rounds(config, s1_request).await;
-    s1.tx_infos = verify_mode2_transactions_from_db(
+    let s1_verification = verify_mode2_transactions(
+        config,
         &config.modes.new_wallet_database,
         &s1.tx_ids,
         ScenarioName::S1,
-    )?;
+    )
+    .await?;
+    s1.apply_mode2_verification(s1_verification);
     record_mode2_send_summary(
         profile,
         ScenarioName::S1,
@@ -1453,12 +1782,27 @@ async fn annotate_mode2_live_scenarios(
                 .to_string(),
         ],
     );
+    if config.benchmark.live_fresh_scan_cells {
+        let checkpoint = checkpoint_from_mode2_summary(&s1, ScanCheckpoint::PostS1);
+        run_library_checkpoint_scan_cells(
+            config,
+            profile,
+            "new_wallet",
+            Some(&sender_seed.seed_words),
+            &[ScenarioName::S2, ScenarioName::S3],
+            checkpoint,
+        )
+        .await?;
+    }
     let mut s4 = run_s4_batches(config, request.clone()).await;
-    s4.tx_infos = verify_mode2_transactions_from_db(
+    let s4_verification = verify_mode2_transactions(
+        config,
         &config.modes.new_wallet_database,
         &s4.tx_ids,
         ScenarioName::S4,
-    )?;
+    )
+    .await?;
+    s4.apply_mode2_verification(s4_verification);
     record_mode2_send_summary(
         profile,
         ScenarioName::S4,
@@ -1495,11 +1839,14 @@ async fn annotate_mode2_live_scenarios(
         .collect::<Vec<_>>();
     let mut s5 =
         run_send_attempts_to_recipients_sequential("new_wallet/S5", s5_recipients, request).await;
-    s5.tx_infos = verify_mode2_transactions_from_db(
+    let s5_verification = verify_mode2_transactions(
+        config,
         &config.modes.new_wallet_database,
         &s5.tx_ids,
         ScenarioName::S5,
-    )?;
+    )
+    .await?;
+    s5.apply_mode2_verification(s5_verification);
     record_mode2_send_summary(
         profile,
         ScenarioName::S5,
@@ -1516,6 +1863,18 @@ async fn annotate_mode2_live_scenarios(
                 .to_string(),
         ],
     );
+    if config.benchmark.live_fresh_scan_cells {
+        let checkpoint = checkpoint_from_mode2_summary(&s5, ScanCheckpoint::PostS5Complete);
+        run_library_checkpoint_scan_cells(
+            config,
+            profile,
+            "new_wallet",
+            Some(&sender_seed.seed_words),
+            &[ScenarioName::S6, ScenarioName::S7],
+            checkpoint,
+        )
+        .await?;
+    }
 
     Ok(())
 }
@@ -1849,7 +2208,14 @@ async fn annotate_mode3_payment_processor(
     match topology {
         Ok(context) => {
             record_mode3_s0(config, profile, &context, start.elapsed().as_millis());
-            run_mode3_send_cells(config, profile, recipient_seed.address.clone(), &context).await?;
+            run_mode3_send_cells(
+                config,
+                profile,
+                pp_seed,
+                recipient_seed.address.clone(),
+                &context,
+            )
+            .await?;
         }
         Err(error) => {
             record_mode3_startup_failure(profile, start.elapsed().as_millis(), error);
@@ -2023,6 +2389,7 @@ fn record_mode3_startup_failure(profile: &mut ResultProfile, wall_ms: u128, erro
 async fn run_mode3_send_cells(
     config: &Config,
     profile: &mut ResultProfile,
+    pp_seed: &crate::seeds::SeedMaterial,
     recipient: String,
     context: &Mode3TopologyContext,
 ) -> anyhow::Result<()> {
@@ -2052,6 +2419,18 @@ async fn run_mode3_send_cells(
             config.benchmark.mode3_live_max_s1_batches
         )],
     );
+    if config.benchmark.live_fresh_scan_cells {
+        let checkpoint = checkpoint_from_pp_summary(&s1, ScanCheckpoint::PostS1);
+        run_library_checkpoint_scan_cells(
+            config,
+            profile,
+            "payment_processor",
+            Some(&pp_seed.seed_words),
+            &[ScenarioName::S2, ScenarioName::S3],
+            checkpoint,
+        )
+        .await?;
+    }
 
     let s4 = run_pp_s4_batches(config, context, &recipient, amount).await;
     record_pp_summary(
@@ -2093,6 +2472,18 @@ async fn run_mode3_send_cells(
             config.benchmark.mode3_live_max_s5_items
         )],
     );
+    if config.benchmark.live_fresh_scan_cells {
+        let checkpoint = checkpoint_from_pp_summary(&s5, ScanCheckpoint::PostS5Complete);
+        run_library_checkpoint_scan_cells(
+            config,
+            profile,
+            "payment_processor",
+            Some(&pp_seed.seed_words),
+            &[ScenarioName::S6, ScenarioName::S7],
+            checkpoint,
+        )
+        .await?;
+    }
 
     Ok(())
 }
@@ -2388,51 +2779,87 @@ fn record_pp_summary(
     cell.notes.extend(notes);
 }
 
-async fn annotate_mode_scan_cells(
+async fn run_library_checkpoint_scan_cells(
     config: &Config,
     profile: &mut ResultProfile,
     mode: &str,
     funded_seed_words: Option<&str>,
-    birthday: u16,
+    scenarios: &[ScenarioName],
+    checkpoint: ScanCheckpoint,
 ) -> anyhow::Result<()> {
-    let Some(mode_profile) = profile.modes.get_mut(mode) else {
-        return Ok(());
-    };
-
-    let scan_specs = [
-        FreshScanSpec {
-            scenario: ScenarioName::B0,
-            wallet_state: FreshScanWalletState::EmptyGenesis,
-        },
-        FreshScanSpec {
-            scenario: ScenarioName::S2,
-            wallet_state: FreshScanWalletState::FundedGenesis,
-        },
-        FreshScanSpec {
-            scenario: ScenarioName::S3,
-            wallet_state: FreshScanWalletState::FundedBirthday { birthday },
-        },
-    ];
-
-    for spec in scan_specs {
-        let Some(cell) = mode_profile.scenarios.get_mut(spec.scenario.as_str()) else {
-            continue;
+    let birthday = current_birthday();
+    for scenario in scenarios {
+        let spec = FreshScanSpec {
+            scenario: *scenario,
+            wallet_state: fresh_scan_wallet_state(*scenario, birthday),
+            checkpoint,
         };
-        run_fresh_scan_cell(config, mode, funded_seed_words, spec, cell).await?;
+        run_library_fresh_scan_for_cell(config, profile, mode, funded_seed_words, spec).await?;
     }
-
-    for scenario in [ScenarioName::S6, ScenarioName::S7] {
-        if let Some(cell) = mode_profile.scenarios.get_mut(scenario.as_str()) {
-            cell.notes.push(
-                "requires post-S5 checkpoint; left ready until send-side scenarios run".to_string(),
-            );
-        }
-    }
-
     Ok(())
 }
 
-async fn run_fresh_scan_cell(
+async fn run_library_fresh_scan_for_cell(
+    config: &Config,
+    profile: &mut ResultProfile,
+    mode: &str,
+    funded_seed_words: Option<&str>,
+    spec: FreshScanSpec,
+) -> anyhow::Result<()> {
+    let Some(cell) = profile
+        .modes
+        .get_mut(mode)
+        .and_then(|mode_profile| mode_profile.scenarios.get_mut(spec.scenario.as_str()))
+    else {
+        return Ok(());
+    };
+    if !spec.checkpoint.runnable() {
+        cell.notes.push(spec.checkpoint.blocked_note(spec.scenario));
+        return Ok(());
+    }
+    run_library_fresh_scan_cell(config, mode, funded_seed_words, spec, cell).await
+}
+
+async fn run_mode1_checkpoint_scan_cells(
+    config: &Config,
+    profile: &mut ResultProfile,
+    old_seed: &crate::seeds::SeedMaterial,
+    scenarios: &[ScenarioName],
+    checkpoint: ScanCheckpoint,
+) -> anyhow::Result<()> {
+    let birthday = mode1_wallet_birthday(old_seed);
+    for scenario in scenarios {
+        let spec = FreshScanSpec {
+            scenario: *scenario,
+            wallet_state: fresh_scan_wallet_state(*scenario, birthday),
+            checkpoint,
+        };
+        run_mode1_fresh_scan_for_cell(config, profile, old_seed, spec).await?;
+    }
+    Ok(())
+}
+
+async fn run_mode1_fresh_scan_for_cell(
+    config: &Config,
+    profile: &mut ResultProfile,
+    old_seed: &crate::seeds::SeedMaterial,
+    spec: FreshScanSpec,
+) -> anyhow::Result<()> {
+    let Some(cell) = profile
+        .modes
+        .get_mut("old_wallet")
+        .and_then(|mode_profile| mode_profile.scenarios.get_mut(spec.scenario.as_str()))
+    else {
+        return Ok(());
+    };
+    if !spec.checkpoint.runnable() {
+        cell.notes.push(spec.checkpoint.blocked_note(spec.scenario));
+        return Ok(());
+    }
+    run_mode1_fresh_scan_cell(config, old_seed, spec, cell).await
+}
+
+async fn run_library_fresh_scan_cell(
     config: &Config,
     mode: &str,
     funded_seed_words: Option<&str>,
@@ -2446,7 +2873,7 @@ async fn run_fresh_scan_cell(
             config.benchmark.repetitions,
             spec.birthday()
         );
-        let scan = run_fresh_scan(config, mode, spec, run, funded_seed_words).await;
+        let scan = run_library_fresh_scan(config, mode, spec, run, funded_seed_words).await;
         match scan {
             Ok(measurement) => {
                 println!(
@@ -2464,7 +2891,7 @@ async fn run_fresh_scan_cell(
                     failure_count: 0,
                     fee_microtari: None,
                     error: None,
-                    metrics: None,
+                    metrics: Some(measurement.metrics(mode, spec)),
                 });
                 cell.notes.push(measurement.note());
             }
@@ -2490,7 +2917,64 @@ async fn run_fresh_scan_cell(
     Ok(())
 }
 
-async fn run_fresh_scan(
+async fn run_mode1_fresh_scan_cell(
+    config: &Config,
+    old_seed: &crate::seeds::SeedMaterial,
+    spec: FreshScanSpec,
+    cell: &mut ScenarioCell,
+) -> anyhow::Result<()> {
+    for run in 1..=config.benchmark.repetitions {
+        println!(
+            "live scan old_wallet/{} run {run}/{} birthday={} starting",
+            spec.scenario.as_str(),
+            config.benchmark.repetitions,
+            spec.birthday()
+        );
+        let scan = run_mode1_fresh_scan(config, old_seed, spec, run).await;
+        match scan {
+            Ok(measurement) => {
+                println!(
+                    "live scan old_wallet/{} run {run} ok: wall_ms={} max_height={} available_microtari={}",
+                    spec.scenario.as_str(),
+                    measurement.wall_ms,
+                    measurement.max_height,
+                    measurement.available_microtari
+                );
+                cell.record_repetition(Repetition {
+                    run,
+                    status: CellStatus::Ok,
+                    wall_ms: Some(measurement.wall_ms),
+                    success_count: 1,
+                    failure_count: 0,
+                    fee_microtari: None,
+                    error: None,
+                    metrics: Some(measurement.metrics("old_wallet", spec)),
+                });
+                cell.notes.push(measurement.note());
+            }
+            Err(error) => {
+                println!(
+                    "live scan old_wallet/{} run {run} failed: {error:#}",
+                    spec.scenario.as_str()
+                );
+                cell.record_repetition(Repetition {
+                    run,
+                    status: CellStatus::Failed,
+                    wall_ms: None,
+                    success_count: 0,
+                    failure_count: 1,
+                    fee_microtari: None,
+                    error: Some(format!("{error:#}")),
+                    metrics: None,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_library_fresh_scan(
     config: &Config,
     mode: &str,
     spec: FreshScanSpec,
@@ -2505,6 +2989,9 @@ async fn run_fresh_scan(
     init_with_seed_words(seed, &password, &db_path, Some("default"))
         .context("initializing fresh scan wallet")?;
 
+    let tip_start = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
     let wall_ms = scan_to_tip(
         &db_path,
         &password,
@@ -2513,13 +3000,117 @@ async fn run_fresh_scan(
         config.benchmark.c_min,
     )
     .await?;
+    let tip_end = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
     let account = account_snapshot(&db_path)?;
+    let detected_outputs = detected_output_count(&db_path).unwrap_or_default();
 
     Ok(ScanMeasurement {
         wall_ms,
         birthday: spec.birthday(),
         max_height: account.max_height,
         available_microtari: account.available_microtari,
+        tip_start,
+        tip_end,
+        detected_outputs,
+    })
+}
+
+async fn run_mode1_fresh_scan(
+    config: &Config,
+    old_seed: &crate::seeds::SeedMaterial,
+    spec: FreshScanSpec,
+    run: u32,
+) -> anyhow::Result<ScanMeasurement> {
+    let base_path = fresh_console_base_path(config, spec, run);
+    reset_dir(&base_path)?;
+    let grpc_address = mode1_scan_grpc_address(&config.modes.old_wallet_grpc_address, spec, run)?;
+    let grpc_bind = grpc_bind_multiaddr(&grpc_address)?;
+    let password = wallet_password(&config.seeds.wallet_password_env)?;
+    let seed_words = match spec.wallet_state {
+        FreshScanWalletState::EmptyGenesis => {
+            let mut seed = CipherSeed::random();
+            seed.change_birthday(0);
+            crate::seeds::seed_words_from_seed(&seed)?
+        }
+        FreshScanWalletState::FundedGenesis | FreshScanWalletState::FundedBirthday { .. } => {
+            seed_words_with_birthday(&old_seed.seed_words, spec.birthday())?
+        }
+    };
+    let config_path = base_path.join("config/config.toml");
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::create_dir_all("logs")?;
+    let log_stem = format!(
+        "mode1-scan-{}-run{}-birthday{}",
+        spec.scenario.as_str().to_lowercase(),
+        run,
+        spec.birthday()
+    );
+    let stdout_path = PathBuf::from(format!("logs/{log_stem}.stdout.log"));
+    let stderr_path = PathBuf::from(format!("logs/{log_stem}.stderr.log"));
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stdout_path)?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_path)?;
+
+    let tip_start = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let start = Instant::now();
+    let mut command = Command::new(&config.paths.minotari_console_wallet);
+    command
+        .env("MINOTARI_WALLET_SEED_WORDS", seed_words)
+        .env("MINOTARI_WALLET_PASSWORD", &password)
+        .arg("--base-path")
+        .arg(&base_path)
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--network")
+        .arg("Esmeralda")
+        .arg("--non-interactive-mode")
+        .arg("--recovery")
+        .arg("--grpc-enabled")
+        .arg("--grpc-address")
+        .arg(&grpc_bind)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    let mut process = Mode1ConsoleProcess {
+        child: command.spawn().context("spawning scan console wallet")?,
+        stdout_path,
+        stderr_path,
+    };
+    let mut client = wait_for_mode1_grpc_address(config, &mut process, &grpc_address).await?;
+    let max_height = wait_for_mode1_scan_to_tip(
+        &mut process,
+        &mut client,
+        tip_start,
+        config.timeout(config.timeouts.startup_secs),
+    )
+    .await?;
+    let balance = client
+        .get_balance(grpc::GetBalanceRequest { payment_id: None })
+        .await?
+        .into_inner();
+    let detected_outputs = mode1_unspent_count(&mut client).await.unwrap_or_default();
+    let tip_end = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+
+    Ok(ScanMeasurement {
+        wall_ms: start.elapsed().as_millis(),
+        birthday: spec.birthday(),
+        max_height,
+        available_microtari: balance.available_balance,
+        tip_start,
+        tip_end,
+        detected_outputs,
     })
 }
 
@@ -2531,6 +3122,25 @@ fn fresh_scan_db_path(config: &Config, mode: &str, spec: FreshScanSpec, run: u32
         run,
         spec.birthday()
     ))
+}
+
+fn fresh_console_base_path(config: &Config, spec: FreshScanSpec, run: u32) -> PathBuf {
+    config.paths.data_dir.join("fresh-scans").join(format!(
+        "old-wallet-{}-run{}-birthday{}",
+        spec.scenario.as_str().to_lowercase(),
+        run,
+        spec.birthday()
+    ))
+}
+
+fn reset_dir(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    fs::create_dir_all(path)?;
+    Ok(())
 }
 
 fn reset_sqlite_files(db_path: &Path) -> anyhow::Result<()> {
@@ -2549,6 +3159,12 @@ fn reset_sqlite_files(db_path: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn detected_output_count(db_path: &Path) -> anyhow::Result<u64> {
+    let conn = Connection::open(db_path)?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM outputs", [], |row| row.get(0))?;
+    Ok(u64::try_from(count).unwrap_or_default())
 }
 
 pub fn account_balance(db_path: &Path) -> anyhow::Result<serde_json::Value> {
@@ -2660,6 +3276,29 @@ struct ScenarioSendSummary {
     construction_complete_ms: Vec<u128>,
     tx_infos: Vec<VerifiedTransaction>,
     extra_metrics: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Default)]
+struct Mode2VerificationResult {
+    observed_transactions: Vec<VerifiedTransaction>,
+    observations: Vec<serde_json::Value>,
+    used_base_node_query: bool,
+}
+
+struct Mode2CompletedTransactionRow {
+    pending_tx_id: String,
+    status: String,
+    mined_height: Option<i64>,
+    confirmation_height: Option<i64>,
+    sent_payref: Option<String>,
+    serialized_transaction: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct Mode2KernelQuery {
+    excess_sig_nonce: Vec<u8>,
+    excess_sig: Vec<u8>,
+    fee_microtari: Option<u64>,
 }
 
 struct BatchSendSummary {
@@ -3307,6 +3946,22 @@ impl ScenarioSendSummary {
         });
     }
 
+    fn apply_mode2_verification(&mut self, verification: Mode2VerificationResult) {
+        self.tx_infos = verification.observed_transactions;
+        self.extra_metrics.insert(
+            "verification_source".to_string(),
+            serde_json::json!(if verification.used_base_node_query {
+                "base_node_transaction_query"
+            } else {
+                "wallet_db_observed"
+            }),
+        );
+        self.extra_metrics.insert(
+            "verification_observations".to_string(),
+            serde_json::Value::Array(verification.observations),
+        );
+    }
+
     fn note(&self, scenario: ScenarioName) -> String {
         let mut parts = vec![
             format!(
@@ -3772,6 +4427,7 @@ fn uuid_like_idempotency() -> String {
 struct FreshScanSpec {
     scenario: ScenarioName,
     wallet_state: FreshScanWalletState,
+    checkpoint: ScanCheckpoint,
 }
 
 impl FreshScanSpec {
@@ -3799,6 +4455,18 @@ impl FreshScanSpec {
             FreshScanWalletState::FundedBirthday { birthday } => birthday,
         }
     }
+
+    fn port_offset(self, run: u32) -> u16 {
+        let scenario_offset = match self.scenario {
+            ScenarioName::B0 => 100,
+            ScenarioName::S2 => 200,
+            ScenarioName::S3 => 300,
+            ScenarioName::S6 => 400,
+            ScenarioName::S7 => 500,
+            _ => 900,
+        };
+        scenario_offset + u16::try_from(run).unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3806,6 +4474,109 @@ enum FreshScanWalletState {
     EmptyGenesis,
     FundedGenesis,
     FundedBirthday { birthday: u16 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanCheckpoint {
+    Empty,
+    PostS1,
+    PostS1Partial,
+    PostS1Blocked,
+    PostS5Complete,
+    PostS5Partial,
+    PostS5Blocked,
+}
+
+impl ScanCheckpoint {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Empty => "empty_genesis",
+            Self::PostS1 => "post_s1",
+            Self::PostS1Partial => "post_s1_partial",
+            Self::PostS1Blocked => "post_s1_blocked",
+            Self::PostS5Complete => "post_s5_complete",
+            Self::PostS5Partial => "post_s5_partial",
+            Self::PostS5Blocked => "post_s5_blocked",
+        }
+    }
+
+    fn runnable(self) -> bool {
+        !matches!(self, Self::PostS1Blocked | Self::PostS5Blocked)
+    }
+
+    fn blocked_note(self, scenario: ScenarioName) -> String {
+        format!(
+            "{} scan not run: prerequisite checkpoint is {}",
+            scenario.as_str(),
+            self.label()
+        )
+    }
+}
+
+fn fresh_scan_wallet_state(scenario: ScenarioName, birthday: u16) -> FreshScanWalletState {
+    match scenario {
+        ScenarioName::B0 => FreshScanWalletState::EmptyGenesis,
+        ScenarioName::S2 | ScenarioName::S6 => FreshScanWalletState::FundedGenesis,
+        ScenarioName::S3 | ScenarioName::S7 => FreshScanWalletState::FundedBirthday { birthday },
+        _ => FreshScanWalletState::FundedBirthday { birthday },
+    }
+}
+
+fn checkpoint_from_mode1_summary(
+    summary: &Mode1TransferSummary,
+    complete_checkpoint: ScanCheckpoint,
+) -> ScanCheckpoint {
+    if summary.success_count == 0 {
+        return match complete_checkpoint {
+            ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Blocked,
+            _ => ScanCheckpoint::PostS5Blocked,
+        };
+    }
+    if summary.failure_count > 0 {
+        return match complete_checkpoint {
+            ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Partial,
+            _ => ScanCheckpoint::PostS5Partial,
+        };
+    }
+    complete_checkpoint
+}
+
+fn checkpoint_from_mode2_summary(
+    summary: &ScenarioSendSummary,
+    complete_checkpoint: ScanCheckpoint,
+) -> ScanCheckpoint {
+    if summary.success_count == 0 {
+        return match complete_checkpoint {
+            ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Blocked,
+            _ => ScanCheckpoint::PostS5Blocked,
+        };
+    }
+    if summary.failure_count > 0 {
+        return match complete_checkpoint {
+            ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Partial,
+            _ => ScanCheckpoint::PostS5Partial,
+        };
+    }
+    complete_checkpoint
+}
+
+fn checkpoint_from_pp_summary(
+    summary: &PpScenarioSummary,
+    complete_checkpoint: ScanCheckpoint,
+) -> ScanCheckpoint {
+    if summary.accepted_batches == 0 {
+        return match complete_checkpoint {
+            ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Blocked,
+            _ => ScanCheckpoint::PostS5Blocked,
+        };
+    }
+    if summary.failed_batches > 0 || summary.blocked_upstream {
+        return match complete_checkpoint {
+            ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Partial,
+            _ => ScanCheckpoint::PostS5Partial,
+        };
+    }
+    complete_checkpoint
 }
 
 struct AccountSnapshot {
@@ -3818,14 +4589,47 @@ struct ScanMeasurement {
     birthday: u16,
     max_height: u64,
     available_microtari: u64,
+    tip_start: Option<u64>,
+    tip_end: Option<u64>,
+    detected_outputs: u64,
 }
 
 impl ScanMeasurement {
     fn note(&self) -> String {
         format!(
-            "fresh scan birthday={} max_height={} available_microtari={}",
-            self.birthday, self.max_height, self.available_microtari
+            "fresh scan checkpoint data: birthday={} max_height={} available_microtari={} detected_outputs={} tip_start={:?} tip_end={:?}",
+            self.birthday,
+            self.max_height,
+            self.available_microtari,
+            self.detected_outputs,
+            self.tip_start,
+            self.tip_end
         )
+    }
+
+    fn metrics(&self, mode: &str, spec: FreshScanSpec) -> serde_json::Value {
+        let blocks_scanned = (self.birthday == 0).then_some(self.max_height);
+        let blocks_per_sec = blocks_scanned.and_then(|blocks| {
+            if self.wall_ms == 0 {
+                None
+            } else {
+                Some((blocks as f64) / (self.wall_ms as f64 / 1000.0))
+            }
+        });
+        serde_json::json!({
+            "mode": mode,
+            "scenario": spec.scenario.as_str(),
+            "verification_source": "wallet_scan_observed",
+            "scan_checkpoint": spec.checkpoint.label(),
+            "birthday": self.birthday,
+            "tip_start": self.tip_start,
+            "tip_end": self.tip_end,
+            "blocks_scanned": blocks_scanned,
+            "blocks_per_sec": blocks_per_sec,
+            "detected_outputs": self.detected_outputs,
+            "available_microtari": self.available_microtari,
+            "max_height": self.max_height
+        })
     }
 }
 
@@ -3937,6 +4741,104 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "https://rpc.esmeralda.tari.com/get_tip_info"
+        );
+    }
+
+    #[test]
+    fn mode2_transaction_query_url_uses_kernel_signature_params() {
+        let query = Mode2KernelQuery {
+            excess_sig_nonce: vec![0xab, 0xcd],
+            excess_sig: vec![0x12, 0x34],
+            fee_microtari: Some(42),
+        };
+        let url = mode2_transaction_query_url("https://rpc.esmeralda.tari.com", &query).unwrap();
+
+        assert_eq!(
+            url.as_str(),
+            "https://rpc.esmeralda.tari.com/transactions?excess_sig_nonce=abcd&excess_sig_sig=1234"
+        );
+    }
+
+    #[test]
+    fn mode2_transaction_query_status_requires_depth() {
+        let mined = TxQueryResponse {
+            location: TxLocation::Mined,
+            mined_height: Some(100),
+            mined_header_hash: None,
+            mined_timestamp: None,
+        };
+        assert_eq!(
+            mode2_transaction_query_status(&mined, Some(102), 3),
+            (2, false)
+        );
+        assert_eq!(
+            mode2_transaction_query_status(&mined, Some(103), 3),
+            (TX_MINED_CONFIRMED_STATUS, true)
+        );
+
+        let mempool = TxQueryResponse {
+            location: TxLocation::InMempool,
+            mined_height: None,
+            mined_header_hash: None,
+            mined_timestamp: None,
+        };
+        assert_eq!(
+            mode2_transaction_query_status(&mempool, Some(103), 3),
+            (1, false)
+        );
+
+        let not_stored = TxQueryResponse {
+            location: TxLocation::NotStored,
+            mined_height: None,
+            mined_header_hash: None,
+            mined_timestamp: None,
+        };
+        assert_eq!(
+            mode2_transaction_query_status(&not_stored, Some(103), 3),
+            (0, false)
+        );
+
+        let none = TxQueryResponse {
+            location: TxLocation::None,
+            mined_height: None,
+            mined_header_hash: None,
+            mined_timestamp: None,
+        };
+        assert_eq!(
+            mode2_transaction_query_status(&none, Some(103), 3),
+            (0, false)
+        );
+    }
+
+    #[test]
+    fn mode2_kernel_query_rejects_invalid_serialized_transaction() {
+        let error = mode2_kernel_query_from_serialized_transaction(b"not-json")
+            .expect_err("invalid transaction must fail");
+        assert!(format!("{error:#}").contains("deserializing Mode 2 transaction"));
+    }
+
+    #[test]
+    fn scan_checkpoint_gates_missing_prerequisites() {
+        assert!(!ScanCheckpoint::PostS1Blocked.runnable());
+        assert!(!ScanCheckpoint::PostS5Blocked.runnable());
+        assert!(ScanCheckpoint::PostS1Partial.runnable());
+        assert!(
+            ScanCheckpoint::PostS1Blocked
+                .blocked_note(ScenarioName::S2)
+                .contains("post_s1_blocked")
+        );
+    }
+
+    #[test]
+    fn mode1_scan_grpc_address_offsets_port() {
+        let spec = FreshScanSpec {
+            scenario: ScenarioName::S3,
+            wallet_state: FreshScanWalletState::FundedBirthday { birthday: 123 },
+            checkpoint: ScanCheckpoint::PostS1,
+        };
+        assert_eq!(
+            mode1_scan_grpc_address("http://127.0.0.1:18143", spec, 2).unwrap(),
+            "http://127.0.0.1:18445"
         );
     }
 
@@ -4091,6 +4993,46 @@ mod tests {
             cell.repetitions[0].error.as_deref(),
             Some("tx_ids were produced but chain verification returned no rows")
         );
+    }
+
+    #[test]
+    fn mode2_db_observed_fallback_stays_out_of_confirmed_rows() {
+        let mut summary = ScenarioSendSummary {
+            attempted: 1,
+            success_count: 1,
+            tx_ids: vec!["42".to_string()],
+            ..ScenarioSendSummary::default()
+        };
+        summary.apply_mode2_verification(Mode2VerificationResult {
+            observed_transactions: vec![VerifiedTransaction {
+                tx_id: "42".to_string(),
+                status_value: 1,
+                mode: "new_wallet".to_string(),
+                scenario: ScenarioName::S1.as_str().to_string(),
+                amount_microtari: None,
+                fee_microtari: Some(10),
+                mined_height: None,
+                confirmed: false,
+            }],
+            observations: vec![serde_json::json!({
+                "tx_id": "42",
+                "verification_source": "wallet_db_observed",
+                "wallet_db_status": "broadcast",
+                "confirmed": false
+            })],
+            used_base_node_query: false,
+        });
+
+        let metrics = summary.metrics(ScenarioName::S1);
+        assert_eq!(
+            metrics["verification_source"],
+            serde_json::json!("wallet_db_observed")
+        );
+        assert_eq!(
+            metrics["verification_observations"][0]["wallet_db_status"],
+            serde_json::json!("broadcast")
+        );
+        assert!(summary.verified_transactions().is_empty());
     }
 
     #[test]

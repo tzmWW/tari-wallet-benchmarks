@@ -119,6 +119,14 @@ full-chain scan cells practical on Esmeralda. These fresh scan cells deliberatel
 wipe their local databases per repetition, so they are long-running and print
 per-cell progress while they execute.
 
+Fresh scan cells are checkpointed against actual scenario progress. B0 uses an
+empty genesis seed before spends. S2/S3 run only after an S1 checkpoint exists;
+S6/S7 run only after an S5 checkpoint exists. If the prerequisite spend is
+blocked, the scan cell records a note instead of inventing a measurement. Mode 1
+fresh scans launch a real `minotari_console_wallet --recovery` instance with a
+fresh base path and poll its gRPC state until it reaches the public tip. Mode 2
+and PP companion scan cells use the minotari scanner path with fresh databases.
+
 When `mode2_send_smoke` is enabled, the harness constructs, signs, persists, and
 submits one one-sided transaction from the Mode 2 wallet using a direct JSON-RPC
 request. This avoids `WalletHttpClient::new`, whose default transport retries
@@ -175,6 +183,18 @@ S5 through the direct minotari crate path:
   Esmeralda recipients, capped by `mode2_live_max_s5_txs` when non-zero. The PP
   Mode 3 surface is responsible for the payment-batch arm.
 
+For every submitted Mode 2 tx id, the harness reads
+`completed_transactions.serialized_transaction`, deserializes the transaction,
+extracts the first kernel excess signature nonce/signature, and queries the
+public base node at
+`/transactions?excess_sig_nonce=...&excess_sig_sig=...`. It also reads
+`/get_tip_info` and emits a top-level
+`chain_verification.verified_transactions` row only when the base-node location
+is `Mined` and the mined height is at least `C_min` deep. Wallet DB status,
+payment id/payref, fee, query location, mined height, tip height, and query
+errors remain in per-repetition metrics. Pending, mempool-only, timeout, and
+query-failed cases are observations, not confirmed chain evidence.
+
 When `mode3_live_topology` is enabled, the harness starts a real
 `minotari_payment_processor` process plus a parallel `minotari daemon` payment
 receiver. The PP companion view wallet is initialized with a current birthday
@@ -211,8 +231,11 @@ scenario cells, findings, and chain-verification status value. Schema v3 adds
 per-repetition `metrics` for scenario-specific values such as S1 round details,
 S4 serialization gaps, S5 recipient shape, observed-but-unconfirmed DB rows, and
 confirmed chain-verification rows with amount/fee/mined-height fields when the
-wallet surface exposes them. Environment capture includes OS, CPU, memory, disk
-kind/name, base-node host, and whether the base-node path is local or remote.
+wallet surface exposes them. It also allows verification-source notes,
+base-node query observations, scan checkpoints, birthdays, tip start/end,
+blocks scanned per second, detected outputs, and available balance observations.
+Environment capture includes OS, CPU, memory, disk kind/name, base-node host,
+and whether the base-node path is local or remote.
 
 ## Verification Gates
 
@@ -225,6 +248,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo test
 ast-grep scan
+git diff --check
 ```
 
 The AST rules intentionally block harness-level retry, backoff, throttling,

@@ -5,7 +5,11 @@ This summary accompanies `baselines/esmeralda_baseline.json`.
 The checked-in profile was regenerated on `2026-06-24T15:12:19Z` with schema
 v3 after the REVIEW_v3 hardening pass. It is a capped live proof, not a full
 statistical B0/S0-S7 baseline: `repetitions = 1`, `live_fresh_scan_cells =
-false`, and Mode 1/2/3 live topologies were enabled with low safety caps.
+false`, and Mode 1/2/3 live topologies were enabled with low safety caps. It
+remains schema-valid, but it predates the post-REVIEW_v4 independent Mode 2
+base-node transaction-query metrics and checkpointed fresh scan orchestration.
+No replacement baseline has been promoted because the fresh-funded Mode 2 proof
+transaction had not become spendable during the follow-up run.
 
 - Network: Esmeralda only.
 - Harness repository: `https://github.com/tzmWW/tari-wallet-benchmarks`.
@@ -40,7 +44,11 @@ Current checked-in live evidence:
   outputs. Mode 2 S4/S5 failed for the same pending-funds condition.
 - Mode 2 observations are kept in per-cell metrics under
   `observed_transactions`; only confirmed rows can enter top-level
-  `chain_verification.verified_transactions`.
+  `chain_verification.verified_transactions`. Post-REVIEW_v4 code now verifies
+  submitted Mode 2 txs by extracting kernel signature data from
+  `completed_transactions.serialized_transaction` and querying the public
+  base-node `/transactions` endpoint, with `/get_tip_info` used for `C_min`
+  depth. The checked-in JSON predates those metrics.
 - Mode 3 S0 started the real `minotari_payment_processor` plus companion
   payment receiver in `2031 ms`.
 - Mode 3 S1 now drives PP `/v1/payment-batches` in S1 round shape: two capped
@@ -62,8 +70,14 @@ REVIEW_v3 status:
   settlement gates, Mode 1 verified fee backfill, Mode 3 S1 PP batch shape,
   confirmed-only top-level verification rows, and PP scan-cell ambiguity.
 - Fixed after REVIEW_v4: environment capture includes disk/network-path fields,
-  direct `time::sleep(...)` alias calls are covered by ast-grep, and Mode 2 DB
-  status mapping is extracted/tested against the pinned minotari status strings.
-- Still not claimed as complete: three-repetition statistical evidence and the
-  full fresh-scan matrix. The profile is intentionally labeled as capped proof
-  evidence.
+  direct `time::sleep(...)` alias calls are covered by ast-grep, Mode 2 DB
+  status mapping is extracted/tested against the pinned minotari status strings,
+  Mode 2 chain verification uses base-node transaction queries instead of DB-only
+  confirmation, and fresh scan cells are checkpointed instead of predeclared.
+- Still not claimed as complete: a promoted fresh-funded Mode 2 proof,
+  three-repetition statistical evidence, and the full fresh-scan matrix. A fresh
+  Mode 2 seed was funded with tx `5240074109649442333`; the public base-node
+  query later reported it `Mined` at height `710698`, but the source wallet
+  still reported `Broadcast`, the recipient fresh wallet stayed at scan tip
+  `710600` with no outputs, and the capped proof rerun still saw `0` available
+  microtari. The baseline was not replaced.

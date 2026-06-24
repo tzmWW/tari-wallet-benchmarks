@@ -70,9 +70,14 @@ not hide.
   counts rather than smoothing over lock contention.
 - Mode 2 S5 currently measures the individual-send arm. Batch-send comparison is
   left to Mode 3's real payment processor batch endpoint.
-- Mode 2 stores observed DB transaction rows in scenario metrics, but top-level
-  `chain_verification.verified_transactions` is confirmed-only. Broadcast or
-  pending DB rows must not be counted as verified evidence.
+- Mode 2 stores wallet DB observations in scenario metrics, but top-level
+  `chain_verification.verified_transactions` is confirmed-only. For submitted
+  transactions, the harness deserializes
+  `completed_transactions.serialized_transaction`, extracts the first kernel
+  excess signature nonce/signature, queries the public base-node `/transactions`
+  endpoint, and checks `/get_tip_info` for `C_min` depth. Broadcast, pending,
+  mempool-only, timeout, or query-failed rows must not be counted as verified
+  evidence.
 - Mode 2 completed-transaction status mapping is source-backed: the pinned
   minotari `CompletedTransactionStatus` serializes as lowercase
   `completed`, `broadcast`, `mined_unconfirmed`, `mined_confirmed`, `rejected`,
@@ -99,7 +104,10 @@ not hide.
 - Fresh full-chain scans are materially sensitive to scan batch size. A 100-block
   HTTP batch left the first Esmeralda B0 scan running for several minutes during
   development; `[benchmark].scan_batch_size` is now explicit and defaults to
-  `1000`.
+  `1000`. Fresh scan cells are checkpointed: B0 is empty-genesis, S2/S3 require
+  an S1 checkpoint, and S6/S7 require an S5 checkpoint. Mode 1 scans use real
+  `minotari_console_wallet --recovery`; Mode 2 and PP companion scans use the
+  minotari scanner.
 - `TX_MINED_CONFIRMED` is recorded as status value `6` in result profiles.
 - Environment capture records disk kind/name plus whether the base-node path is
   local or remote. The committed Esmeralda baseline records remote
@@ -112,8 +120,21 @@ schema and is safe to share. The current schema v3 profile was regenerated on
 2026-06-24 after REVIEW_v3 hardening. It includes capped real Mode 1
 S0/S1/S4/S5 evidence, live Mode 2 pending-funds evidence from the current wallet
 DB, and capped real Mode 3 PP S0/S1/S4/S5 evidence with PP scan cells marked
-`not_applicable` when companion scans are disabled. REVIEW_v4 follow-up added
-environment disk/network metadata, stricter direct-sleep AST coverage, and
-source-backed Mode 2 status-mapping tests. A full funded Esmeralda baseline
-still requires the complete B0/S0-S7 matrix across all modes with repetitions;
-do not treat capped proof cells as final performance data.
+`not_applicable` when companion scans are disabled.
+
+Post-REVIEW_v4 follow-up added the independent Mode 2 base-node transaction
+query path and checkpointed fresh scan orchestration without a schema migration.
+The polluted current Mode 2 DB still reports two completed rows as `broadcast`,
+but querying their extracted kernel signatures against the public Esmeralda base
+node shows both are `Mined` at heights `710477` and `710503`; those observations
+prove the query path but do not create a fresh-funded proof. A fresh Mode 2 seed
+was funded from the old wallet with tx `5240074109649442333`; a public
+base-node transaction query later reported it `Mined` at height `710698`, while
+the source wallet still reported `Broadcast`. The recipient fresh wallet stayed
+at scan tip `710600` with no outputs, and the capped proof profile generated at
+`2026-06-24T16:18:05Z` still saw `0` available microtari. The baseline was
+therefore not replaced.
+
+A full funded Esmeralda baseline still requires the complete B0/S0-S7 matrix
+across all modes with repetitions where wallet state supports them. Do not treat
+capped proof cells as final performance data.
