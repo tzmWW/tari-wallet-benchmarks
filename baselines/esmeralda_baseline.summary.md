@@ -81,3 +81,10 @@ REVIEW_v3 status:
   still reported `Broadcast`, the recipient fresh wallet stayed at scan tip
   `710600` with no outputs, and the capped proof rerun still saw `0` available
   microtari. The baseline was not replaced.
+- V5 diagnostic status: a supported rescan later detected and confirmed funding
+  tx `5240074109649442333`, and the fresh Mode 2 wallet constructed/signed/
+  broadcast S1 tx `15210836799682799724`. That temp profile was still not
+  promoted because it queried one block short of `C_min` before the post-S5
+  confirmation-loop fix and S4/S5 were blocked by the single fresh UTXO being
+  locked after S1. A promoted replacement needs several independent fresh UTXOs
+  or equivalent clean funding.

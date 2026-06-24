@@ -135,6 +135,17 @@ at scan tip `710600` with no outputs, and the capped proof profile generated at
 `2026-06-24T16:18:05Z` still saw `0` available microtari. The baseline was
 therefore not replaced.
 
+V5 follow-up tightened Mode 2 live verification again: after S5, the harness
+re-queries S1/S4/S5 tx ids until every observed base-node transaction reaches
+`C_min` or the confirmation timeout expires, replacing the existing single
+repetition in place and keeping top-level rows confirmed-only. Diagnostic live
+runs on 2026-06-24 showed the original Mode 2 wallet blocked by pending funds,
+and the fresh-proof wallet could construct/sign/broadcast S1 tx
+`15210836799682799724` after a supported rescan of funding tx
+`5240074109649442333`, but S4/S5 still need independent fresh UTXOs. The checked
+baseline remains intentionally stale until that funding/runtime evidence is
+complete.
+
 A full funded Esmeralda baseline still requires the complete B0/S0-S7 matrix
 across all modes with repetitions where wallet state supports them. Do not treat
 capped proof cells as final performance data.

@@ -1839,6 +1839,19 @@ async fn annotate_mode2_live_scenarios(
         .collect::<Vec<_>>();
     let mut s5 =
         run_send_attempts_to_recipients_sequential("new_wallet/S5", s5_recipients, request).await;
+    let s5_settle_note = if s5.tx_ids.is_empty() {
+        None
+    } else {
+        Some(
+            wait_for_mode2_scan_advance(
+                config,
+                &config.modes.new_wallet_database,
+                &password,
+                "S5 final",
+            )
+            .await?,
+        )
+    };
     let s5_verification = verify_mode2_transactions(
         config,
         &config.modes.new_wallet_database,
@@ -1863,6 +1876,33 @@ async fn annotate_mode2_live_scenarios(
                 .to_string(),
         ],
     );
+    if let Some(note) = s5_settle_note {
+        append_mode2_note(profile, ScenarioName::S5, note);
+    }
+    refresh_recorded_mode2_verification(
+        config,
+        profile,
+        &config.modes.new_wallet_database,
+        ScenarioName::S1,
+        &mut s1,
+    )
+    .await?;
+    refresh_recorded_mode2_verification(
+        config,
+        profile,
+        &config.modes.new_wallet_database,
+        ScenarioName::S4,
+        &mut s4,
+    )
+    .await?;
+    refresh_recorded_mode2_verification(
+        config,
+        profile,
+        &config.modes.new_wallet_database,
+        ScenarioName::S5,
+        &mut s5,
+    )
+    .await?;
     if config.benchmark.live_fresh_scan_cells {
         let checkpoint = checkpoint_from_mode2_summary(&s5, ScanCheckpoint::PostS5Complete);
         run_library_checkpoint_scan_cells(
@@ -1877,6 +1917,79 @@ async fn annotate_mode2_live_scenarios(
     }
 
     Ok(())
+}
+
+async fn refresh_recorded_mode2_verification(
+    config: &Config,
+    profile: &mut ResultProfile,
+    db_path: &Path,
+    scenario: ScenarioName,
+    summary: &mut ScenarioSendSummary,
+) -> anyhow::Result<()> {
+    if summary.tx_ids.is_empty() {
+        return Ok(());
+    }
+    let (verification, verification_attempts, verification_wall_ms) =
+        verify_mode2_transactions_until_confirmed(config, db_path, &summary.tx_ids, scenario)
+            .await?;
+    summary.apply_mode2_verification(verification);
+    let observed_count = summary.tx_infos.len();
+    let confirmed_count = summary.verified_transactions().len();
+    summary.extra_metrics.insert(
+        "verification_refresh".to_string(),
+        serde_json::json!({
+            "pass": "post_s5_settle",
+            "attempts": verification_attempts,
+            "wall_ms": verification_wall_ms,
+            "observed_tx_count": observed_count,
+            "confirmed_tx_count": confirmed_count
+        }),
+    );
+    refresh_recorded_mode2_send_summary(
+        profile,
+        scenario,
+        summary,
+        format!(
+            "Mode 2 {} post-S5 verification refresh: observed_tx_count={observed_count} confirmed_tx_count={confirmed_count}",
+            scenario.as_str()
+        ),
+    );
+    Ok(())
+}
+
+async fn verify_mode2_transactions_until_confirmed(
+    config: &Config,
+    db_path: &Path,
+    tx_ids: &[String],
+    scenario: ScenarioName,
+) -> anyhow::Result<(Mode2VerificationResult, u32, u128)> {
+    let start = Instant::now();
+    let timeout = config.timeout(config.timeouts.confirmation_secs);
+    let mut attempts = 0u32;
+
+    loop {
+        attempts = attempts.saturating_add(1);
+        let verification = verify_mode2_transactions(config, db_path, tx_ids, scenario).await?;
+        if mode2_verification_confirmed(&verification, tx_ids) || start.elapsed() >= timeout {
+            return Ok((verification, attempts, start.elapsed().as_millis()));
+        }
+
+        let remaining = timeout.saturating_sub(start.elapsed());
+        let sleep_for = Duration::from_secs(10).min(remaining);
+        if sleep_for.is_zero() {
+            return Ok((verification, attempts, start.elapsed().as_millis()));
+        }
+        settle_gate_pause(sleep_for).await;
+    }
+}
+
+fn mode2_verification_confirmed(verification: &Mode2VerificationResult, tx_ids: &[String]) -> bool {
+    !tx_ids.is_empty()
+        && verification.observed_transactions.len() == tx_ids.len()
+        && verification
+            .observed_transactions
+            .iter()
+            .all(|tx| tx.confirmed)
 }
 
 async fn wait_for_mode2_scan_advance(
@@ -2145,13 +2258,10 @@ fn record_mode2_send_summary(
     summary: &ScenarioSendSummary,
     mut notes: Vec<String>,
 ) {
-    let verified = summary.verified_transactions();
-    let verification_complete = summary.tx_ids.is_empty() || !verified.is_empty();
-    let all_verified_ok = verified.iter().all(|tx| tx.confirmed);
     profile
         .chain_verification
         .verified_transactions
-        .extend(verified);
+        .extend(summary.verified_transactions());
 
     let Some(mode) = profile.modes.get_mut("new_wallet") else {
         return;
@@ -2160,12 +2270,55 @@ fn record_mode2_send_summary(
         return;
     };
 
+    cell.record_repetition(mode2_send_repetition(summary, scenario));
+    notes.push(summary.note(scenario));
+    cell.notes.extend(notes);
+}
+
+fn refresh_recorded_mode2_send_summary(
+    profile: &mut ResultProfile,
+    scenario: ScenarioName,
+    summary: &ScenarioSendSummary,
+    note: String,
+) {
+    profile
+        .chain_verification
+        .verified_transactions
+        .retain(|tx| !(tx.mode == "new_wallet" && tx.scenario == scenario.as_str()));
+    profile
+        .chain_verification
+        .verified_transactions
+        .extend(summary.verified_transactions());
+
+    let Some(mode) = profile.modes.get_mut("new_wallet") else {
+        return;
+    };
+    let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
+        return;
+    };
+
+    let repetition = mode2_send_repetition(summary, scenario);
+    if let Some(existing) = cell.repetitions.last_mut() {
+        *existing = repetition;
+        cell.refresh_summary();
+    } else {
+        cell.record_repetition(repetition);
+    }
+    cell.notes.push(note);
+}
+
+fn mode2_send_repetition(summary: &ScenarioSendSummary, scenario: ScenarioName) -> Repetition {
+    let verified = summary.verified_transactions();
+    let verification_complete = summary.tx_ids.is_empty() || !verified.is_empty();
+    let all_verified_ok = verified.iter().all(|tx| tx.confirmed);
+
     let status = if summary.failure_count == 0 && verification_complete && all_verified_ok {
         CellStatus::Ok
     } else {
         CellStatus::Failed
     };
-    cell.record_repetition(Repetition {
+
+    Repetition {
         run: 1,
         status,
         wall_ms: Some(summary.wall_ms),
@@ -2182,9 +2335,7 @@ fn record_mode2_send_summary(
                 })
         }),
         metrics: Some(summary.metrics(scenario)),
-    });
-    notes.push(summary.note(scenario));
-    cell.notes.extend(notes);
+    }
 }
 
 fn capped_attempts(planned: u32, cap: u32) -> u32 {
@@ -4818,6 +4969,45 @@ mod tests {
     }
 
     #[test]
+    fn mode2_verification_confirmed_requires_every_tx_confirmed() {
+        let tx_ids = vec!["1".to_string(), "2".to_string()];
+        let one_confirmed = Mode2VerificationResult {
+            observed_transactions: vec![VerifiedTransaction {
+                tx_id: "1".to_string(),
+                status_value: TX_MINED_CONFIRMED_STATUS,
+                mode: "new_wallet".to_string(),
+                scenario: ScenarioName::S1.as_str().to_string(),
+                amount_microtari: None,
+                fee_microtari: Some(10),
+                mined_height: Some(100),
+                confirmed: true,
+            }],
+            observations: Vec::new(),
+            used_base_node_query: true,
+        };
+        assert!(!mode2_verification_confirmed(&one_confirmed, &tx_ids));
+
+        let all_confirmed = Mode2VerificationResult {
+            observed_transactions: vec![
+                one_confirmed.observed_transactions[0].clone(),
+                VerifiedTransaction {
+                    tx_id: "2".to_string(),
+                    status_value: TX_MINED_CONFIRMED_STATUS,
+                    mode: "new_wallet".to_string(),
+                    scenario: ScenarioName::S1.as_str().to_string(),
+                    amount_microtari: None,
+                    fee_microtari: Some(10),
+                    mined_height: Some(101),
+                    confirmed: true,
+                },
+            ],
+            observations: Vec::new(),
+            used_base_node_query: true,
+        };
+        assert!(mode2_verification_confirmed(&all_confirmed, &tx_ids));
+    }
+
+    #[test]
     fn scan_checkpoint_gates_missing_prerequisites() {
         assert!(!ScanCheckpoint::PostS1Blocked.runnable());
         assert!(!ScanCheckpoint::PostS5Blocked.runnable());
@@ -4992,6 +5182,86 @@ mod tests {
         assert_eq!(
             cell.repetitions[0].error.as_deref(),
             Some("tx_ids were produced but chain verification returned no rows")
+        );
+    }
+
+    #[test]
+    fn mode2_refresh_replaces_pending_repetition_and_confirmed_row() {
+        let config = Config::default();
+        let mut profile = ResultProfile::new(&config, crate::env_capture::capture());
+        profile.modes.insert(
+            ModeName::NewWallet.as_str().to_string(),
+            empty_mode_profile(ModeName::NewWallet, None),
+        );
+        let mut summary = ScenarioSendSummary {
+            attempted: 1,
+            success_count: 1,
+            tx_ids: vec!["42".to_string()],
+            tx_infos: vec![VerifiedTransaction {
+                tx_id: "42".to_string(),
+                status_value: 1,
+                mode: "new_wallet".to_string(),
+                scenario: ScenarioName::S1.as_str().to_string(),
+                amount_microtari: None,
+                fee_microtari: Some(10),
+                mined_height: None,
+                confirmed: false,
+            }],
+            ..ScenarioSendSummary::default()
+        };
+
+        record_mode2_send_summary(&mut profile, ScenarioName::S1, &summary, Vec::new());
+
+        let cell = &profile
+            .modes
+            .get(ModeName::NewWallet.as_str())
+            .unwrap()
+            .scenarios[ScenarioName::S1.as_str()];
+        assert_eq!(cell.status, CellStatus::Failed);
+        assert_eq!(cell.repetitions.len(), 1);
+        assert_eq!(profile.chain_verification.verified_transactions.len(), 0);
+
+        summary.tx_infos = vec![VerifiedTransaction {
+            tx_id: "42".to_string(),
+            status_value: TX_MINED_CONFIRMED_STATUS,
+            mode: "new_wallet".to_string(),
+            scenario: ScenarioName::S1.as_str().to_string(),
+            amount_microtari: None,
+            fee_microtari: Some(10),
+            mined_height: Some(100),
+            confirmed: true,
+        }];
+        summary.extra_metrics.insert(
+            "verification_source".to_string(),
+            serde_json::json!("base_node_transaction_query"),
+        );
+
+        refresh_recorded_mode2_send_summary(
+            &mut profile,
+            ScenarioName::S1,
+            &summary,
+            "post-S5 refresh".to_string(),
+        );
+        refresh_recorded_mode2_send_summary(
+            &mut profile,
+            ScenarioName::S1,
+            &summary,
+            "post-S5 refresh repeat".to_string(),
+        );
+
+        let cell = &profile
+            .modes
+            .get(ModeName::NewWallet.as_str())
+            .unwrap()
+            .scenarios[ScenarioName::S1.as_str()];
+        assert_eq!(cell.status, CellStatus::Ok);
+        assert_eq!(cell.repetitions.len(), 1);
+        assert_eq!(cell.repetitions[0].status, CellStatus::Ok);
+        assert_eq!(cell.repetitions[0].error, None);
+        assert_eq!(profile.chain_verification.verified_transactions.len(), 1);
+        assert_eq!(
+            profile.chain_verification.verified_transactions[0].tx_id,
+            "42"
         );
     }
 

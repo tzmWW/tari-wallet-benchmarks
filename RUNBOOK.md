@@ -176,6 +176,11 @@ S5 through the direct minotari crate path:
   but the base-node tip is the chain-advance clock because wallet scan-tip
   metadata can update in coarse buckets. This is a settlement gate for the known
   `FundsPending` lock behavior, not a retry.
+- After S5, any Mode 2 tx ids produced by S1/S4/S5 are re-queried until every
+  observed tx reaches `C_min` or the confirmation timeout expires. The harness
+  replaces the original single repetition in place and removes any stale
+  top-level rows for that Mode 2 scenario before adding newly confirmed rows, so
+  the refresh does not create fake repetitions or duplicate chain evidence.
 - S4 dispatches each configured concurrent batch against the same wallet
   database, capped by `mode2_live_max_s4_batch` when non-zero. Wallet lock
   contention and failed sends are counted as benchmark signal.
@@ -194,6 +199,12 @@ is `Mined` and the mined height is at least `C_min` deep. Wallet DB status,
 payment id/payref, fee, query location, mined height, tip height, and query
 errors remain in per-repetition metrics. Pending, mempool-only, timeout, and
 query-failed cases are observations, not confirmed chain evidence.
+
+For fresh-funded Mode 2 evidence, fund several independent small UTXOs when you
+need S1, S4, and S5 in the same run. A single fresh UTXO can prove S1 send-side
+construction/broadcast, but S1 may lock the only spendable input before S4/S5
+begin. If that happens, S4/S5 should remain funding-state failures in the
+profile rather than being retried against synthetic wallet state.
 
 When `mode3_live_topology` is enabled, the harness starts a real
 `minotari_payment_processor` process plus a parallel `minotari daemon` payment
