@@ -7,8 +7,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use tari_common::configuration::Network;
 use tari_common_types::{
     seeds::{
@@ -18,7 +19,9 @@ use tari_common_types::{
         seed_words::SeedWords,
     },
     tari_address::{TariAddress, TariAddressFeatures},
+    types::CompressedPublicKey,
 };
+use tari_crypto::{keys::SecretKey, ristretto::RistrettoSecretKey};
 use tari_transaction_components::key_manager::{
     KeyManager, TransactionKeyManagerInterface,
     wallet_types::{SeedWordsWallet, WalletType},
@@ -211,6 +214,37 @@ pub fn redact_middle(value: &str) -> String {
     format!("{}...{}", &value[..6], &value[value.len() - 6..])
 }
 
+pub fn derive_distinct_recipient_pool(count: u32) -> anyhow::Result<Vec<String>> {
+    (0..count).map(deterministic_recipient_address).collect()
+}
+
+fn deterministic_recipient_address(index: u32) -> anyhow::Result<String> {
+    let view_key = deterministic_public_key("wallet-bench-s5-view", index)?;
+    let spend_key = deterministic_public_key("wallet-bench-s5-spend", index)?;
+    Ok(TariAddress::new_dual_address(
+        view_key,
+        spend_key,
+        Network::Esmeralda,
+        TariAddressFeatures::create_one_sided_only(),
+        None,
+    )?
+    .to_base58())
+}
+
+fn deterministic_public_key(label: &str, index: u32) -> anyhow::Result<CompressedPublicKey> {
+    let mut wide = [0u8; 64];
+    let first = sha2::Sha512::digest(format!("{label}:{index}:0").as_bytes());
+    let second = sha2::Sha512::digest(format!("{label}:{index}:1").as_bytes());
+    wide[..32].copy_from_slice(&first[..32]);
+    wide[32..].copy_from_slice(&second[..32]);
+    let secret = RistrettoSecretKey::from_uniform_bytes(&wide)
+        .map_err(|error| anyhow::anyhow!("deterministic key derivation failed: {error}"))?;
+    if secret.as_bytes().iter().all(|byte| *byte == 0) {
+        bail!("deterministic key derivation produced zero key");
+    }
+    Ok(CompressedPublicKey::from_secret_key(&secret))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +307,18 @@ mod tests {
             rewritten.public_spend_key_hex,
             original.public_spend_key_hex
         );
+    }
+
+    #[test]
+    fn distinct_recipient_pool_is_deterministic_and_esmeralda() {
+        let first = derive_distinct_recipient_pool(4).unwrap();
+        let second = derive_distinct_recipient_pool(4).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 4);
+        assert_ne!(first[0], first[1]);
+        assert!(first.iter().all(|address| address.starts_with('f')));
+        for address in first {
+            TariAddress::from_str(&address).unwrap();
+        }
     }
 }

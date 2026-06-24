@@ -18,6 +18,7 @@ use minotari::{
     utils::init_wallet::{init_with_seed_words, init_with_view_key},
 };
 use minotari_wallet_grpc_client::{WalletGrpcClient, grpc};
+use rusqlite::Connection;
 use tari_common::configuration::Network;
 use tari_common_types::seeds::cipher_seed::CipherSeed;
 use tari_common_types::tari_address::TariAddress;
@@ -37,11 +38,12 @@ use crate::{
         self, BulkPaymentItem, BulkPaymentRequest, PaymentProcessorClient,
         PaymentProcessorDbSnapshot,
     },
-    result_profile::{CellStatus, Repetition, ResultProfile, ScenarioCell},
+    result_profile::{CellStatus, Repetition, ResultProfile, ScenarioCell, VerifiedTransaction},
     seeds::{
-        AddressBook, WalletRole, current_birthday, seed_from_words, seed_from_words_with_birthday,
-        seed_words_with_birthday,
+        AddressBook, WalletRole, current_birthday, derive_distinct_recipient_pool, seed_from_words,
+        seed_from_words_with_birthday, seed_words_with_birthday,
     },
+    versions::TX_MINED_CONFIRMED_STATUS,
 };
 
 pub async fn annotate_profile_with_library_smoke(
@@ -89,6 +91,7 @@ pub async fn annotate_profile_with_library_smoke(
                     failure_count: 0,
                     fee_microtari: None,
                     error: None,
+                    metrics: None,
                 });
                 cell.notes.push(format!(
                     "live-minotari funded scan smoke detected available_microtari={available}; balance={balance}"
@@ -109,6 +112,7 @@ pub async fn annotate_profile_with_library_smoke(
                     failure_count: 1,
                     fee_microtari: None,
                     error: Some(format!("{error:#}")),
+                    metrics: None,
                 });
             }
         }
@@ -533,6 +537,7 @@ fn record_mode1_s0(
         failure_count: 0,
         fee_microtari: None,
         error: None,
+        metrics: None,
     });
     cell.notes.push(format!(
         "Mode 1 topology started real minotari_console_wallet gRPC version {}; grpc_address={} grpc_bind={} base_path={} birthday={} balance_available={} pending_in={} pending_out={}",
@@ -574,6 +579,7 @@ fn record_mode1_startup_failure(profile: &mut ResultProfile, wall_ms: u128, erro
             failure_count: 1,
             fee_microtari: None,
             error: Some(format!("{error:#}")),
+            metrics: None,
         });
         cell.notes
             .push("Mode 1 console-wallet startup failed before scenario dispatch".to_string());
@@ -588,32 +594,13 @@ async fn run_mode1_send_cells(
 ) -> anyhow::Result<()> {
     let amount = parse_amount(&config.benchmark.mode1_scenario_amount)?;
     let fee_rate = config.fee_rate()?.0;
-    let s1_attempts = capped_attempts(
-        config
-            .benchmark
-            .doubling_rounds
-            .saturating_mul(config.benchmark.fanout_outputs_per_tx)
-            .min(config.benchmark.volume_target),
-        config.benchmark.mode1_live_max_s1_txs,
-    );
-    let s1 = run_mode1_transfers_sequential(
-        "old_wallet/S1",
-        &mut context.client,
-        ScenarioName::S1,
-        s1_attempts,
-        1,
-        false,
-        &recipient,
-        amount,
-        fee_rate,
-    )
-    .await;
+    let s1 = run_mode1_s1(config, &mut context.client, amount, fee_rate).await;
     record_mode1_transfer_summary(
         profile,
         ScenarioName::S1,
         &s1,
         vec![format!(
-            "Mode 1 S1 drove console-wallet gRPC Transfer; attempted_batches={} payments_per_batch=1 amount={} cap={}",
+            "Mode 1 S1 drove console-wallet gRPC CoinSplit rounds; attempted_batches={} amount_per_output={} cap={}",
             s1.attempted_batches,
             config.benchmark.mode1_scenario_amount,
             config.benchmark.mode1_live_max_s1_txs
@@ -631,18 +618,18 @@ async fn run_mode1_send_cells(
         )],
     );
 
-    let s5_items = capped_attempts(
-        config.benchmark.s5_m,
-        config.benchmark.mode1_live_max_s5_items,
-    );
-    let s5 = run_mode1_transfers_sequential(
-        "old_wallet/S5",
+    wait_for_mode1_scan_advance(
         &mut context.client,
-        ScenarioName::S5,
-        1,
-        s5_items,
-        true,
-        &recipient,
+        config.settle_wait_blocks(),
+        config.timeout(config.timeouts.confirmation_secs),
+    )
+    .await;
+
+    let s5_recipients = derive_distinct_recipient_pool(config.benchmark.s5_m)?;
+    let s5 = run_mode1_s5(
+        config,
+        &mut context.client,
+        &s5_recipients,
         amount,
         fee_rate,
     )
@@ -652,14 +639,171 @@ async fn run_mode1_send_cells(
         ScenarioName::S5,
         &s5,
         vec![format!(
-            "Mode 1 S5 used one console-wallet gRPC Transfer request with single_tx=true and items={} of configured S5_M={} and S5_K={}; cap={}",
-            s5_items,
+            "Mode 1 S5 used deterministic distinct recipients; attempted_payments={} of configured S5_M={} and S5_K={}; cap={}",
+            s5.attempted_payments,
             config.benchmark.s5_m,
             config.benchmark.s5_k,
             config.benchmark.mode1_live_max_s5_items
         )],
     );
     Ok(())
+}
+
+async fn run_mode1_s1(
+    config: &Config,
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> Mode1TransferSummary {
+    let mut total = Mode1TransferSummary::default();
+    let start = Instant::now();
+    let rounds = s1_round_plan(config, config.benchmark.mode1_live_max_s1_txs);
+    let balance_before = mode1_available_balance(client).await.ok();
+    for round in rounds {
+        let round_start = Instant::now();
+        let mut round_summary = Mode1TransferSummary {
+            attempted_batches: round.tx_count,
+            attempted_payments: round.tx_count.saturating_mul(round.outputs_per_tx),
+            ..Mode1TransferSummary::default()
+        };
+        for tx_index in 1..=round.tx_count {
+            println!(
+                "old_wallet/S1 round {} tx {}/{} coin_split outputs={}",
+                round.round_index, tx_index, round.tx_count, round.outputs_per_tx
+            );
+            let result = submit_mode1_coin_split(
+                client,
+                amount,
+                round.outputs_per_tx,
+                fee_rate,
+                format!("wallet-bench-S1-r{}-{tx_index}", round.round_index).into_bytes(),
+            )
+            .await;
+            round_summary.record_batch(tx_index, round.outputs_per_tx, result);
+            round_summary
+                .construction_complete_ms
+                .push(round_start.elapsed().as_millis());
+        }
+        round_summary.wall_ms = round_start.elapsed().as_millis();
+        wait_for_mode1_scan_advance(
+            client,
+            config.settle_wait_blocks(),
+            config.timeout(config.timeouts.confirmation_secs),
+        )
+        .await;
+        if !round_summary.tx_ids.is_empty() {
+            match verify_mode1_transactions(client, &round_summary.tx_ids, ScenarioName::S1).await {
+                Ok(verified) => round_summary.tx_infos.extend(verified),
+                Err(error) => round_summary
+                    .errors
+                    .push(format!("S1 round chain verification failed: {error:#}")),
+            }
+        }
+        let observed_utxos = mode1_unspent_count(client).await.ok();
+        let balance_after = mode1_available_balance(client).await.ok();
+        round_summary.extra_metrics.insert(
+            format!("round_{}", round.round_index),
+            serde_json::json!({
+                "round_index": round.round_index,
+                "fanout": round.fanout,
+                "tx_count": round.tx_count,
+                "outputs_per_tx": round.outputs_per_tx,
+                "target_utxos_after": round.target_utxos_after,
+                "observed_unspent_count": observed_utxos,
+                "balance_after_microtari": balance_after,
+                "verified_count": round_summary.tx_infos.iter().filter(|tx| tx.confirmed).count(),
+                "wall_ms": round_summary.wall_ms
+            }),
+        );
+        total.add_batch(round.round_index, round_summary);
+        if total.failure_count > 0 {
+            break;
+        }
+    }
+    total.wall_ms = start.elapsed().as_millis();
+    total.extra_metrics.insert(
+        "balance_before_microtari".to_string(),
+        serde_json::json!(balance_before),
+    );
+    total.extra_metrics.insert(
+        "balance_after_microtari".to_string(),
+        serde_json::json!(mode1_available_balance(client).await.ok()),
+    );
+    total
+}
+
+async fn run_mode1_s5(
+    config: &Config,
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    recipients: &[String],
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> Mode1TransferSummary {
+    let s5_items = capped_attempts(
+        config.benchmark.s5_m,
+        config.benchmark.mode1_live_max_s5_items,
+    );
+    let selected = recipients
+        .iter()
+        .take(s5_items as usize)
+        .cloned()
+        .collect::<Vec<_>>();
+    let start = Instant::now();
+    let mut total = Mode1TransferSummary::default();
+    let mut batch_recipients = Vec::new();
+    let mut current_batch = Vec::new();
+    for recipient in &selected {
+        current_batch.push(recipient.clone());
+        if current_batch.len() == config.benchmark.s5_k as usize {
+            batch_recipients.push(std::mem::take(&mut current_batch));
+        }
+    }
+    if !current_batch.is_empty() {
+        batch_recipients.push(current_batch);
+    }
+    let batch_arm = run_mode1_recipient_batches_sequential(
+        "old_wallet/S5 batch",
+        client,
+        ScenarioName::S5,
+        batch_recipients,
+        true,
+        amount,
+        fee_rate,
+    )
+    .await;
+    wait_for_mode1_scan_advance(
+        client,
+        config.settle_wait_blocks(),
+        config.timeout(config.timeouts.confirmation_secs),
+    )
+    .await;
+    time::sleep(Duration::from_secs(config.benchmark.settle_cooldown_secs)).await;
+    let individual_recipients = selected
+        .into_iter()
+        .map(|recipient| vec![recipient])
+        .collect::<Vec<_>>();
+    let individual_arm = run_mode1_recipient_batches_sequential(
+        "old_wallet/S5 individual",
+        client,
+        ScenarioName::S5,
+        individual_recipients,
+        false,
+        amount,
+        fee_rate,
+    )
+    .await;
+    total.add_batch(config.benchmark.s5_k, batch_arm);
+    total.add_batch(1, individual_arm);
+    total.wall_ms = start.elapsed().as_millis();
+    total.extra_metrics.insert(
+        "s5_arms".to_string(),
+        serde_json::json!({
+            "recipient_count": s5_items,
+            "batch_size": config.benchmark.s5_k,
+            "settle_cooldown_secs": config.benchmark.settle_cooldown_secs
+        }),
+    );
+    total
 }
 
 async fn run_mode1_s4_batches(
@@ -689,43 +833,6 @@ async fn run_mode1_s4_batches(
     }
     total.wall_ms = start.elapsed().as_millis();
     total
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_mode1_transfers_sequential(
-    label: &str,
-    client: &mut WalletGrpcClient<tonic::transport::Channel>,
-    scenario: ScenarioName,
-    batch_count: u32,
-    items_per_batch: u32,
-    single_tx: bool,
-    recipient: &str,
-    amount: MicroMinotari,
-    fee_rate: u64,
-) -> Mode1TransferSummary {
-    let mut summary = Mode1TransferSummary {
-        attempted_batches: batch_count,
-        attempted_payments: batch_count.saturating_mul(items_per_batch),
-        ..Mode1TransferSummary::default()
-    };
-    let start = Instant::now();
-    for batch_index in 1..=batch_count {
-        println!("{label} batch {batch_index}/{batch_count} dispatching");
-        let result = submit_mode1_transfer(
-            client,
-            scenario,
-            batch_index,
-            items_per_batch,
-            single_tx,
-            recipient,
-            amount,
-            fee_rate,
-        )
-        .await;
-        summary.record_batch(batch_index, items_per_batch, result);
-    }
-    summary.wall_ms = start.elapsed().as_millis();
-    summary
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -780,6 +887,60 @@ async fn run_mode1_transfers_concurrent(
     summary
 }
 
+async fn run_mode1_recipient_batches_sequential(
+    label: &str,
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    scenario: ScenarioName,
+    recipient_batches: Vec<Vec<String>>,
+    single_tx: bool,
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> Mode1TransferSummary {
+    let mut summary = Mode1TransferSummary {
+        attempted_batches: recipient_batches.len().try_into().unwrap_or(u32::MAX),
+        attempted_payments: recipient_batches
+            .iter()
+            .map(|batch| u32::try_from(batch.len()).unwrap_or(u32::MAX))
+            .fold(0u32, u32::saturating_add),
+        ..Mode1TransferSummary::default()
+    };
+    let start = Instant::now();
+    for (index, recipients) in recipient_batches.into_iter().enumerate() {
+        let batch_index = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        let items_per_batch = u32::try_from(recipients.len()).unwrap_or(u32::MAX);
+        println!(
+            "{label} batch {}/{} dispatching recipients={}",
+            batch_index,
+            summary.attempted_batches,
+            recipients.len()
+        );
+        let result = submit_mode1_transfer_to_recipients(
+            client,
+            scenario,
+            batch_index,
+            recipients,
+            single_tx,
+            amount,
+            fee_rate,
+        )
+        .await;
+        summary
+            .construction_complete_ms
+            .push(start.elapsed().as_millis());
+        summary.record_batch(batch_index, items_per_batch, result);
+    }
+    summary.wall_ms = start.elapsed().as_millis();
+    if !summary.tx_ids.is_empty() {
+        match verify_mode1_transactions(client, &summary.tx_ids, scenario).await {
+            Ok(verified) => summary.tx_infos.extend(verified),
+            Err(error) => summary
+                .errors
+                .push(format!("mode1 chain verification failed: {error:#}")),
+        }
+    }
+    summary
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn submit_mode1_transfer(
     client: &mut WalletGrpcClient<tonic::transport::Channel>,
@@ -792,14 +953,42 @@ async fn submit_mode1_transfer(
     fee_rate: u64,
 ) -> anyhow::Result<Mode1TransferOutcome> {
     let recipients = (1..=items_per_batch)
-        .map(|item_index| grpc::PaymentRecipient {
-            address: recipient.to_string(),
+        .map(|_| recipient.to_string())
+        .collect::<Vec<_>>();
+    submit_mode1_transfer_to_recipients(
+        client,
+        scenario,
+        batch_index,
+        recipients,
+        single_tx,
+        amount,
+        fee_rate,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submit_mode1_transfer_to_recipients(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    scenario: ScenarioName,
+    batch_index: u32,
+    recipients: Vec<String>,
+    single_tx: bool,
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> anyhow::Result<Mode1TransferOutcome> {
+    let recipients = recipients
+        .into_iter()
+        .enumerate()
+        .map(|(index, address)| grpc::PaymentRecipient {
+            address,
             amount: amount.0,
             fee_per_gram: fee_rate,
             payment_type: 1,
             raw_payment_id: format!(
-                "wallet-bench-{}-{batch_index}-{item_index}",
-                scenario.as_str()
+                "wallet-bench-{}-{batch_index}-{}",
+                scenario.as_str(),
+                index + 1
             )
             .into_bytes(),
             user_payment_id: None,
@@ -815,19 +1004,200 @@ async fn submit_mode1_transfer(
     Ok(Mode1TransferOutcome::from_response(response))
 }
 
+async fn submit_mode1_coin_split(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    amount: MicroMinotari,
+    split_count: u32,
+    fee_rate: u64,
+    payment_id: Vec<u8>,
+) -> anyhow::Result<Mode1TransferOutcome> {
+    let response = client
+        .coin_split(grpc::CoinSplitRequest {
+            amount_per_split: amount.0,
+            split_count: split_count.into(),
+            fee_per_gram: fee_rate,
+            lock_height: 0,
+            payment_id,
+        })
+        .await?
+        .into_inner();
+    Ok(Mode1TransferOutcome {
+        success_count: 1,
+        failure_count: 0,
+        fee_microtari: 0,
+        tx_ids: vec![response.tx_id.to_string()],
+        errors: Vec::new(),
+    })
+}
+
+async fn mode1_unspent_count(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+) -> anyhow::Result<u64> {
+    let response = client
+        .get_unspent_amounts(grpc::Empty {})
+        .await?
+        .into_inner();
+    Ok(response.amount.len().try_into().unwrap_or(u64::MAX))
+}
+
+async fn mode1_available_balance(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+) -> anyhow::Result<u64> {
+    let response = client
+        .get_balance(grpc::GetBalanceRequest { payment_id: None })
+        .await?
+        .into_inner();
+    Ok(response.available_balance)
+}
+
+async fn wait_for_mode1_scan_advance(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    blocks: u64,
+    timeout: Duration,
+) {
+    let Ok(start_state) = client
+        .get_state(grpc::GetStateRequest {})
+        .await
+        .map(|r| r.into_inner())
+    else {
+        return;
+    };
+    let target = start_state.scanned_height.saturating_add(blocks);
+    let start = Instant::now();
+    let mut interval = time::interval(Duration::from_secs(10));
+    while start.elapsed() < timeout {
+        interval.tick().await;
+        let Ok(state) = client
+            .get_state(grpc::GetStateRequest {})
+            .await
+            .map(|r| r.into_inner())
+        else {
+            continue;
+        };
+        if state.scanned_height >= target {
+            return;
+        }
+        println!(
+            "mode1 settle wait: scanned_height={} target={}",
+            state.scanned_height, target
+        );
+    }
+}
+
+async fn verify_mode1_transactions(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    tx_ids: &[String],
+    scenario: ScenarioName,
+) -> anyhow::Result<Vec<VerifiedTransaction>> {
+    let ids = tx_ids
+        .iter()
+        .filter_map(|tx_id| tx_id.parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let response = client
+        .get_transaction_info(grpc::GetTransactionInfoRequest {
+            transaction_ids: ids,
+        })
+        .await?
+        .into_inner();
+    Ok(response
+        .transactions
+        .into_iter()
+        .map(|info| {
+            let status_value = u32::try_from(info.status).unwrap_or_default();
+            VerifiedTransaction {
+                tx_id: info.tx_id.to_string(),
+                status_value,
+                mode: "old_wallet".to_string(),
+                scenario: scenario.as_str().to_string(),
+                amount_microtari: Some(info.amount),
+                fee_microtari: Some(info.fee),
+                mined_height: (info.mined_in_block_height > 0)
+                    .then_some(info.mined_in_block_height),
+                confirmed: status_value == TX_MINED_CONFIRMED_STATUS
+                    || terminal_ok_status(status_value),
+            }
+        })
+        .collect())
+}
+
+fn verify_mode2_transactions_from_db(
+    db_path: &Path,
+    tx_ids: &[String],
+    scenario: ScenarioName,
+) -> anyhow::Result<Vec<VerifiedTransaction>> {
+    if tx_ids.is_empty() || !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(db_path)?;
+    let mut verified = Vec::new();
+    for tx_id in tx_ids {
+        let Ok(parsed) = tx_id.parse::<u64>() else {
+            continue;
+        };
+        let row = conn.query_row(
+            r#"
+            SELECT status, mined_height, confirmation_height
+            FROM completed_transactions
+            WHERE id = ?1
+            "#,
+            [parsed as i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        );
+        let (status, mined_height, confirmation_height) = match row {
+            Ok(row) => row,
+            Err(_) => ("not_found".to_string(), None, None),
+        };
+        let (status_value, confirmed) = match status.as_str() {
+            "mined_confirmed" => (TX_MINED_CONFIRMED_STATUS, true),
+            "mined_unconfirmed" => (2, false),
+            "broadcast" => (1, false),
+            "rejected" => (7, false),
+            _ => (0, false),
+        };
+        verified.push(VerifiedTransaction {
+            tx_id: tx_id.clone(),
+            status_value,
+            mode: "new_wallet".to_string(),
+            scenario: scenario.as_str().to_string(),
+            amount_microtari: None,
+            fee_microtari: None,
+            mined_height: confirmation_height
+                .or(mined_height)
+                .and_then(|height| u64::try_from(height).ok()),
+            confirmed,
+        });
+    }
+    Ok(verified)
+}
+
 fn record_mode1_transfer_summary(
     profile: &mut ResultProfile,
     scenario: ScenarioName,
     summary: &Mode1TransferSummary,
     mut notes: Vec<String>,
 ) {
+    profile
+        .chain_verification
+        .verified_transactions
+        .extend(summary.tx_infos.clone());
     let Some(mode) = profile.modes.get_mut("old_wallet") else {
         return;
     };
     let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
         return;
     };
-    let status = if summary.failure_count == 0 {
+    let verification_complete = summary.tx_ids.is_empty() || !summary.tx_infos.is_empty();
+    let all_verified_ok = summary.tx_infos.iter().all(|tx| tx.confirmed);
+    let status = if summary.failure_count == 0 && verification_complete && all_verified_ok {
         CellStatus::Ok
     } else {
         CellStatus::Failed
@@ -839,7 +1209,16 @@ fn record_mode1_transfer_summary(
         success_count: summary.success_count,
         failure_count: summary.failure_count,
         fee_microtari: Some(summary.fee_microtari),
-        error: summary.error_note(),
+        error: summary.error_note().or_else(|| {
+            (!all_verified_ok)
+                .then_some("one or more tx_ids did not verify as terminal-ok".to_string())
+                .or_else(|| {
+                    (!verification_complete).then_some(
+                        "tx_ids were produced but chain verification returned no rows".to_string(),
+                    )
+                })
+        }),
+        metrics: Some(summary.metrics(scenario)),
     });
     notes.push(summary.note(scenario));
     cell.notes.extend(notes);
@@ -892,6 +1271,7 @@ async fn annotate_mode2_send_smoke(
                     failure_count: 0,
                     fee_microtari: Some(outcome.fee_microtari),
                     error: None,
+                    metrics: None,
                 });
                 cell.notes.push(format!(
                     "Mode 2 compatibility smoke only: constructed, signed, persisted, and submitted one one-sided tx without retry middleware; tx_id={} amount={} recipient={} accepted={} is_synced={}",
@@ -911,6 +1291,7 @@ async fn annotate_mode2_send_smoke(
                     failure_count: 1,
                     fee_microtari: None,
                     error: Some(format!("{error:#}")),
+                    metrics: None,
                 });
             }
         }
@@ -957,7 +1338,12 @@ async fn annotate_mode2_live_scenarios(
             .min(config.benchmark.volume_target),
         config.benchmark.mode2_live_max_s1_txs,
     );
-    let s1 = run_send_attempts_sequential("new_wallet/S1", s1_attempts, request.clone()).await;
+    let mut s1 = run_send_attempts_sequential("new_wallet/S1", s1_attempts, request.clone()).await;
+    s1.tx_infos = verify_mode2_transactions_from_db(
+        &config.modes.new_wallet_database,
+        &s1.tx_ids,
+        ScenarioName::S1,
+    )?;
     record_mode2_send_summary(
         profile,
         ScenarioName::S1,
@@ -980,7 +1366,12 @@ async fn annotate_mode2_live_scenarios(
         ],
     );
 
-    let s4 = run_s4_batches(config, request.clone()).await;
+    let mut s4 = run_s4_batches(config, request.clone()).await;
+    s4.tx_infos = verify_mode2_transactions_from_db(
+        &config.modes.new_wallet_database,
+        &s4.tx_ids,
+        ScenarioName::S4,
+    )?;
     record_mode2_send_summary(
         profile,
         ScenarioName::S4,
@@ -1001,7 +1392,17 @@ async fn annotate_mode2_live_scenarios(
         config.benchmark.s5_m,
         config.benchmark.mode2_live_max_s5_txs,
     );
-    let s5 = run_send_attempts_sequential("new_wallet/S5", s5_attempts, request).await;
+    let s5_recipients = derive_distinct_recipient_pool(config.benchmark.s5_m)?
+        .into_iter()
+        .take(s5_attempts as usize)
+        .collect::<Vec<_>>();
+    let mut s5 =
+        run_send_attempts_to_recipients_sequential("new_wallet/S5", s5_recipients, request).await;
+    s5.tx_infos = verify_mode2_transactions_from_db(
+        &config.modes.new_wallet_database,
+        &s5.tx_ids,
+        ScenarioName::S5,
+    )?;
     record_mode2_send_summary(
         profile,
         ScenarioName::S5,
@@ -1052,6 +1453,35 @@ async fn run_send_attempts_sequential(
     for attempt in 1..=attempts {
         println!("{label} attempt {attempt}/{attempts} dispatching");
         let result = construct_sign_broadcast_one_sided_owned(request.clone()).await;
+        summary
+            .construction_complete_ms
+            .push(start.elapsed().as_millis());
+        summary.record_attempt(attempt, result);
+    }
+    summary.wall_ms = start.elapsed().as_millis();
+    summary
+}
+
+async fn run_send_attempts_to_recipients_sequential(
+    label: &str,
+    recipients: Vec<String>,
+    request: OwnedOneSidedSendRequest,
+) -> ScenarioSendSummary {
+    let attempts = u32::try_from(recipients.len()).unwrap_or(u32::MAX);
+    let mut summary = ScenarioSendSummary {
+        attempted: attempts,
+        ..ScenarioSendSummary::default()
+    };
+    let start = Instant::now();
+    for (index, recipient) in recipients.into_iter().enumerate() {
+        let attempt = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        println!("{label} attempt {attempt}/{attempts} dispatching");
+        let mut request = request.clone();
+        request.recipient = recipient;
+        let result = construct_sign_broadcast_one_sided_owned(request).await;
+        summary
+            .construction_complete_ms
+            .push(start.elapsed().as_millis());
         summary.record_attempt(attempt, result);
     }
     summary.wall_ms = start.elapsed().as_millis();
@@ -1072,16 +1502,18 @@ async fn run_send_attempts_concurrent(
     for attempt in 1..=attempts {
         println!("{label} attempt {attempt}/{attempts} dispatching");
         let request = request.clone();
+        let attempt_start = Instant::now();
         join_set.spawn(async move {
-            (
-                attempt,
-                construct_sign_broadcast_one_sided_owned(request).await,
-            )
+            let result = construct_sign_broadcast_one_sided_owned(request).await;
+            (attempt, attempt_start.elapsed().as_millis(), result)
         });
     }
     while let Some(result) = join_set.join_next().await {
         match result {
-            Ok((attempt, send)) => summary.record_attempt(attempt, send),
+            Ok((attempt, completed_ms, send)) => {
+                summary.construction_complete_ms.push(completed_ms);
+                summary.record_attempt(attempt, send);
+            }
             Err(error) => summary.record_join_error(error.to_string()),
         }
     }
@@ -1095,6 +1527,14 @@ fn record_mode2_send_summary(
     summary: &ScenarioSendSummary,
     mut notes: Vec<String>,
 ) {
+    let verified = summary.verified_transactions("new_wallet", scenario);
+    let verification_complete = summary.tx_ids.is_empty() || !verified.is_empty();
+    let all_verified_ok = verified.iter().all(|tx| tx.confirmed);
+    profile
+        .chain_verification
+        .verified_transactions
+        .extend(verified);
+
     let Some(mode) = profile.modes.get_mut("new_wallet") else {
         return;
     };
@@ -1102,14 +1542,28 @@ fn record_mode2_send_summary(
         return;
     };
 
+    let status = if summary.failure_count == 0 && verification_complete && all_verified_ok {
+        CellStatus::Ok
+    } else {
+        CellStatus::Failed
+    };
     cell.record_repetition(Repetition {
         run: 1,
-        status: CellStatus::Ok,
+        status,
         wall_ms: Some(summary.wall_ms),
         success_count: summary.success_count,
         failure_count: summary.failure_count,
         fee_microtari: Some(summary.fee_microtari),
-        error: None,
+        error: summary.error_note().or_else(|| {
+            (!all_verified_ok)
+                .then_some("one or more tx_ids did not verify as terminal-ok".to_string())
+                .or_else(|| {
+                    (!verification_complete).then_some(
+                        "tx_ids were produced but chain verification returned no rows".to_string(),
+                    )
+                })
+        }),
+        metrics: Some(summary.metrics(scenario)),
     });
     notes.push(summary.note(scenario));
     cell.notes.extend(notes);
@@ -1256,6 +1710,7 @@ fn record_mode3_s0(
         failure_count,
         fee_microtari: None,
         error,
+        metrics: None,
     });
     cell.notes.push(format!(
         "Mode 3 topology started real minotari payment receiver plus minotari_payment_processor version {}; receiver_balance={}; receiver_birthday={}; worker_sleep_secs={}",
@@ -1299,6 +1754,7 @@ fn record_mode3_startup_failure(profile: &mut ResultProfile, wall_ms: u128, erro
             failure_count: 1,
             fee_microtari: None,
             error: Some(format!("{error:#}")),
+            metrics: None,
         });
         cell.notes
             .push("Mode 3 topology startup failed before scenario dispatch".to_string());
@@ -1358,14 +1814,16 @@ async fn run_mode3_send_cells(
         config.benchmark.s5_m,
         config.benchmark.mode3_live_max_s5_items,
     );
-    let s5 = run_pp_batches_sequential(
+    let s5_recipients = derive_distinct_recipient_pool(config.benchmark.s5_m)?
+        .into_iter()
+        .take(s5_items as usize)
+        .collect::<Vec<_>>();
+    let s5 = run_pp_recipient_batches_sequential(
         config,
         context,
         "payment_processor/S5",
         ScenarioName::S5,
-        1,
-        s5_items,
-        &recipient,
+        recipient_batches(s5_recipients, config.benchmark.s5_k),
         amount,
     )
     .await;
@@ -1441,6 +1899,49 @@ async fn run_pp_batches_sequential(
             amount,
         )
         .await;
+        summary
+            .construction_complete_ms
+            .push(start.elapsed().as_millis());
+        summary.record_batch(batch_index, result);
+    }
+    summary.wall_ms = start.elapsed().as_millis();
+    summary.observe_db(config).await;
+    summary
+}
+
+async fn run_pp_recipient_batches_sequential(
+    config: &Config,
+    context: &Mode3TopologyContext,
+    label: &str,
+    scenario: ScenarioName,
+    recipient_batches: Vec<Vec<String>>,
+    amount: MicroMinotari,
+) -> PpScenarioSummary {
+    let attempted_batches = u32::try_from(recipient_batches.len()).unwrap_or(u32::MAX);
+    let attempted_payments = recipient_batches
+        .iter()
+        .map(|batch| u32::try_from(batch.len()).unwrap_or(u32::MAX))
+        .fold(0u32, u32::saturating_add);
+    let mut summary = PpScenarioSummary {
+        attempted_batches,
+        attempted_payments,
+        ..PpScenarioSummary::default()
+    };
+    let start = Instant::now();
+    for (index, recipients) in recipient_batches.into_iter().enumerate() {
+        let batch_index = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        println!("{label} batch {batch_index}/{attempted_batches} dispatching");
+        let result = submit_pp_batch_to_recipients(
+            &context.client,
+            scenario,
+            batch_index,
+            recipients,
+            amount,
+        )
+        .await;
+        summary
+            .construction_complete_ms
+            .push(start.elapsed().as_millis());
         summary.record_batch(batch_index, result);
     }
     summary.wall_ms = start.elapsed().as_millis();
@@ -1470,24 +1971,26 @@ async fn run_pp_batches_concurrent(
         println!("{label} batch {batch_index}/{batch_count} dispatching");
         let context = context.clone_for_task();
         let recipient = recipient.to_string();
+        let batch_start = Instant::now();
         join_set.spawn(async move {
-            (
+            let result = submit_pp_batch(
+                &context.client,
+                scenario,
                 batch_index,
-                submit_pp_batch(
-                    &context.client,
-                    scenario,
-                    batch_index,
-                    items_per_batch,
-                    &recipient,
-                    amount,
-                )
-                .await,
+                items_per_batch,
+                &recipient,
+                amount,
             )
+            .await;
+            (batch_index, batch_start.elapsed().as_millis(), result)
         });
     }
     while let Some(result) = join_set.join_next().await {
         match result {
-            Ok((batch_index, send)) => summary.record_batch(batch_index, send),
+            Ok((batch_index, completed_ms, send)) => {
+                summary.construction_complete_ms.push(completed_ms);
+                summary.record_batch(batch_index, send);
+            }
             Err(error) => summary.record_join_error(error.to_string()),
         }
     }
@@ -1504,21 +2007,37 @@ async fn submit_pp_batch(
     recipient: &str,
     amount: MicroMinotari,
 ) -> anyhow::Result<PpBatchSubmission> {
-    let amount = i64::try_from(amount.0).context("mode3 payment amount exceeds i64")?;
     let items = (1..=items_per_batch)
-        .map(|item_index| BulkPaymentItem {
+        .map(|_| recipient.to_string())
+        .collect::<Vec<_>>();
+    submit_pp_batch_to_recipients(client, scenario, batch_index, items, amount).await
+}
+
+async fn submit_pp_batch_to_recipients(
+    client: &PaymentProcessorClient,
+    scenario: ScenarioName,
+    batch_index: u32,
+    recipients: Vec<String>,
+    amount: MicroMinotari,
+) -> anyhow::Result<PpBatchSubmission> {
+    let amount = i64::try_from(amount.0).context("mode3 payment amount exceeds i64")?;
+    let items = recipients
+        .into_iter()
+        .enumerate()
+        .map(|(item_index, recipient_address)| BulkPaymentItem {
             client_id: format!(
                 "bench-{}-{}-{}-{}",
                 scenario.as_str().to_lowercase(),
                 chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
                 batch_index,
-                item_index
+                item_index + 1
             ),
-            recipient_address: recipient.to_string(),
+            recipient_address,
             amount,
             payment_id: Some(format!(
                 "wallet-bench-{}-{batch_index}-{item_index}",
-                scenario.as_str()
+                scenario.as_str(),
+                item_index = item_index + 1
             )),
         })
         .collect::<Vec<_>>();
@@ -1552,12 +2071,35 @@ async fn submit_pp_batch(
     })
 }
 
+fn recipient_batches(recipients: Vec<String>, batch_size: u32) -> Vec<Vec<String>> {
+    let target = usize::try_from(batch_size.max(1)).unwrap_or(1);
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    for recipient in recipients {
+        current.push(recipient);
+        if current.len() == target {
+            batches.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
 fn record_pp_summary(
     profile: &mut ResultProfile,
     scenario: ScenarioName,
     summary: &PpScenarioSummary,
     mut notes: Vec<String>,
 ) {
+    let verified = summary.verified_transactions(scenario);
+    let verification_complete = summary.batch_ids.is_empty() || !verified.is_empty();
+    let all_verified_ok = verified.iter().all(|tx| tx.confirmed);
+    profile
+        .chain_verification
+        .verified_transactions
+        .extend(verified);
     let Some(mode) = profile.modes.get_mut("payment_processor") else {
         return;
     };
@@ -1566,8 +2108,10 @@ fn record_pp_summary(
     };
     let status = if summary.blocked_upstream {
         CellStatus::BlockedUpstream
-    } else {
+    } else if summary.failed_batches == 0 && verification_complete && all_verified_ok {
         CellStatus::Ok
+    } else {
+        CellStatus::Failed
     };
     cell.record_repetition(Repetition {
         run: 1,
@@ -1576,7 +2120,17 @@ fn record_pp_summary(
         success_count: summary.accepted_batches,
         failure_count: summary.failed_batches,
         fee_microtari: None,
-        error: summary.error_note(),
+        error: summary.error_note().or_else(|| {
+            (!all_verified_ok)
+                .then_some("one or more PP batches did not verify as terminal-ok".to_string())
+                .or_else(|| {
+                    (!verification_complete).then_some(
+                        "PP batches were accepted but chain verification returned no rows"
+                            .to_string(),
+                    )
+                })
+        }),
+        metrics: Some(summary.metrics(scenario)),
     });
     notes.push(summary.note(scenario));
     cell.notes.extend(notes);
@@ -1658,6 +2212,7 @@ async fn run_fresh_scan_cell(
                     failure_count: 0,
                     fee_microtari: None,
                     error: None,
+                    metrics: None,
                 });
                 cell.notes.push(measurement.note());
             }
@@ -1674,6 +2229,7 @@ async fn run_fresh_scan_cell(
                     failure_count: 1,
                     fee_microtari: None,
                     error: Some(format!("{error:#}")),
+                    metrics: None,
                 });
             }
         }
@@ -1849,6 +2405,8 @@ struct ScenarioSendSummary {
     tx_ids: Vec<String>,
     errors: Vec<String>,
     batch_summaries: Vec<BatchSendSummary>,
+    construction_complete_ms: Vec<u128>,
+    tx_infos: Vec<VerifiedTransaction>,
 }
 
 struct BatchSendSummary {
@@ -1899,6 +2457,9 @@ struct Mode1TransferSummary {
     tx_ids: Vec<String>,
     errors: Vec<String>,
     batch_summaries: Vec<Mode1BatchSummary>,
+    tx_infos: Vec<VerifiedTransaction>,
+    construction_complete_ms: Vec<u128>,
+    extra_metrics: serde_json::Map<String, serde_json::Value>,
 }
 
 struct Mode1BatchSummary {
@@ -1953,8 +2514,10 @@ struct PpScenarioSummary {
     errors: Vec<String>,
     batch_summaries: Vec<PpBatchSummary>,
     db_snapshot: Option<PaymentProcessorDbSnapshot>,
-    events: Option<serde_json::Value>,
+    events: Vec<serde_json::Value>,
     blocked_upstream: bool,
+    construction_complete_ms: Vec<u128>,
+    extra_metrics: serde_json::Map<String, serde_json::Value>,
 }
 
 struct PpBatchSummary {
@@ -1971,6 +2534,86 @@ struct PpBatchSubmission {
     raw_response: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct S1RoundPlan {
+    round_index: u32,
+    tx_count: u32,
+    outputs_per_tx: u32,
+    target_utxos_after: u32,
+    fanout: bool,
+}
+
+fn s1_round_plan(config: &Config, cap: u32) -> Vec<S1RoundPlan> {
+    let mut remaining = if cap == 0 { u32::MAX } else { cap };
+    let mut plans = Vec::new();
+    let mut utxos = 1u32;
+    for round in 1..=config.benchmark.doubling_rounds {
+        if remaining == 0 {
+            break;
+        }
+        let planned = utxos;
+        let tx_count = planned.min(remaining);
+        utxos = utxos.saturating_add(tx_count);
+        plans.push(S1RoundPlan {
+            round_index: round,
+            tx_count,
+            outputs_per_tx: 2,
+            target_utxos_after: utxos,
+            fanout: false,
+        });
+        remaining = remaining.saturating_sub(tx_count);
+    }
+    if remaining > 0 {
+        let planned = utxos;
+        let tx_count = planned.min(remaining);
+        let net_new_outputs = config
+            .benchmark
+            .fanout_outputs_per_tx
+            .saturating_sub(1)
+            .saturating_mul(tx_count);
+        utxos = utxos.saturating_add(net_new_outputs);
+        plans.push(S1RoundPlan {
+            round_index: config.benchmark.doubling_rounds.saturating_add(1),
+            tx_count,
+            outputs_per_tx: config.benchmark.fanout_outputs_per_tx,
+            target_utxos_after: utxos.min(config.benchmark.volume_target),
+            fanout: true,
+        });
+    }
+    plans
+}
+
+fn max_serialization_gap_ms(mut completions: Vec<u128>) -> Option<u128> {
+    if completions.len() < 2 {
+        return None;
+    }
+    completions.sort_unstable();
+    completions
+        .windows(2)
+        .map(|pair| pair[1].saturating_sub(pair[0]))
+        .max()
+}
+
+fn double_selection_rejections(errors: &[String]) -> u32 {
+    errors
+        .iter()
+        .filter(|error| {
+            let lower = error.to_lowercase();
+            lower.contains("doublespend")
+                || lower.contains("double spend")
+                || lower.contains("duplicate input")
+                || lower.contains("already locked")
+                || lower.contains("funds are pending")
+        })
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
+fn terminal_ok_status(status_value: u32) -> bool {
+    matches!(status_value, 2 | 6 | 9 | 13)
+}
+
 impl PpScenarioSummary {
     fn record_batch(&mut self, batch_index: u32, result: anyhow::Result<PpBatchSubmission>) {
         match result {
@@ -1983,7 +2626,7 @@ impl PpScenarioSummary {
                 self.accepted_batches += 1;
                 self.batch_ids.push(submission.batch_id);
                 self.payment_ids.extend(submission.payment_ids);
-                self.events = Some(submission.raw_response);
+                self.events.push(submission.raw_response);
             }
             Err(error) => {
                 println!("mode3 PP batch {batch_index} failed: {error:#}");
@@ -2011,6 +2654,10 @@ impl PpScenarioSummary {
         self.batch_ids.extend(batch.batch_ids);
         self.payment_ids.extend(batch.payment_ids);
         self.errors.extend(batch.errors);
+        self.events.extend(batch.events);
+        self.construction_complete_ms
+            .extend(batch.construction_complete_ms);
+        self.extra_metrics.extend(batch.extra_metrics);
         self.blocked_upstream |= batch.blocked_upstream;
         self.batch_summaries.push(PpBatchSummary {
             configured_batch,
@@ -2080,8 +2727,11 @@ impl PpScenarioSummary {
         if let Some(snapshot) = &self.db_snapshot {
             parts.push(format!("db_snapshot={}", snapshot.status_summary()));
         }
-        if let Some(response) = &self.events {
-            parts.push(format!("last_pp_response={}", compact_json(response, 512)));
+        if !self.events.is_empty() {
+            parts.push(format!(
+                "pp_responses={}",
+                compact_json(&serde_json::Value::Array(self.events.clone()), 512)
+            ));
         }
         if !self.errors.is_empty() {
             parts.push(format!("errors={}", limited_list(&self.errors)));
@@ -2115,7 +2765,57 @@ impl PpScenarioSummary {
                     .unwrap_or_else(|| "PP upstream signing/broadcast error".to_string()),
             );
         }
+        if self.failed_batches > 0 {
+            return Some(limited_list(&self.errors));
+        }
         None
+    }
+
+    fn metrics(&self, scenario: ScenarioName) -> serde_json::Value {
+        serde_json::json!({
+            "scenario": scenario.as_str(),
+            "attempted_batches": self.attempted_batches,
+            "attempted_payments": self.attempted_payments,
+            "accepted_batches": self.accepted_batches,
+            "failed_batches": self.failed_batches,
+            "batch_ids": self.batch_ids,
+            "payment_ids": self.payment_ids,
+            "max_serialization_gap_ms": max_serialization_gap_ms(self.construction_complete_ms.clone()),
+            "double_selection_rejections": double_selection_rejections(&self.errors),
+            "responses": self.events,
+            "extra": self.extra_metrics,
+        })
+    }
+
+    fn verified_transactions(&self, scenario: ScenarioName) -> Vec<VerifiedTransaction> {
+        self.db_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .batches
+                    .iter()
+                    .map(|batch| {
+                        let confirmed = batch.status == "CONFIRMED";
+                        VerifiedTransaction {
+                            tx_id: batch.id.clone(),
+                            status_value: if confirmed {
+                                TX_MINED_CONFIRMED_STATUS
+                            } else {
+                                1
+                            },
+                            mode: "payment_processor".to_string(),
+                            scenario: scenario.as_str().to_string(),
+                            amount_microtari: None,
+                            fee_microtari: None,
+                            mined_height: batch
+                                .mined_height
+                                .and_then(|height| u64::try_from(height).ok()),
+                            confirmed,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -2126,7 +2826,6 @@ fn pp_snapshot_has_progress_or_error(snapshot: &PaymentProcessorDbSnapshot) -> b
                 batch.status.as_str(),
                 "AWAITING_CONFIRMATION" | "CONFIRMED" | "FAILED" | "CANCELLED"
             ) || batch.has_signed_tx
-                || batch.retry_count > 0
         })
 }
 
@@ -2205,6 +2904,10 @@ impl Mode1TransferSummary {
         self.fee_microtari = self.fee_microtari.saturating_add(batch.fee_microtari);
         self.tx_ids.extend(batch.tx_ids);
         self.errors.extend(batch.errors);
+        self.tx_infos.extend(batch.tx_infos);
+        self.construction_complete_ms
+            .extend(batch.construction_complete_ms);
+        self.extra_metrics.extend(batch.extra_metrics);
         self.batch_summaries.push(Mode1BatchSummary {
             configured_batch,
             attempted_batches: batch.attempted_batches,
@@ -2253,6 +2956,36 @@ impl Mode1TransferSummary {
         parts.join("; ")
     }
 
+    fn metrics(&self, scenario: ScenarioName) -> serde_json::Value {
+        let mut metrics = serde_json::Map::new();
+        metrics.insert(
+            "attempted_batches".to_string(),
+            serde_json::json!(self.attempted_batches),
+        );
+        metrics.insert(
+            "attempted_payments".to_string(),
+            serde_json::json!(self.attempted_payments),
+        );
+        metrics.insert("tx_ids".to_string(), serde_json::json!(self.tx_ids));
+        metrics.insert(
+            "verified_transactions".to_string(),
+            serde_json::json!(self.tx_infos),
+        );
+        metrics.insert(
+            "max_serialization_gap_ms".to_string(),
+            serde_json::json!(max_serialization_gap_ms(
+                self.construction_complete_ms.clone()
+            )),
+        );
+        metrics.insert(
+            "double_selection_rejections".to_string(),
+            serde_json::json!(double_selection_rejections(&self.errors)),
+        );
+        metrics.insert("scenario".to_string(), serde_json::json!(scenario.as_str()));
+        metrics.extend(self.extra_metrics.clone());
+        serde_json::Value::Object(metrics)
+    }
+
     fn error_note(&self) -> Option<String> {
         if self.failure_count == 0 {
             None
@@ -2295,6 +3028,9 @@ impl ScenarioSendSummary {
         self.fee_microtari = self.fee_microtari.saturating_add(batch.fee_microtari);
         self.tx_ids.extend(batch.tx_ids);
         self.errors.extend(batch.errors);
+        self.construction_complete_ms
+            .extend(batch.construction_complete_ms);
+        self.tx_infos.extend(batch.tx_infos);
         self.batch_summaries.push(BatchSendSummary {
             configured_batch,
             attempted: batch.attempted,
@@ -2338,6 +3074,47 @@ impl ScenarioSendSummary {
             parts.push(format!("batches={}", batches.join("; ")));
         }
         parts.join("; ")
+    }
+
+    fn error_note(&self) -> Option<String> {
+        if self.failure_count == 0 {
+            None
+        } else {
+            Some(limited_list(&self.errors))
+        }
+    }
+
+    fn metrics(&self, scenario: ScenarioName) -> serde_json::Value {
+        serde_json::json!({
+            "scenario": scenario.as_str(),
+            "attempted": self.attempted,
+            "tx_ids": self.tx_ids,
+            "max_serialization_gap_ms": max_serialization_gap_ms(self.construction_complete_ms.clone()),
+            "double_selection_rejections": double_selection_rejections(&self.errors)
+        })
+    }
+
+    fn verified_transactions(
+        &self,
+        mode: &str,
+        scenario: ScenarioName,
+    ) -> Vec<VerifiedTransaction> {
+        if !self.tx_infos.is_empty() {
+            return self.tx_infos.clone();
+        }
+        self.tx_ids
+            .iter()
+            .map(|tx_id| VerifiedTransaction {
+                tx_id: tx_id.clone(),
+                status_value: 1,
+                mode: mode.to_string(),
+                scenario: scenario.as_str().to_string(),
+                amount_microtari: None,
+                fee_microtari: None,
+                mined_height: None,
+                confirmed: false,
+            })
+            .collect()
     }
 }
 
@@ -2645,5 +3422,167 @@ impl ScanMeasurement {
             "fresh scan birthday={} max_height={} available_microtari={}",
             self.birthday, self.max_height, self.available_microtari
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::Config,
+        modes::ModeName,
+        result_profile::{ResultProfile, empty_mode_profile},
+    };
+
+    #[test]
+    fn s1_round_plan_reaches_512_without_cap() {
+        let config = Config::default();
+        let rounds = s1_round_plan(&config, 0);
+        assert_eq!(rounds.len(), 7);
+        assert_eq!(rounds[0].tx_count, 1);
+        assert_eq!(rounds[5].target_utxos_after, 64);
+        assert_eq!(rounds[6].tx_count, 64);
+        assert_eq!(rounds[6].outputs_per_tx, 8);
+        assert_eq!(rounds[6].target_utxos_after, 512);
+    }
+
+    #[test]
+    fn s1_round_plan_honors_cap_without_inventing_rounds() {
+        let config = Config::default();
+        let rounds = s1_round_plan(&config, 3);
+        assert_eq!(rounds.len(), 2);
+        assert_eq!(rounds[0].tx_count, 1);
+        assert_eq!(rounds[1].tx_count, 2);
+        assert!(!rounds[1].fanout);
+    }
+
+    #[test]
+    fn serialization_gap_uses_sorted_completion_times() {
+        assert_eq!(max_serialization_gap_ms(vec![30, 10, 50, 35]), Some(20));
+        assert_eq!(max_serialization_gap_ms(vec![10]), None);
+    }
+
+    #[test]
+    fn double_selection_rejections_classifies_wallet_lock_errors() {
+        let errors = vec![
+            "Funds are pending. Available: 0".to_string(),
+            "duplicate input detected".to_string(),
+            "plain network timeout".to_string(),
+        ];
+        assert_eq!(double_selection_rejections(&errors), 2);
+    }
+
+    #[test]
+    fn terminal_ok_status_matches_bounty_status_set() {
+        for status in [2, 6, 9, 13] {
+            assert!(terminal_ok_status(status));
+        }
+        for status in [1, 7, 11, 14] {
+            assert!(!terminal_ok_status(status));
+        }
+    }
+
+    #[test]
+    fn recipient_batches_preserve_order_without_chunks() {
+        let recipients = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(
+            recipient_batches(recipients, 2),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string()]
+            ]
+        );
+    }
+
+    #[test]
+    fn pp_retry_count_is_not_terminal_progress() {
+        let snapshot = PaymentProcessorDbSnapshot {
+            batches: vec![payment_processor::PaymentBatchSnapshot {
+                id: "batch".to_string(),
+                status: "PENDING_BATCHING".to_string(),
+                retry_count: 3,
+                error_message: None,
+                has_unsigned_tx: false,
+                has_signed_tx: false,
+                mined_height: None,
+            }],
+            payments: Vec::new(),
+        };
+        assert!(!pp_snapshot_has_progress_or_error(&snapshot));
+    }
+
+    #[test]
+    fn mode2_summary_requires_terminal_verification_for_ok_status() {
+        let config = Config::default();
+        let mut profile = ResultProfile::new(&config, crate::env_capture::capture());
+        profile.modes.insert(
+            ModeName::NewWallet.as_str().to_string(),
+            empty_mode_profile(ModeName::NewWallet, None),
+        );
+        let summary = ScenarioSendSummary {
+            attempted: 1,
+            success_count: 1,
+            tx_ids: vec!["1".to_string()],
+            tx_infos: vec![VerifiedTransaction {
+                tx_id: "1".to_string(),
+                status_value: 1,
+                mode: "new_wallet".to_string(),
+                scenario: ScenarioName::S1.as_str().to_string(),
+                amount_microtari: None,
+                fee_microtari: None,
+                mined_height: None,
+                confirmed: false,
+            }],
+            ..ScenarioSendSummary::default()
+        };
+
+        record_mode2_send_summary(&mut profile, ScenarioName::S1, &summary, Vec::new());
+
+        let cell = &profile
+            .modes
+            .get(ModeName::NewWallet.as_str())
+            .unwrap()
+            .scenarios[ScenarioName::S1.as_str()];
+        assert_eq!(cell.status, CellStatus::Failed);
+        assert_eq!(profile.chain_verification.verified_transactions.len(), 1);
+    }
+
+    #[test]
+    fn pp_summary_requires_terminal_verification_for_ok_status() {
+        let config = Config::default();
+        let mut profile = ResultProfile::new(&config, crate::env_capture::capture());
+        profile.modes.insert(
+            ModeName::PaymentProcessor.as_str().to_string(),
+            empty_mode_profile(ModeName::PaymentProcessor, None),
+        );
+        let summary = PpScenarioSummary {
+            attempted_batches: 1,
+            attempted_payments: 1,
+            accepted_batches: 1,
+            batch_ids: vec!["batch".to_string()],
+            db_snapshot: Some(PaymentProcessorDbSnapshot {
+                batches: vec![payment_processor::PaymentBatchSnapshot {
+                    id: "batch".to_string(),
+                    status: "AWAITING_CONFIRMATION".to_string(),
+                    retry_count: 0,
+                    error_message: None,
+                    has_unsigned_tx: true,
+                    has_signed_tx: true,
+                    mined_height: None,
+                }],
+                payments: Vec::new(),
+            }),
+            ..PpScenarioSummary::default()
+        };
+
+        record_pp_summary(&mut profile, ScenarioName::S5, &summary, Vec::new());
+
+        let cell = &profile
+            .modes
+            .get(ModeName::PaymentProcessor.as_str())
+            .unwrap()
+            .scenarios[ScenarioName::S5.as_str()];
+        assert_eq!(cell.status, CellStatus::Failed);
+        assert_eq!(profile.chain_verification.verified_transactions.len(), 1);
     }
 }

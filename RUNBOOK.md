@@ -82,6 +82,8 @@ mode1_scenario_amount = "1 T"
 mode1_live_max_s1_txs = 1       # 0 means full doubling/fanout target
 mode1_live_max_s4_batch = 1     # 0 means use each concurrent_batches value
 mode1_live_max_s5_items = 2     # 0 means use S5_M
+settle_cooldown_secs = 60       # cooldown between S5 arms
+# settle_wait_blocks omitted means max(C_min + 1, 4)
 
 mode2_send_smoke = true         # spends mode2_send_smoke_amount once
 mode2_send_smoke_amount = "1 T"
@@ -125,17 +127,22 @@ exclusive.
 
 When `mode1_live_topology` is enabled, the harness starts a real
 `minotari_console_wallet` process with gRPC enabled, waits for recovery to find
-the funded balance, and drives S1/S4/S5 through `Transfer` requests. The console
+the funded balance, drives S1 through gRPC `CoinSplit`, and drives S4/S5 through
+`Transfer` requests. The console
 wallet seed-recovery path reads the birthday embedded in the mnemonic; it does
 not apply the separate `--birthday` flag to seed words. The harness therefore
 rewrites only the mnemonic birthday before launch. This preserves the address and
 keys while avoiding an accidental genesis scan for freshly funded Esmeralda
 benchmark wallets.
 
-Mode 1 S5 uses one gRPC `Transfer` call with `single_tx=true` and multiple
-recipients. If earlier S1/S4 sends have locked the single large funded UTXO or
-change output, S5 can fail with `Funds are still pending`; that is recorded as
-wallet behavior rather than retried or hidden.
+Mode 1 S1 follows the spec round shape: six doubling rounds and one fan-out
+round, capped only by `mode1_live_max_s1_txs` for development runs. Between
+planned spend rounds the harness waits for chain/scanner height advancement;
+this is a settlement gate, not a retry. S5 uses deterministic distinct
+Esmeralda recipients and records both batch-shaped and individual-shaped arms.
+If earlier S1/S4 sends have locked the single large funded UTXO or change
+output, S5 can fail with `Funds are still pending`; that is recorded as wallet
+behavior rather than retried or hidden.
 
 When `mode2_live_scenarios` is enabled, the harness records Mode 2 S1, S4, and
 S5 from the same direct one-sided send primitive:
@@ -147,9 +154,9 @@ S5 from the same direct one-sided send primitive:
 - S4 dispatches each configured concurrent batch against the same wallet
   database, capped by `mode2_live_max_s4_batch` when non-zero. Wallet lock
   contention and failed sends are counted as benchmark signal.
-- S5 measures the Mode 2 individual-send arm, capped by
-  `mode2_live_max_s5_txs` when non-zero. The PP Mode 3 surface is responsible
-  for the payment-batch arm.
+- S5 measures the Mode 2 individual-send arm against deterministic distinct
+  Esmeralda recipients, capped by `mode2_live_max_s5_txs` when non-zero. The PP
+  Mode 3 surface is responsible for the payment-batch arm.
 
 When `mode3_live_topology` is enabled, the harness starts a real
 `minotari_payment_processor` process plus a parallel `minotari daemon` payment
@@ -159,11 +166,12 @@ force an accidental genesis scan. Before the daemon starts, the harness expires
 and unlocks stale payment-receiver locks left by previously interrupted local
 runs; it does not unlock between scenarios inside a run.
 
-Mode 3 S1/S4/S5 drive `/v1/payment-batches` with the configured caps. With a
-single large funded UTXO, the first signed/broadcast PP batch can lock the wallet
-change while it waits for confirmation, and later PP batches may remain
-`PENDING_BATCHING` with worker logs reporting insufficient available funds. That
-is real topology behavior and is preserved as benchmark signal.
+Mode 3 S1/S4/S5 drive `/v1/payment-batches` with the configured caps. S5 uses
+the same deterministic distinct-recipient pool shape as the other modes, grouped
+by `S5_K`. With a single large funded UTXO, the first signed/broadcast PP batch
+can lock the wallet change while it waits for confirmation, and later PP batches
+may remain `PENDING_BATCHING` with worker logs reporting insufficient available
+funds. That is real topology behavior and is preserved as benchmark signal.
 
 ## Schema
 
@@ -173,7 +181,10 @@ cargo run -- schema --out RESULT_PROFILE_SCHEMA.json
 
 The JSON profile is designed for automated comparison. Every profile records the
 network, hardware environment, pinned versions, benchmark parameters, per-mode
-scenario cells, findings, and chain-verification status value.
+scenario cells, findings, and chain-verification status value. Schema v3 adds
+per-repetition `metrics` for scenario-specific values such as S1 round details,
+S4 serialization gaps, S5 recipient shape, and chain-verification rows with
+amount/fee/mined-height/confirmed fields when the wallet surface exposes them.
 
 ## Verification Gates
 

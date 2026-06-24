@@ -2,6 +2,11 @@
 
 This summary accompanies `baselines/esmeralda_baseline.json`.
 
+Note: this checked-in JSON predates schema v3. The current harness records
+scenario-specific metrics, transaction verification rows, Mode 1 S1 `CoinSplit`
+rounds, and deterministic distinct-recipient S5 shapes. Regenerate the baseline
+after a capped proof passes and enough spendable Esmeralda funds are available.
+
 - Network: Esmeralda only.
 - Harness repository: `https://github.com/tzmWW/tari-wallet-benchmarks`.
 - Mode 1 surface: `minotari_console_wallet` gRPC.

@@ -7,6 +7,7 @@
     "blocked_upstream",
     "not_applicable"
   ],
+  "repetition_optional_metrics": "scenario-specific structured metrics",
   "required_top_level_keys": [
     "schema_version",
     "generated_at",
@@ -19,6 +20,12 @@
     "findings",
     "chain_verification"
   ],
-  "schema_version": 2,
-  "tx_mined_confirmed_status_value": 6
+  "schema_version": 3,
+  "tx_mined_confirmed_status_value": 6,
+  "verified_transaction_optional_keys": [
+    "amount_microtari",
+    "fee_microtari",
+    "mined_height",
+    "confirmed"
+  ]
 }

@@ -7,5 +7,11 @@ rule:
     - pattern: pre_partition($$$ARGS)
     - pattern: prepartition($$$ARGS)
     - pattern: partition_utxos($$$ARGS)
+    - pattern: $VALUE.chunks($$$ARGS)
+    - pattern: $VALUE.partition($$$ARGS)
+    - pattern: $VALUE.split_at($$$ARGS)
+    - pattern: Semaphore::new($$$ARGS)
+    - pattern: std::sync::Mutex::new($$$ARGS)
+    - pattern: tokio::sync::Mutex::new($$$ARGS)
 files:
   - src/**/*.rs

@@ -40,6 +40,10 @@ pub struct BenchmarkConfig {
     pub fanout_outputs_per_tx: u32,
     pub concurrent_batches: Vec<u32>,
     pub s4_t_budget_secs: u64,
+    #[serde(default)]
+    pub settle_wait_blocks: Option<u64>,
+    #[serde(default = "default_settle_cooldown_secs")]
+    pub settle_cooldown_secs: u64,
     pub s5_m: u32,
     pub s5_k: u32,
     pub fee_rate: String,
@@ -203,6 +207,12 @@ impl Config {
         if self.benchmark.concurrent_batches.contains(&0) {
             bail!("benchmark.concurrent_batches entries must be greater than 0");
         }
+        if matches!(self.benchmark.settle_wait_blocks, Some(0)) {
+            bail!("benchmark.settle_wait_blocks must be greater than 0 when set");
+        }
+        if self.benchmark.settle_cooldown_secs == 0 {
+            bail!("benchmark.settle_cooldown_secs must be greater than 0");
+        }
         self.a_fund()?;
         self.fee_rate()?;
         self.funding.validate()?;
@@ -243,6 +253,14 @@ impl Config {
             (
                 "S4_T_budget_secs".to_string(),
                 serde_json::json!(self.benchmark.s4_t_budget_secs),
+            ),
+            (
+                "settle_wait_blocks".to_string(),
+                serde_json::json!(self.settle_wait_blocks()),
+            ),
+            (
+                "settle_cooldown_secs".to_string(),
+                serde_json::json!(self.benchmark.settle_cooldown_secs),
             ),
             ("S5_M".to_string(), serde_json::json!(self.benchmark.s5_m)),
             ("S5_K".to_string(), serde_json::json!(self.benchmark.s5_k)),
@@ -340,6 +358,12 @@ impl Config {
     pub fn timeout(&self, secs: u64) -> Duration {
         Duration::from_secs(secs)
     }
+
+    pub fn settle_wait_blocks(&self) -> u64 {
+        self.benchmark
+            .settle_wait_blocks
+            .unwrap_or_else(|| self.benchmark.c_min.saturating_add(1).max(4))
+    }
 }
 
 impl Default for Config {
@@ -357,6 +381,8 @@ impl Default for Config {
                 fanout_outputs_per_tx: 8,
                 concurrent_batches: vec![8, 16, 32, 64, 128],
                 s4_t_budget_secs: 900,
+                settle_wait_blocks: None,
+                settle_cooldown_secs: default_settle_cooldown_secs(),
                 s5_m: 100,
                 s5_k: 10,
                 fee_rate: "5 uT".to_string(),
@@ -416,6 +442,10 @@ impl Default for Config {
 
 fn default_scan_batch_size() -> u64 {
     1_000
+}
+
+fn default_settle_cooldown_secs() -> u64 {
+    60
 }
 
 fn default_mode1_scenario_amount() -> String {
@@ -497,6 +527,16 @@ mod tests {
         cfg.benchmark.s5_m = 101;
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("s5_m"));
+    }
+
+    #[test]
+    fn settle_wait_blocks_defaults_to_c_min_plus_one_or_four() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.settle_wait_blocks(), 4);
+        cfg.benchmark.c_min = 10;
+        assert_eq!(cfg.settle_wait_blocks(), 11);
+        cfg.benchmark.settle_wait_blocks = Some(7);
+        assert_eq!(cfg.settle_wait_blocks(), 7);
     }
 
     #[test]

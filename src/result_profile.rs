@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-pub const RESULT_SCHEMA_VERSION: u32 = 2;
+pub const RESULT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultProfile {
@@ -70,6 +70,8 @@ pub struct Repetition {
     pub failure_count: u32,
     pub fee_microtari: Option<u64>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +94,14 @@ pub struct VerifiedTransaction {
     pub status_value: u32,
     pub mode: String,
     pub scenario: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_microtari: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_microtari: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mined_height: Option<u64>,
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 impl ResultProfile {
@@ -266,6 +276,14 @@ pub fn write_schema(path: &PathBuf) -> anyhow::Result<()> {
             "not_applicable"
         ],
         "tx_mined_confirmed_status_value": TX_MINED_CONFIRMED_STATUS
+        ,
+        "repetition_optional_metrics": "scenario-specific structured metrics",
+        "verified_transaction_optional_keys": [
+            "amount_microtari",
+            "fee_microtari",
+            "mined_height",
+            "confirmed"
+        ]
     });
     fs::write(path, serde_json::to_string_pretty(&schema)? + "\n")?;
     Ok(())
@@ -292,6 +310,34 @@ fn default_findings() -> Vec<Finding> {
             title: "Mempool acceptance is not benchmark success".to_string(),
             status: "schema_requires_chain_verification".to_string(),
             recommendation: "Verify claimed successful transactions with status value 6 before publishing throughput."
+                .to_string(),
+        },
+        Finding {
+            id: "funds-pending-hidden-state".to_string(),
+            title: "FundsPending can live outside reported balances".to_string(),
+            status: "observed_in_live_runs".to_string(),
+            recommendation: "Use chain-advance settlement gates between planned spend rounds; do not retry failed sends."
+                .to_string(),
+        },
+        Finding {
+            id: "mode2-single-recipient-library-limit".to_string(),
+            title: "Pinned Mode 2 library path is single-recipient for direct sends".to_string(),
+            status: "reported_as_wallet_surface_limit".to_string(),
+            recommendation: "Use the real multi-recipient CLI/API path when available and record unsupported behavior explicitly."
+                .to_string(),
+        },
+        Finding {
+            id: "pp-single-utxo-lock-stalls-batches".to_string(),
+            title: "Payment processor batches can stall behind one locked UTXO".to_string(),
+            status: "observed_in_real_topology".to_string(),
+            recommendation: "Preserve PENDING_BATCHING/insufficient-funds states as benchmark signal."
+                .to_string(),
+        },
+        Finding {
+            id: "console-mnemonic-birthday".to_string(),
+            title: "Console wallet recovery uses mnemonic birthday over the birthday flag".to_string(),
+            status: "implemented_in_mode1_startup".to_string(),
+            recommendation: "Rewrite only the mnemonic birthday for birthday scans while preserving wallet keys and address."
                 .to_string(),
         },
     ]
@@ -337,6 +383,7 @@ mod tests {
             failure_count: 0,
             fee_microtari: None,
             error: None,
+            metrics: None,
         });
         cell.record_repetition(Repetition {
             run: 2,
@@ -346,6 +393,7 @@ mod tests {
             failure_count: 0,
             fee_microtari: None,
             error: None,
+            metrics: None,
         });
         cell.record_repetition(Repetition {
             run: 3,
@@ -355,6 +403,7 @@ mod tests {
             failure_count: 0,
             fee_microtari: None,
             error: None,
+            metrics: Some(serde_json::json!({"sample": true})),
         });
 
         assert_eq!(cell.status, CellStatus::Ok);
