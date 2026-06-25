@@ -147,6 +147,18 @@ and no top-level confirmed rows. A later DB inspection may find terminal PP
 status, but it should be captured by a rerun instead of retroactively editing the
 profile.
 
+The 2026-06-25 full-run preparation removed the funding ambiguity for the next
+attempt: original Mode 2 was recovered into a clean DB with `50001.291680 T`
+available, the funding source was split into 170 outputs, and a fresh PP seed was
+funded with 150 confirmed `70 T` one-sided outputs. PP observation now waits for
+terminal DB confirmation instead of stopping at first signing/broadcast progress.
+The uncapped all-mode attempt still did not produce a promotable clean profile:
+Mode 1 full S1 fanout sent 63 of 64 transactions and one gRPC `CoinSplit` failed
+with a console-wallet `database is locked` error. That failure was a transient
+SQLite contention response before a tx id existed, not a funding failure. The
+harness now retries that exact Mode 1 gRPC error and records `db_lock_retries`;
+a fresh uncapped run is still required before promoting a no-caps baseline.
+
 A full funded Esmeralda baseline still requires the complete B0/S0-S7 fresh-scan
 matrix and three-repetition statistical evidence where wallet state supports it.
 Do not treat capped proof cells as final performance data.

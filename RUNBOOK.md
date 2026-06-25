@@ -175,11 +175,14 @@ the next benchmark send.
 Mode 1 S1 follows the spec round shape: six doubling rounds and one fan-out
 round, capped only by `mode1_live_max_s1_txs` for development runs. Between
 planned spend rounds the harness waits for chain/scanner height advancement;
-this is a settlement gate, not a retry. S5 uses deterministic distinct
-Esmeralda recipients and records both batch-shaped and individual-shaped arms.
-If earlier S1/S4 sends have locked the single large funded UTXO or change
-output, S5 can fail with `Funds are still pending`; that is recorded as wallet
-behavior rather than retried or hidden.
+this is a settlement gate, not a retry. The one narrow transient retry is a
+console-wallet gRPC submit that returns `database is locked` before a tx id
+exists; those retries are capped and recorded as `db_lock_retries` in Mode 1
+metrics. S5 uses deterministic distinct Esmeralda recipients and records both
+batch-shaped and individual-shaped arms. If earlier S1/S4 sends have locked the
+single large funded UTXO or change output, S5 can fail with
+`Funds are still pending`; that is recorded as wallet behavior rather than
+retried or hidden.
 
 When `mode2_live_scenarios` is enabled, the harness records Mode 2 S1, S4, and
 S5 through the direct minotari crate path:
@@ -245,11 +248,15 @@ one PP batch, and `outputs_per_tx` becomes payments per batch. S5 uses the same
 deterministic distinct-recipient pool shape as the other modes, grouped by
 `S5_K`. PP DB observations are labeled `payment_processor_db_observed`; only
 confirmed PP batches are emitted as top-level chain-verification rows. Pending
-PP batches remain in metrics/notes. With a single large funded UTXO, the first
-signed/broadcast PP batch can lock the wallet change while it waits for
+PP batches remain in metrics/notes. The harness waits up to
+`[timeouts].confirmation_secs` for accepted PP batches to reach terminal DB
+status before recording the cell; `AWAITING_CONFIRMATION` and signed-but-not-yet
+confirmed batches are not counted as done. With a single large funded UTXO, the
+first signed/broadcast PP batch can lock the wallet change while it waits for
 confirmation, and later PP batches may remain `PENDING_BATCHING` with worker logs
-reporting insufficient available funds. That is real topology behavior and is
-preserved as benchmark signal.
+reporting insufficient available funds. For an uncapped PP run, fund many
+independent outputs rather than one large output. The 2026-06-25 prep funded the
+fresh PP seed with 150 confirmed `70 T` one-sided outputs for this reason.
 
 PP has no direct scan API. When `live_fresh_scan_cells=false`, PP scan-shape
 cells are marked `not_applicable`; when enabled, those cells measure the

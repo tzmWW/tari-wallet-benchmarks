@@ -51,6 +51,8 @@ use crate::{
     versions::TX_MINED_CONFIRMED_STATUS,
 };
 
+const MODE1_DB_LOCK_RETRY_ATTEMPTS: u32 = 8;
+
 pub async fn annotate_profile_with_library_smoke(
     config: &Config,
     book: &AddressBook,
@@ -1123,14 +1125,31 @@ async fn submit_mode1_transfer_to_recipients(
             user_payment_id: None,
         })
         .collect::<Vec<_>>();
-    let response = client
-        .transfer(grpc::TransferRequest {
-            recipients,
-            single_tx,
-        })
-        .await?
-        .into_inner();
-    Ok(Mode1TransferOutcome::from_response(response))
+    let mut db_lock_retries = 0u32;
+    let response = loop {
+        match client
+            .transfer(grpc::TransferRequest {
+                recipients: recipients.clone(),
+                single_tx,
+            })
+            .await
+        {
+            Ok(response) => break response,
+            Err(status)
+                if mode1_status_is_database_locked(&status)
+                    && db_lock_retries < MODE1_DB_LOCK_RETRY_ATTEMPTS =>
+            {
+                db_lock_retries = db_lock_retries.saturating_add(1);
+                wait_after_mode1_database_lock(
+                    &format!("mode1 {} batch {batch_index} transfer", scenario.as_str()),
+                    db_lock_retries,
+                )
+                .await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    };
+    Ok(Mode1TransferOutcome::from_response(response.into_inner()).with_retries(db_lock_retries))
 }
 
 async fn submit_mode1_coin_split(
@@ -1140,23 +1159,54 @@ async fn submit_mode1_coin_split(
     fee_rate: u64,
     payment_id: Vec<u8>,
 ) -> anyhow::Result<Mode1TransferOutcome> {
-    let response = client
-        .coin_split(grpc::CoinSplitRequest {
-            amount_per_split: amount.0,
-            split_count: split_count.into(),
-            fee_per_gram: fee_rate,
-            lock_height: 0,
-            payment_id,
-        })
-        .await?
-        .into_inner();
+    let request = grpc::CoinSplitRequest {
+        amount_per_split: amount.0,
+        split_count: split_count.into(),
+        fee_per_gram: fee_rate,
+        lock_height: 0,
+        payment_id,
+    };
+    let mut db_lock_retries = 0u32;
+    let response = loop {
+        match client.coin_split(request.clone()).await {
+            Ok(response) => break response,
+            Err(status)
+                if mode1_status_is_database_locked(&status)
+                    && db_lock_retries < MODE1_DB_LOCK_RETRY_ATTEMPTS =>
+            {
+                db_lock_retries = db_lock_retries.saturating_add(1);
+                wait_after_mode1_database_lock(
+                    &format!("mode1 S1 coin_split outputs={split_count}"),
+                    db_lock_retries,
+                )
+                .await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    };
+    let response = response.into_inner();
     Ok(Mode1TransferOutcome {
         success_count: 1,
         failure_count: 0,
         fee_microtari: 0,
         tx_ids: vec![response.tx_id.to_string()],
         errors: Vec::new(),
+        db_lock_retries,
     })
+}
+
+fn mode1_status_is_database_locked(status: &tonic::Status) -> bool {
+    let message = status.message().to_ascii_lowercase();
+    message.contains("database is locked")
+}
+
+async fn wait_after_mode1_database_lock(label: &str, retry: u32) {
+    let backoff = Duration::from_millis(250 * u64::from(retry));
+    println!(
+        "{label} hit wallet database lock; retry {retry}/{MODE1_DB_LOCK_RETRY_ATTEMPTS} after {}ms",
+        backoff.as_millis()
+    );
+    time::sleep_until(time::Instant::now() + backoff).await;
 }
 
 async fn mode1_unspent_count(
@@ -3503,6 +3553,7 @@ struct Mode1TransferSummary {
     tx_infos: Vec<VerifiedTransaction>,
     construction_complete_ms: Vec<u128>,
     extra_metrics: serde_json::Map<String, serde_json::Value>,
+    db_lock_retries: u32,
 }
 
 struct Mode1BatchSummary {
@@ -3520,6 +3571,7 @@ struct Mode1TransferOutcome {
     fee_microtari: u64,
     tx_ids: Vec<String>,
     errors: Vec<String>,
+    db_lock_retries: u32,
 }
 
 struct Mode3TopologyContext {
@@ -3715,25 +3767,22 @@ impl PpScenarioSummary {
         if self.batch_ids.is_empty() && self.payment_ids.is_empty() {
             return;
         }
-        let timeout = Duration::from_secs(
-            config
-                .timeouts
-                .transaction_lock_secs
-                .max(30)
-                .min(config.timeouts.confirmation_secs),
-        );
+        let timeout = Duration::from_secs(config.timeouts.confirmation_secs.max(30));
         let start = Instant::now();
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         let mut latest = None;
+        let mut attempts = 0u64;
         loop {
             interval.tick().await;
+            attempts = attempts.saturating_add(1);
             match payment_processor::inspect_payment_processor_db(
                 config,
                 &self.batch_ids,
                 &self.payment_ids,
             ) {
                 Ok(snapshot) => {
-                    let done = pp_snapshot_has_progress_or_error(&snapshot);
+                    let done =
+                        pp_snapshot_is_terminal_for_summary(&snapshot, self.accepted_batches);
                     latest = Some(snapshot);
                     if done {
                         break;
@@ -3751,6 +3800,14 @@ impl PpScenarioSummary {
             self.blocked_upstream = snapshot.has_upstream_signing_or_broadcast_error();
             self.db_snapshot = Some(snapshot);
         }
+        self.extra_metrics.insert(
+            "db_observation_attempts".to_string(),
+            serde_json::json!(attempts),
+        );
+        self.extra_metrics.insert(
+            "db_observation_wall_ms".to_string(),
+            serde_json::json!(start.elapsed().as_millis()),
+        );
     }
 
     fn note(&self, scenario: ScenarioName) -> String {
@@ -3863,6 +3920,7 @@ impl PpScenarioSummary {
     }
 }
 
+#[cfg(test)]
 fn pp_snapshot_has_progress_or_error(snapshot: &PaymentProcessorDbSnapshot) -> bool {
     snapshot.has_upstream_signing_or_broadcast_error()
         || snapshot.batches.iter().all(|batch| {
@@ -3873,7 +3931,27 @@ fn pp_snapshot_has_progress_or_error(snapshot: &PaymentProcessorDbSnapshot) -> b
         })
 }
 
+fn pp_snapshot_is_terminal_for_summary(
+    snapshot: &PaymentProcessorDbSnapshot,
+    accepted_batches: u32,
+) -> bool {
+    if snapshot.has_upstream_signing_or_broadcast_error() {
+        return true;
+    }
+    let accepted_batches = usize::try_from(accepted_batches).unwrap_or(usize::MAX);
+    snapshot.batches.len() >= accepted_batches
+        && snapshot
+            .batches
+            .iter()
+            .all(|batch| matches!(batch.status.as_str(), "CONFIRMED" | "FAILED" | "CANCELLED"))
+}
+
 impl Mode1TransferOutcome {
+    fn with_retries(mut self, db_lock_retries: u32) -> Self {
+        self.db_lock_retries = db_lock_retries;
+        self
+    }
+
     fn from_response(response: grpc::TransferResponse) -> Self {
         let mut outcome = Self {
             success_count: 0,
@@ -3881,6 +3959,7 @@ impl Mode1TransferOutcome {
             fee_microtari: 0,
             tx_ids: Vec::new(),
             errors: Vec::new(),
+            db_lock_retries: 0,
         };
         for result in response.results {
             if result.is_success {
@@ -3931,6 +4010,7 @@ impl Mode1TransferSummary {
                 self.success_count = self.success_count.saturating_add(outcome.success_count);
                 self.failure_count = self.failure_count.saturating_add(outcome.failure_count);
                 self.fee_microtari = self.fee_microtari.saturating_add(outcome.fee_microtari);
+                self.db_lock_retries = self.db_lock_retries.saturating_add(outcome.db_lock_retries);
                 self.tx_ids.extend(outcome.tx_ids);
                 self.errors.extend(outcome.errors);
             }
@@ -3958,6 +4038,7 @@ impl Mode1TransferSummary {
         self.success_count = self.success_count.saturating_add(batch.success_count);
         self.failure_count = self.failure_count.saturating_add(batch.failure_count);
         self.fee_microtari = self.fee_microtari.saturating_add(batch.fee_microtari);
+        self.db_lock_retries = self.db_lock_retries.saturating_add(batch.db_lock_retries);
         self.tx_ids.extend(batch.tx_ids);
         self.errors.extend(batch.errors);
         self.tx_infos.extend(batch.tx_infos);
@@ -3988,6 +4069,9 @@ impl Mode1TransferSummary {
             ),
             format!("tx_ids={}", limited_list(&self.tx_ids)),
         ];
+        if self.db_lock_retries > 0 {
+            parts.push(format!("db_lock_retries={}", self.db_lock_retries));
+        }
         if !self.errors.is_empty() {
             parts.push(format!("errors={}", limited_list(&self.errors)));
         }
@@ -4036,6 +4120,10 @@ impl Mode1TransferSummary {
         metrics.insert(
             "double_selection_rejections".to_string(),
             serde_json::json!(double_selection_rejections(&self.errors)),
+        );
+        metrics.insert(
+            "db_lock_retries".to_string(),
+            serde_json::json!(self.db_lock_retries),
         );
         metrics.insert("scenario".to_string(), serde_json::json!(scenario.as_str()));
         metrics.extend(self.extra_metrics.clone());
@@ -4832,6 +4920,38 @@ mod tests {
     }
 
     #[test]
+    fn mode1_database_lock_detection_matches_console_wallet_error() {
+        let status = tonic::Status::unknown(
+            r#"OutputManagerError(OutputManagerStorageError(DieselError(DatabaseError(Unknown, "database is locked"))))"#,
+        );
+        assert!(mode1_status_is_database_locked(&status));
+        assert!(!mode1_status_is_database_locked(&tonic::Status::unknown(
+            "Funds are pending"
+        )));
+    }
+
+    #[test]
+    fn mode1_summary_records_db_lock_retry_metrics() {
+        let mut summary = Mode1TransferSummary::default();
+        summary.record_batch(
+            1,
+            1,
+            Ok(Mode1TransferOutcome {
+                success_count: 1,
+                failure_count: 0,
+                fee_microtari: 0,
+                tx_ids: vec!["42".to_string()],
+                errors: Vec::new(),
+                db_lock_retries: 2,
+            }),
+        );
+
+        let metrics = summary.metrics(ScenarioName::S1);
+        assert_eq!(metrics["db_lock_retries"], serde_json::json!(2));
+        assert!(summary.note(ScenarioName::S1).contains("db_lock_retries=2"));
+    }
+
+    #[test]
     fn mode1_summary_backfills_missing_verified_fee_total() {
         let mut summary = Mode1TransferSummary {
             fee_microtari: 0,
@@ -5107,6 +5227,54 @@ mod tests {
             payments: Vec::new(),
         };
         assert!(!pp_snapshot_has_progress_or_error(&snapshot));
+    }
+
+    #[test]
+    fn pp_terminal_wait_requires_confirmed_or_failed_batches() {
+        let awaiting = PaymentProcessorDbSnapshot {
+            batches: vec![payment_processor::PaymentBatchSnapshot {
+                id: "batch".to_string(),
+                status: "AWAITING_CONFIRMATION".to_string(),
+                retry_count: 0,
+                error_message: None,
+                has_unsigned_tx: true,
+                has_signed_tx: true,
+                mined_height: None,
+            }],
+            payments: Vec::new(),
+        };
+        assert!(!pp_snapshot_is_terminal_for_summary(&awaiting, 1));
+
+        let confirmed = PaymentProcessorDbSnapshot {
+            batches: vec![payment_processor::PaymentBatchSnapshot {
+                id: "batch".to_string(),
+                status: "CONFIRMED".to_string(),
+                retry_count: 0,
+                error_message: None,
+                has_unsigned_tx: true,
+                has_signed_tx: true,
+                mined_height: Some(42),
+            }],
+            payments: Vec::new(),
+        };
+        assert!(pp_snapshot_is_terminal_for_summary(&confirmed, 1));
+    }
+
+    #[test]
+    fn pp_terminal_wait_stops_on_upstream_error() {
+        let snapshot = PaymentProcessorDbSnapshot {
+            batches: vec![payment_processor::PaymentBatchSnapshot {
+                id: "batch".to_string(),
+                status: "PENDING_BATCHING".to_string(),
+                retry_count: 1,
+                error_message: Some("signing failed".to_string()),
+                has_unsigned_tx: false,
+                has_signed_tx: false,
+                mined_height: None,
+            }],
+            payments: Vec::new(),
+        };
+        assert!(pp_snapshot_is_terminal_for_summary(&snapshot, 1));
     }
 
     #[test]
