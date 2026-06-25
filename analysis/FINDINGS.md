@@ -159,6 +159,26 @@ SQLite contention response before a tx id existed, not a funding failure. The
 harness now retries that exact Mode 1 gRPC error and records `db_lock_retries`;
 a fresh uncapped run is still required before promoting a no-caps baseline.
 
+Two follow-up uncapped attempts clarified the remaining blocker. In
+`final-clean3-20260625T143543Z`, Mode 1 full S1 completed and verified all
+doubling/fan-out rounds, including the 64-transaction fan-out, with only recorded
+`db_lock_retries`. The run then entered Mode 1 S2 fresh scan and failed run 1
+because `startup_secs=1800` was too short for a real genesis-style console-wallet
+recovery scan. In `final-clean4-20260625T155529Z`, the longer timeout avoided
+that issue but reusing the copied console-wallet DB surfaced stale transaction
+state: the first new S1 tx `4850196133119431024` stayed at `send_count=0` and
+was rejected with wallet status `7`. Neither run wrote a profile, and neither
+should be promoted.
+
+The cleaner recovery path is to fund fresh benchmark wallets, not copied
+console-wallet DBs. A Mode 2 smoke funding tx `9744132983940844747` successfully
+funded the fresh Mode 1 seed and was verified through the public base-node query
+as mined at height `711891` with `C_min` depth. However, that funding spend left
+the Mode 2 sender DB with one large `LOCKED` output and only `7.295060 T`
+`UNSPENT` after supported scan/rescan, so it cannot also serve as the final
+Mode 2 evidence wallet. Final no-caps evidence still needs independently
+spendable Mode 1, Mode 2, and PP wallets at the same time.
+
 A full funded Esmeralda baseline still requires the complete B0/S0-S7 fresh-scan
 matrix and three-repetition statistical evidence where wallet state supports it.
 Do not treat capped proof cells as final performance data.

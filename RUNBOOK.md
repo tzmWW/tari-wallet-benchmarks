@@ -73,6 +73,19 @@ If the scanner stalls just before the funding height, advance the backed-up
 ignored DB with supported short rescan/scan steps rather than editing wallet DB
 state by hand.
 
+Do not spend from the same Mode 2 DB that you intend to use as final benchmark
+evidence unless the post-send change is independently proven spendable. A
+2026-06-25 fresh-Mode-1 funding smoke sent tx `9744132983940844747` from the
+Mode 2 wallet; the public base-node query showed it mined at height `711891` and
+reached `C_min`, but the sender DB still held the large input/change as
+`LOCKED` after supported scan/rescan. That DB is useful proof of funding the
+fresh Mode 1 seed, not a clean Mode 2 source for a no-caps run.
+
+For the final no-caps pass, fund Mode 1, Mode 2, and PP as independent spendable
+wallets before starting the profile. Avoid copying old console-wallet DBs with
+historical unmined/rejected rows into a new run directory; fund a fresh Mode 1
+seed and confirm the recipient wallet sees the mined output instead.
+
 ## Preflight
 
 ```sh
