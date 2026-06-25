@@ -54,6 +54,25 @@ After funding, record each tx in `[funding.<mode>]` in `harness.toml` with the
 amount, transaction id, and block height. These fields are written to result
 profiles as public benchmark inputs.
 
+Before starting live spend cells, audit spendability rather than trusting a
+single balance display. Query output-status totals in the wallet DB and confirm
+there are enough `UNSPENT` outputs for the planned S1/S4/S5 cells:
+
+```sh
+sqlite3 .bench-data/new-wallet-fresh-proof/wallet.db \
+  "select status, count(*), coalesce(sum(value), 0) from outputs group by status;"
+```
+
+The original Mode 2 DB can be polluted by locked/spent proof state. For
+fresh-funded Mode 2 evidence, prefer an ignored fresh DB/seed, back it up before
+rescan/reset work, and fund several independent small UTXOs instead of one large
+input. In the promoted V5 proof, `.bench-data/new-wallet-fresh-proof/wallet.db`
+matched `HARNESS_SEED_NEW_FRESH` and six independent `0.09 T` funding outputs
+mined at height `711302` were enough to run capped S1, S4, and S5 in one profile.
+If the scanner stalls just before the funding height, advance the backed-up
+ignored DB with supported short rescan/scan steps rather than editing wallet DB
+state by hand.
+
 ## Preflight
 
 ```sh
@@ -205,6 +224,12 @@ need S1, S4, and S5 in the same run. A single fresh UTXO can prove S1 send-side
 construction/broadcast, but S1 may lock the only spendable input before S4/S5
 begin. If that happens, S4/S5 should remain funding-state failures in the
 profile rather than being retried against synthetic wallet state.
+
+The V5 capped proof used `mode2_scenario_amount = "0.02 T"` and one live S1, S4,
+and S5 attempt against six small fresh UTXOs. That produced confirmed
+`base_node_transaction_query` rows for all three Mode 2 stateful cells while
+leaving the full-volume and repeated statistical runs for a separate evidence
+pass.
 
 When `mode3_live_topology` is enabled, the harness starts a real
 `minotari_payment_processor` process plus a parallel `minotari daemon` payment

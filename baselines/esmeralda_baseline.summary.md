@@ -2,14 +2,12 @@
 
 This summary accompanies `baselines/esmeralda_baseline.json`.
 
-The checked-in profile was regenerated on `2026-06-24T15:12:19Z` with schema
-v3 after the REVIEW_v3 hardening pass. It is a capped live proof, not a full
-statistical B0/S0-S7 baseline: `repetitions = 1`, `live_fresh_scan_cells =
-false`, and Mode 1/2/3 live topologies were enabled with low safety caps. It
-remains schema-valid, but it predates the post-REVIEW_v4 independent Mode 2
-base-node transaction-query metrics and checkpointed fresh scan orchestration.
-No replacement baseline has been promoted because the fresh-funded Mode 2 proof
-transaction had not become spendable during the follow-up run.
+The checked-in profile was regenerated on `2026-06-25T00:54:28.628697Z` with
+schema v3. It is a capped live proof, not a full statistical B0/S0-S7 baseline:
+`repetitions = 1`, `live_fresh_scan_cells = false`, and Mode 1/2/3 live
+topologies were enabled with low safety caps. This profile includes the
+post-REVIEW_v4 independent Mode 2 base-node transaction-query metrics and the
+post-V5 fresh-funded Mode 2 proof.
 
 - Network: Esmeralda only.
 - Harness repository: `https://github.com/tzmWW/tari-wallet-benchmarks`.
@@ -24,39 +22,52 @@ transaction had not become spendable during the follow-up run.
 
 Current checked-in live evidence:
 
-- Mode 1 S0 started a real `minotari_console_wallet` process with gRPC enabled
-  and completed startup in `1662 ms`.
-- Mode 1 S1 submitted one capped `1 T` CoinSplit round with two outputs. Tx
-  `15297395523124947594` reached terminal-ok status `2` at height `710565` with
-  fee `945` microtari.
+- Mode 1 S0 started a real `minotari_console_wallet` process with gRPC enabled.
+- Mode 1 S1 submitted one capped `0.02 T` CoinSplit round with two outputs. Tx
+  `14858780110045966490` was confirmed at height `711323` with fee `945`
+  microtari.
 - Mode 1 S4 submitted one capped concurrent-batch gRPC transfer. Tx
-  `16571143755989443134` reached terminal-ok status `2` at height `710568` with
-  fee `700` microtari.
+  `6263396227549309864` was confirmed at height `711324` with fee `660`
+  microtari.
 - Mode 1 S5 submitted the capped batch arm plus individual arm against
   deterministic distinct recipients. Four txs were confirmed:
-  `1810960988092390726`, `10759835787874539413`, `9489914261621933203`, and
-  `17517677251440746429`.
-- Mode 2 S0 failed because the current live DB has `0` available microtari and
-  `50000998600` locked microtari. This preserves the live wallet state after
-  earlier proof sends rather than wiping or pre-partitioning the wallet.
-- Mode 2 S1 used the multi-recipient round plan but failed before submission
-  with `Funds are pending`; the attempted first round required `2 T` for two
-  outputs. Mode 2 S4/S5 failed for the same pending-funds condition.
-- Mode 2 observations are kept in per-cell metrics under
-  `observed_transactions`; only confirmed rows can enter top-level
-  `chain_verification.verified_transactions`. Post-REVIEW_v4 code now verifies
-  submitted Mode 2 txs by extracting kernel signature data from
-  `completed_transactions.serialized_transaction` and querying the public
-  base-node `/transactions` endpoint, with `/get_tip_info` used for `C_min`
-  depth. The checked-in JSON predates those metrics.
+  `181418807368016324`, `9589664585746981326`, `1552568187080471278`, and
+  `4961869139025709192`.
+- Mode 2 used the ignored fresh-proof wallet DB
+  `.bench-data/new-wallet-fresh-proof/wallet.db`, which matches
+  `HARNESS_SEED_NEW_FRESH`. It was funded from the old wallet with six
+  independent `0.09 T` one-sided transactions:
+  `16088670335361737216`, `2162886295002035165`, `3062470075941489107`,
+  `12073750951134594766`, `17402180299222494064`, and
+  `14747389757172597130`. Those funding txs mined at height `711302`; a
+  supported scanner catch-up to height `711305` made them spendable before the
+  proof.
+- Mode 2 S0 detected `360000` available microtari in the fresh-proof wallet for
+  the promoted all-mode run.
+- Mode 2 S1 used the self-directed multi-recipient one-sided builder. Tx
+  `3342988131844877001` was verified through
+  `base_node_transaction_query` as `Mined` at height `711336`, at least `C_min`
+  deep, with fee `990` microtari.
+- Mode 2 S4 tx `5756695120974193262` was verified through
+  `base_node_transaction_query` as `Mined` at height `711341`, fee `700`
+  microtari.
+- Mode 2 S5 tx `5402626848094413870` was verified through
+  `base_node_transaction_query` as `Mined` at height `711345`, fee `700`
+  microtari.
+- Mode 2 wallet DB observations still reported the submitted txs as `broadcast`;
+  confirmed evidence comes from deserializing
+  `completed_transactions.serialized_transaction`, querying the public base-node
+  `/transactions` endpoint by kernel excess signature, and checking `/get_tip_info`
+  for `C_min` depth. Broadcast, pending, mempool-only, timeout, or query-failed
+  cases remain metrics/notes rather than top-level chain-verification rows.
 - Mode 3 S0 started the real `minotari_payment_processor` plus companion
-  payment receiver in `2031 ms`.
-- Mode 3 S1 now drives PP `/v1/payment-batches` in S1 round shape: two capped
-  batches, two payments per batch, with round metrics recorded under
-  `metrics.extra.rounds`. Both PP batches were accepted but remained
-  `PENDING_BATCHING`.
-- Mode 3 S4 accepted one capped one-payment PP batch and Mode 3 S5 accepted one
-  capped two-payment PP batch. Both remained `PENDING_BATCHING`.
+  payment receiver.
+- Mode 3 S1 drove PP `/v1/payment-batches` in S1 round shape. Batch
+  `5410f63c-787d-4cde-8696-04293c0df97c` was accepted and recorded as
+  `PENDING_BATCHING` in the profile.
+- Mode 3 S4 accepted batch `8192f876-0c49-483b-bcf5-5264d55bf1a7`; Mode 3 S5
+  accepted batch `4fe8d005-63dd-4fbd-9a81-359b8c362dc7`. Both remained
+  `PENDING_BATCHING` in the profile.
 - PP DB observations are labeled `payment_processor_db_observed`; pending PP
   batches stay in metrics/notes and are not emitted as confirmed
   chain-verification rows.
@@ -74,17 +85,10 @@ REVIEW_v3 status:
   status mapping is extracted/tested against the pinned minotari status strings,
   Mode 2 chain verification uses base-node transaction queries instead of DB-only
   confirmation, and fresh scan cells are checkpointed instead of predeclared.
-- Still not claimed as complete: a promoted fresh-funded Mode 2 proof,
-  three-repetition statistical evidence, and the full fresh-scan matrix. A fresh
-  Mode 2 seed was funded with tx `5240074109649442333`; the public base-node
-  query later reported it `Mined` at height `710698`, but the source wallet
-  still reported `Broadcast`, the recipient fresh wallet stayed at scan tip
-  `710600` with no outputs, and the capped proof rerun still saw `0` available
-  microtari. The baseline was not replaced.
-- V5 diagnostic status: a supported rescan later detected and confirmed funding
-  tx `5240074109649442333`, and the fresh Mode 2 wallet constructed/signed/
-  broadcast S1 tx `15210836799682799724`. That temp profile was still not
-  promoted because it queried one block short of `C_min` before the post-S5
-  confirmation-loop fix and S4/S5 were blocked by the single fresh UTXO being
-  locked after S1. A promoted replacement needs several independent fresh UTXOs
-  or equivalent clean funding.
+- Fixed in the promoted V5 evidence pass: fresh-funded Mode 2 S1/S4/S5 now
+  construct, sign, broadcast, and produce confirmed base-node transaction-query
+  rows from independent spendable UTXOs.
+- Still not claimed as complete: three-repetition statistical evidence, the full
+  fresh-scan matrix (`B0/S2/S3/S6/S7`), full-volume stateful spend cells, and a PP
+  terminal-confirmation rerun. The current profile is intentionally labeled as
+  capped proof rather than final performance data.

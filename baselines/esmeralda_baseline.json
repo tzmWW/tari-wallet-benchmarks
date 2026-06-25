@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "generated_at": "2026-06-24T15:12:19.388407Z",
+  "generated_at": "2026-06-25T00:54:28.628697Z",
   "network": "esmeralda",
   "environment": {
     "os": "macOS 26.5.1",
@@ -21,7 +21,7 @@
     "tari_console_wallet_rev": "9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
   },
   "config": {
-    "A_fund": "10000 T",
+    "A_fund": "0.3 T",
     "C_min": 3,
     "S4_T_budget_secs": 900,
     "S5_K": 10,
@@ -37,12 +37,12 @@
     "mode1_live_max_s4_batch": 1,
     "mode1_live_max_s5_items": 2,
     "mode1_live_topology": true,
-    "mode1_scenario_amount": "1 T",
-    "mode2_live_max_s1_txs": 2,
-    "mode2_live_max_s4_batch": 2,
-    "mode2_live_max_s5_txs": 2,
+    "mode1_scenario_amount": "0.02 T",
+    "mode2_live_max_s1_txs": 1,
+    "mode2_live_max_s4_batch": 1,
+    "mode2_live_max_s5_txs": 1,
     "mode2_live_scenarios": true,
-    "mode2_scenario_amount": "1 T",
+    "mode2_scenario_amount": "0.02 T",
     "mode2_send_smoke": false,
     "mode2_send_smoke_amount": "1 T",
     "mode3_env_template": [
@@ -65,11 +65,11 @@
       "TRANSACTION_SIGNER_SLEEP_SECS",
       "UNSIGNED_TX_CREATOR_SLEEP_SECS"
     ],
-    "mode3_live_max_s1_batches": 2,
+    "mode3_live_max_s1_batches": 1,
     "mode3_live_max_s4_batch": 1,
     "mode3_live_max_s5_items": 2,
     "mode3_live_topology": true,
-    "mode3_scenario_amount": "1 T",
+    "mode3_scenario_amount": "0.02 T",
     "mode3_worker_sleep_secs": 1,
     "repetitions": 1,
     "scan_batch_size": 1000,
@@ -79,9 +79,9 @@
   },
   "funding": {
     "new_wallet": {
-      "amount": "50000 T",
-      "tx_id": "7676530785144502866",
-      "height": 707741
+      "amount": "0.54 T",
+      "tx_id": "16088670335361737216,2162886295002035165,3062470075941489107,12073750951134594766,17402180299222494064,14747389757172597130",
+      "height": 711302
     },
     "old_wallet": {
       "amount": "50000 T",
@@ -97,7 +97,7 @@
   "modes": {
     "new_wallet": {
       "mode": "new_wallet",
-      "address": "f2N1byhsarfgdpHFJorDkueL988t8YSpvtaqtsWNQoYpF1xRy28922wmtmhdBnfyhCgHiVKGV4f8qgE8TbPuMtWJ2w5",
+      "address": "f2K5yXC2NtPK6JBJzA2nyk1EwhjCTxXoK2PrTvoericfxMsnGAB6nQxYL7xsuQkXkoayYRerBWGf44LW94TV9B7w1tw",
       "scenarios": {
         "B0": {
           "scenario": "b0",
@@ -113,66 +113,118 @@
         "S0": {
           "scenario": "s0",
           "surface": "minotari_library",
-          "status": "failed",
+          "status": "ok",
           "repetitions": [
             {
               "run": 1,
-              "status": "failed",
-              "wall_ms": null,
-              "success_count": 0,
-              "failure_count": 1,
+              "status": "ok",
+              "wall_ms": 1798,
+              "success_count": 1,
+              "failure_count": 0,
               "fee_microtari": null,
-              "error": "available balance 0 µT is below configured A_fund 10000000000 µT; balance={\"available\":0,\"immature\":0,\"locked\":50000998600,\"max_date\":\"2026-06-24 13:34:36\",\"max_height\":710364,\"total\":50000998600,\"total_credits\":149999997900,\"total_debits\":99998999300,\"unconfirmed\":0}"
+              "error": null
             }
           ],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
-          "notes": []
+          "median_wall_ms": 1798,
+          "spread_wall_ms": 0,
+          "notes": [
+            "live-minotari funded scan smoke detected available_microtari=360000; balance={\"available\":360000,\"immature\":0,\"locked\":3979010,\"max_date\":\"2026-06-25 00:25:22\",\"max_height\":711302,\"total\":4339010,\"total_credits\":8339010,\"total_debits\":4000000,\"unconfirmed\":0}",
+            "funding tx_id=16088670335361737216,2162886295002035165,3062470075941489107,12073750951134594766,17402180299222494064,14747389757172597130 height=711302 amount=0.54 T"
+          ]
         },
         "S1": {
           "scenario": "s1",
           "surface": "minotari_library",
-          "status": "failed",
+          "status": "ok",
           "repetitions": [
             {
               "run": 1,
-              "status": "failed",
-              "wall_ms": 6,
-              "success_count": 0,
-              "failure_count": 1,
+              "status": "ok",
+              "wall_ms": 590604,
+              "success_count": 1,
+              "failure_count": 0,
               "fee_microtari": 0,
-              "error": "[Funds are pending. Available: 0 µT, Pending: 50000.998600 T, Required: 2.000000 T]",
+              "error": null,
               "metrics": {
                 "attempted": 1,
-                "double_selection_rejections": 1,
+                "double_selection_rejections": 0,
                 "max_serialization_gap_ms": null,
-                "observed_transactions": [],
+                "observed_transactions": [
+                  {
+                    "confirmed": true,
+                    "fee_microtari": 990,
+                    "mined_height": 711336,
+                    "mode": "new_wallet",
+                    "scenario": "S1",
+                    "status_value": 6,
+                    "tx_id": "3342988131844877001"
+                  }
+                ],
                 "rounds": [
                   {
-                    "failure_count": 1,
+                    "failure_count": 0,
                     "fanout": false,
                     "outputs_per_tx": 2,
                     "round_index": 1,
-                    "settle_note": null,
-                    "success_count": 0,
+                    "settle_note": "Mode 2 settle gate S1 round 1: scanned_height 711306->711306 tip_height 711335->711339 target_tip=711339 attempts=50 scan_wall_ms=85347",
+                    "success_count": 1,
                     "target_utxos_after": 2,
                     "tx_count": 1,
-                    "wall_ms": 6
+                    "wall_ms": 1594
                   }
                 ],
                 "scenario": "S1",
-                "tx_ids": [],
-                "verification_source": "wallet_db_observed",
-                "verified_transactions": []
+                "tx_ids": [
+                  "3342988131844877001"
+                ],
+                "verification_observations": [
+                  {
+                    "base_node_query_location": "Mined",
+                    "base_node_query_mined_height": 711336,
+                    "base_node_tip_height": 711347,
+                    "confirmed": true,
+                    "fee_microtari": 990,
+                    "pending_tx_id": "e797e5ec-394a-4779-b4cd-54a2c25e1938",
+                    "query_error": null,
+                    "sent_payref": null,
+                    "tx_id": "3342988131844877001",
+                    "verification_source": "base_node_transaction_query",
+                    "wallet_db_confirmation_height": null,
+                    "wallet_db_confirmed": false,
+                    "wallet_db_mined_height": null,
+                    "wallet_db_status": "broadcast",
+                    "wallet_db_status_value": 1
+                  }
+                ],
+                "verification_refresh": {
+                  "attempts": 1,
+                  "confirmed_tx_count": 1,
+                  "observed_tx_count": 1,
+                  "pass": "post_s5_settle",
+                  "wall_ms": 523
+                },
+                "verification_source": "base_node_transaction_query",
+                "verified_transactions": [
+                  {
+                    "confirmed": true,
+                    "fee_microtari": 990,
+                    "mined_height": 711336,
+                    "mode": "new_wallet",
+                    "scenario": "S1",
+                    "status_value": 6,
+                    "tx_id": "3342988131844877001"
+                  }
+                ]
               }
             }
           ],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
+          "median_wall_ms": 590604,
+          "spread_wall_ms": 0,
           "notes": [
-            "Mode 2 S1 live scenario: attempted 1 self-directed multi-recipient one-sided txs of 1 T per output to f2N1byhsarfgdpHFJorDkueL988t8YSpvtaqtsWNQoYpF1xRy28922wmtmhdBnfyhCgHiVKGV4f8qgE8TbPuMtWJ2w5; planned_rounds=7 cap=2",
+            "Mode 2 S1 live scenario: attempted 1 self-directed multi-recipient one-sided txs of 0.02 T per output to f2K5yXC2NtPK6JBJzA2nyk1EwhjCTxXoK2PrTvoericfxMsnGAB6nQxYL7xsuQkXkoayYRerBWGf44LW94TV9B7w1tw; planned_rounds=7 cap=1",
             "Mode 2 S1 uses the minotari multi-recipient one-sided builder directly so the measured wallet builds the output set without shelling out or pre-partitioning UTXOs.",
-            "S1 summary: attempted=1 successes=0 failures=1 wall_ms=6 fee_microtari=0; tx_ids=[]; errors=[Funds are pending. Available: 0 µT, Pending: 50000.998600 T, Required: 2.000000 T]; batches=configured_batch:1 attempted:1 successes:0 failures:1 wall_ms:6"
+            "S1 summary: attempted=1 successes=1 failures=0 wall_ms=590604 fee_microtari=0; tx_ids=[3342988131844877001]; batches=configured_batch:1 attempted:1 successes:1 failures:0 wall_ms:1594",
+            "Mode 2 S1 post-S5 verification refresh: observed_tx_count=1 confirmed_tx_count=1"
           ]
         },
         "S2": {
@@ -200,67 +252,167 @@
         "S4": {
           "scenario": "s4",
           "surface": "minotari_library",
-          "status": "failed",
+          "status": "ok",
           "repetitions": [
             {
               "run": 1,
-              "status": "failed",
-              "wall_ms": 311,
-              "success_count": 0,
-              "failure_count": 1,
+              "status": "ok",
+              "wall_ms": 1828,
+              "success_count": 1,
+              "failure_count": 0,
               "fee_microtari": 0,
-              "error": "[Funds are pending. Available: 0 µT, Pending: 50000.998600 T, Required: 1.000000 T]",
+              "error": null,
               "metrics": {
                 "attempted": 1,
-                "double_selection_rejections": 1,
+                "double_selection_rejections": 0,
                 "max_serialization_gap_ms": null,
-                "observed_transactions": [],
+                "observed_transactions": [
+                  {
+                    "confirmed": true,
+                    "fee_microtari": 700,
+                    "mined_height": 711341,
+                    "mode": "new_wallet",
+                    "scenario": "S4",
+                    "status_value": 6,
+                    "tx_id": "5756695120974193262"
+                  }
+                ],
                 "scenario": "S4",
-                "tx_ids": [],
-                "verification_source": "wallet_db_observed",
-                "verified_transactions": []
+                "tx_ids": [
+                  "5756695120974193262"
+                ],
+                "verification_observations": [
+                  {
+                    "base_node_query_location": "Mined",
+                    "base_node_query_mined_height": 711341,
+                    "base_node_tip_height": 711347,
+                    "confirmed": true,
+                    "fee_microtari": 700,
+                    "pending_tx_id": "3d4c0616-7596-4f0a-86db-48972bd27418",
+                    "query_error": null,
+                    "sent_payref": null,
+                    "tx_id": "5756695120974193262",
+                    "verification_source": "base_node_transaction_query",
+                    "wallet_db_confirmation_height": null,
+                    "wallet_db_confirmed": false,
+                    "wallet_db_mined_height": null,
+                    "wallet_db_status": "broadcast",
+                    "wallet_db_status_value": 1
+                  }
+                ],
+                "verification_refresh": {
+                  "attempts": 1,
+                  "confirmed_tx_count": 1,
+                  "observed_tx_count": 1,
+                  "pass": "post_s5_settle",
+                  "wall_ms": 526
+                },
+                "verification_source": "base_node_transaction_query",
+                "verified_transactions": [
+                  {
+                    "confirmed": true,
+                    "fee_microtari": 700,
+                    "mined_height": 711341,
+                    "mode": "new_wallet",
+                    "scenario": "S4",
+                    "status_value": 6,
+                    "tx_id": "5756695120974193262"
+                  }
+                ]
               }
             }
           ],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
+          "median_wall_ms": 1828,
+          "spread_wall_ms": 0,
           "notes": [
-            "Mode 2 S4 live scenario: configured concurrent_batches=[1], per-batch cap=2, S4_T_budget_secs=900",
+            "Mode 2 S4 live scenario: configured concurrent_batches=[1], per-batch cap=1, S4_T_budget_secs=900",
             "Each S4 batch is dispatched concurrently against the same wallet database; UTXO lock contention and send failures are benchmark signal.",
-            "S4 summary: attempted=1 successes=0 failures=1 wall_ms=311 fee_microtari=0; tx_ids=[]; errors=[Funds are pending. Available: 0 µT, Pending: 50000.998600 T, Required: 1.000000 T]; batches=configured_batch:1 attempted:1 successes:0 failures:1 wall_ms:311"
+            "S4 summary: attempted=1 successes=1 failures=0 wall_ms=1828 fee_microtari=0; tx_ids=[5756695120974193262]; batches=configured_batch:1 attempted:1 successes:1 failures:0 wall_ms:1828",
+            "Mode 2 settle gate S4->S5: scanned_height 711306->711306 tip_height 711339->711343 target_tip=711343 attempts=27 scan_wall_ms=46475",
+            "Mode 2 S4 post-S5 verification refresh: observed_tx_count=1 confirmed_tx_count=1"
           ]
         },
         "S5": {
           "scenario": "s5",
           "surface": "minotari_library",
-          "status": "failed",
+          "status": "ok",
           "repetitions": [
             {
               "run": 1,
-              "status": "failed",
-              "wall_ms": 564,
-              "success_count": 0,
-              "failure_count": 2,
+              "status": "ok",
+              "wall_ms": 1735,
+              "success_count": 1,
+              "failure_count": 0,
               "fee_microtari": 0,
-              "error": "[Funds are pending. Available: 0 µT, Pending: 50000.998600 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 50000.998600 T, Required: 1.000000 T]",
+              "error": null,
               "metrics": {
-                "attempted": 2,
-                "double_selection_rejections": 2,
-                "max_serialization_gap_ms": 286,
-                "observed_transactions": [],
+                "attempted": 1,
+                "double_selection_rejections": 0,
+                "max_serialization_gap_ms": null,
+                "observed_transactions": [
+                  {
+                    "confirmed": true,
+                    "fee_microtari": 700,
+                    "mined_height": 711345,
+                    "mode": "new_wallet",
+                    "scenario": "S5",
+                    "status_value": 6,
+                    "tx_id": "5402626848094413870"
+                  }
+                ],
                 "scenario": "S5",
-                "tx_ids": [],
-                "verification_source": "wallet_db_observed",
-                "verified_transactions": []
+                "tx_ids": [
+                  "5402626848094413870"
+                ],
+                "verification_observations": [
+                  {
+                    "base_node_query_location": "Mined",
+                    "base_node_query_mined_height": 711345,
+                    "base_node_tip_height": 711348,
+                    "confirmed": true,
+                    "fee_microtari": 700,
+                    "pending_tx_id": "0b3138b1-b344-415d-85df-3be67ba1349e",
+                    "query_error": null,
+                    "sent_payref": null,
+                    "tx_id": "5402626848094413870",
+                    "verification_source": "base_node_transaction_query",
+                    "wallet_db_confirmation_height": null,
+                    "wallet_db_confirmed": false,
+                    "wallet_db_mined_height": null,
+                    "wallet_db_status": "broadcast",
+                    "wallet_db_status_value": 1
+                  }
+                ],
+                "verification_refresh": {
+                  "attempts": 4,
+                  "confirmed_tx_count": 1,
+                  "observed_tx_count": 1,
+                  "pass": "post_s5_settle",
+                  "wall_ms": 32153
+                },
+                "verification_source": "base_node_transaction_query",
+                "verified_transactions": [
+                  {
+                    "confirmed": true,
+                    "fee_microtari": 700,
+                    "mined_height": 711345,
+                    "mode": "new_wallet",
+                    "scenario": "S5",
+                    "status_value": 6,
+                    "tx_id": "5402626848094413870"
+                  }
+                ]
               }
             }
           ],
-          "median_wall_ms": null,
-          "spread_wall_ms": null,
+          "median_wall_ms": 1735,
+          "spread_wall_ms": 0,
           "notes": [
-            "Mode 2 S5 individual-send arm: attempted 2 of configured S5_M=100 sends with S5_K=10; cap=2",
+            "Mode 2 S5 individual-send arm: attempted 1 of configured S5_M=100 sends with S5_K=10; cap=1",
             "Mode 2 has no batch endpoint at this layer; PP Mode 3 is responsible for the payment-batch arm.",
-            "S5 summary: attempted=2 successes=0 failures=2 wall_ms=564 fee_microtari=0; tx_ids=[]; errors=[Funds are pending. Available: 0 µT, Pending: 50000.998600 T, Required: 1.000000 T, Funds are pending. Available: 0 µT, Pending: 50000.998600 T, Required: 1.000000 T]"
+            "S5 summary: attempted=1 successes=1 failures=0 wall_ms=1735 fee_microtari=0; tx_ids=[5402626848094413870]",
+            "Mode 2 settle gate S5 final: scanned_height 711306->711306 tip_height 711343->711347 target_tip=711347 attempts=17 scan_wall_ms=28897",
+            "Mode 2 S5 post-S5 verification refresh: observed_tx_count=1 confirmed_tx_count=1"
           ]
         },
         "S6": {
@@ -308,17 +460,17 @@
             {
               "run": 1,
               "status": "ok",
-              "wall_ms": 1662,
+              "wall_ms": 1659,
               "success_count": 1,
               "failure_count": 0,
               "fee_microtari": null,
               "error": null
             }
           ],
-          "median_wall_ms": 1662,
+          "median_wall_ms": 1659,
           "spread_wall_ms": 0,
           "notes": [
-            "Mode 1 topology started real minotari_console_wallet gRPC version 5.3.0-pre.3; grpc_address=http://127.0.0.1:18143 grpc_bind=/ip4/127.0.0.1/tcp/18143 base_path=.bench-data/old-wallet-console birthday=1635 balance_available=49984986625 pending_in=0 pending_out=49982990085",
+            "Mode 1 topology started real minotari_console_wallet gRPC version 5.3.0-pre.3; grpc_address=http://127.0.0.1:18143 grpc_bind=/ip4/127.0.0.1/tcp/18143 base_path=.bench-data/old-wallet-console birthday=1636 balance_available=49977025340 pending_in=0 pending_out=49977170620",
             "funding tx_id=11463237927696771510 height=707731 amount=50000 T"
           ]
         },
@@ -330,7 +482,7 @@
             {
               "run": 1,
               "status": "ok",
-              "wall_ms": 70834,
+              "wall_ms": 720605,
               "success_count": 1,
               "failure_count": 0,
               "fee_microtari": 945,
@@ -338,45 +490,45 @@
               "metrics": {
                 "attempted_batches": 1,
                 "attempted_payments": 2,
-                "balance_after_microtari": 6997200,
-                "balance_before_microtari": 49984986625,
+                "balance_after_microtari": 3666400,
+                "balance_before_microtari": 49977025340,
                 "double_selection_rejections": 0,
                 "max_serialization_gap_ms": null,
                 "round_1": {
-                  "balance_after_microtari": 6997200,
+                  "balance_after_microtari": 3666400,
                   "fanout": false,
-                  "observed_unspent_count": 10,
+                  "observed_unspent_count": 17,
                   "outputs_per_tx": 2,
                   "round_index": 1,
                   "target_utxos_after": 2,
                   "tx_count": 1,
                   "verified_count": 1,
-                  "wall_ms": 43
+                  "wall_ms": 58
                 },
                 "scenario": "S1",
                 "tx_ids": [
-                  "15297395523124947594"
+                  "14858780110045966490"
                 ],
                 "verified_transactions": [
                   {
-                    "amount_microtari": 2000000,
+                    "amount_microtari": 40000,
                     "confirmed": true,
                     "fee_microtari": 945,
-                    "mined_height": 710565,
+                    "mined_height": 711323,
                     "mode": "old_wallet",
                     "scenario": "S1",
                     "status_value": 2,
-                    "tx_id": "15297395523124947594"
+                    "tx_id": "14858780110045966490"
                   }
                 ]
               }
             }
           ],
-          "median_wall_ms": 70834,
+          "median_wall_ms": 720605,
           "spread_wall_ms": 0,
           "notes": [
-            "Mode 1 S1 drove console-wallet gRPC CoinSplit rounds; attempted_batches=1 amount_per_output=1 T cap=1",
-            "S1 console gRPC summary: attempted_batches=1 attempted_payments=2 successes=1 failures=0 wall_ms=70834 fee_microtari=945; tx_ids=[15297395523124947594]; batches=configured_batch:1 attempted_batches:1 attempted_payments:2 successes:1 failures:0 wall_ms:43"
+            "Mode 1 S1 drove console-wallet gRPC CoinSplit rounds; attempted_batches=1 amount_per_output=0.02 T cap=1",
+            "S1 console gRPC summary: attempted_batches=1 attempted_payments=2 successes=1 failures=0 wall_ms=720605 fee_microtari=945; tx_ids=[14858780110045966490]; batches=configured_batch:1 attempted_batches:1 attempted_payments:2 successes:1 failures:0 wall_ms:58"
           ]
         },
         "S2": {
@@ -405,10 +557,10 @@
             {
               "run": 1,
               "status": "ok",
-              "wall_ms": 38,
+              "wall_ms": 37,
               "success_count": 1,
               "failure_count": 0,
-              "fee_microtari": 700,
+              "fee_microtari": 660,
               "error": null,
               "metrics": {
                 "attempted_batches": 1,
@@ -417,28 +569,28 @@
                 "max_serialization_gap_ms": null,
                 "scenario": "S4",
                 "tx_ids": [
-                  "16571143755989443134"
+                  "6263396227549309864"
                 ],
                 "verified_transactions": [
                   {
-                    "amount_microtari": 1000000,
+                    "amount_microtari": 20000,
                     "confirmed": true,
-                    "fee_microtari": 700,
-                    "mined_height": 710568,
+                    "fee_microtari": 660,
+                    "mined_height": 711324,
                     "mode": "old_wallet",
                     "scenario": "S4",
-                    "status_value": 2,
-                    "tx_id": "16571143755989443134"
+                    "status_value": 6,
+                    "tx_id": "6263396227549309864"
                   }
                 ]
               }
             }
           ],
-          "median_wall_ms": 38,
+          "median_wall_ms": 37,
           "spread_wall_ms": 0,
           "notes": [
             "Mode 1 S4 dispatched configured concurrent_batches=[1] through console-wallet gRPC Transfer; per-batch cap=1",
-            "S4 console gRPC summary: attempted_batches=1 attempted_payments=1 successes=1 failures=0 wall_ms=38 fee_microtari=700; tx_ids=[16571143755989443134]; batches=configured_batch:1 attempted_batches:1 attempted_payments:1 successes:1 failures:0 wall_ms:38"
+            "S4 console gRPC summary: attempted_batches=1 attempted_payments=1 successes=1 failures=0 wall_ms=37 fee_microtari=660; tx_ids=[6263396227549309864]; batches=configured_batch:1 attempted_batches:1 attempted_payments:1 successes:1 failures:0 wall_ms:37"
           ]
         },
         "S5": {
@@ -449,16 +601,16 @@
             {
               "run": 1,
               "status": "ok",
-              "wall_ms": 301600,
+              "wall_ms": 791175,
               "success_count": 4,
               "failure_count": 0,
-              "fee_microtari": 3250,
+              "fee_microtari": 3210,
               "error": null,
               "metrics": {
                 "attempted_batches": 3,
                 "attempted_payments": 4,
                 "double_selection_rejections": 0,
-                "max_serialization_gap_ms": 25,
+                "max_serialization_gap_ms": 14,
                 "s5_arms": {
                   "batch_size": 10,
                   "recipient_count": 2,
@@ -466,61 +618,61 @@
                 },
                 "scenario": "S5",
                 "tx_ids": [
-                  "1810960988092390726",
-                  "10759835787874539413",
-                  "9489914261621933203",
-                  "17517677251440746429"
+                  "181418807368016324",
+                  "9589664585746981326",
+                  "1552568187080471278",
+                  "4961869139025709192"
                 ],
                 "verified_transactions": [
                   {
-                    "amount_microtari": 1000000,
+                    "amount_microtari": 20000,
                     "confirmed": true,
                     "fee_microtari": 945,
-                    "mined_height": 710570,
+                    "mined_height": 711329,
                     "mode": "old_wallet",
                     "scenario": "S5",
                     "status_value": 6,
-                    "tx_id": "1810960988092390726"
+                    "tx_id": "181418807368016324"
                   },
                   {
-                    "amount_microtari": 1000000,
+                    "amount_microtari": 20000,
                     "confirmed": true,
                     "fee_microtari": 945,
-                    "mined_height": 710570,
+                    "mined_height": 711329,
                     "mode": "old_wallet",
                     "scenario": "S5",
                     "status_value": 6,
-                    "tx_id": "10759835787874539413"
+                    "tx_id": "9589664585746981326"
                   },
                   {
-                    "amount_microtari": 1000000,
+                    "amount_microtari": 20000,
                     "confirmed": true,
                     "fee_microtari": 660,
-                    "mined_height": 710577,
+                    "mined_height": 711333,
                     "mode": "old_wallet",
                     "scenario": "S5",
                     "status_value": 2,
-                    "tx_id": "9489914261621933203"
+                    "tx_id": "1552568187080471278"
                   },
                   {
-                    "amount_microtari": 1000000,
+                    "amount_microtari": 20000,
                     "confirmed": true,
-                    "fee_microtari": 700,
-                    "mined_height": 710577,
+                    "fee_microtari": 660,
+                    "mined_height": 711333,
                     "mode": "old_wallet",
                     "scenario": "S5",
                     "status_value": 2,
-                    "tx_id": "17517677251440746429"
+                    "tx_id": "4961869139025709192"
                   }
                 ]
               }
             }
           ],
-          "median_wall_ms": 301600,
+          "median_wall_ms": 791175,
           "spread_wall_ms": 0,
           "notes": [
             "Mode 1 S5 used deterministic distinct recipients; attempted_payments=4 of configured S5_M=100 and S5_K=10; cap=2",
-            "S5 console gRPC summary: attempted_batches=3 attempted_payments=4 successes=4 failures=0 wall_ms=301600 fee_microtari=3250; tx_ids=[1810960988092390726, 10759835787874539413, 9489914261621933203, 17517677251440746429]; batches=configured_batch:10 attempted_batches:1 attempted_payments:2 successes:2 failures:0 wall_ms:41; configured_batch:1 attempted_batches:2 attempted_payments:2 successes:2 failures:0 wall_ms:66"
+            "S5 console gRPC summary: attempted_batches=3 attempted_payments=4 successes=4 failures=0 wall_ms=791175 fee_microtari=3210; tx_ids=[181418807368016324, 9589664585746981326, 1552568187080471278, 4961869139025709192]; batches=configured_batch:10 attempted_batches:1 attempted_payments:2 successes:2 failures:0 wall_ms:40; configured_batch:1 attempted_batches:2 attempted_payments:2 successes:2 failures:0 wall_ms:54"
           ]
         },
         "S6": {
@@ -566,17 +718,17 @@
             {
               "run": 1,
               "status": "ok",
-              "wall_ms": 2031,
+              "wall_ms": 2025,
               "success_count": 1,
               "failure_count": 0,
               "fee_microtari": null,
               "error": null
             }
           ],
-          "median_wall_ms": 2031,
+          "median_wall_ms": 2025,
           "spread_wall_ms": 0,
           "notes": [
-            "Mode 3 topology started real minotari payment receiver plus minotari_payment_processor version 0.1.0; receiver_balance={\"available\":49997999340,\"immature\":0,\"locked\":0,\"max_date\":\"2026-06-24 00:59:31\",\"max_height\":708613,\"total\":49997999340,\"total_credits\":99996999340,\"total_debits\":49999000000,\"unconfirmed\":0}; receiver_birthday=1635; worker_sleep_secs=1",
+            "Mode 3 topology started real minotari payment receiver plus minotari_payment_processor version 0.1.0; receiver_balance={\"available\":49995998395,\"immature\":0,\"locked\":0,\"max_date\":\"2026-06-24 15:05:35\",\"max_height\":710549,\"total\":49995998395,\"total_credits\":149992997735,\"total_debits\":99996999340,\"unconfirmed\":0}; receiver_birthday=1636; worker_sleep_secs=1",
             "payment_receiver_db=.bench-data/payment-receiver/wallet.db payment_processor_db=.bench-data/payment-processor/payments.db console_wallet_base=.bench-data/payment-processor-console-wallet",
             "funding tx_id=4002233626181090692 height=707747 amount=50000 T"
           ]
@@ -589,20 +741,19 @@
             {
               "run": 1,
               "status": "failed",
-              "wall_ms": 8,
-              "success_count": 2,
+              "wall_ms": 6,
+              "success_count": 1,
               "failure_count": 0,
               "fee_microtari": null,
               "error": "PP batches were accepted but payment_processor_db_observed returned no confirmed rows",
               "metrics": {
-                "accepted_batches": 2,
-                "attempted_batches": 2,
-                "attempted_payments": 4,
+                "accepted_batches": 1,
+                "attempted_batches": 1,
+                "attempted_payments": 2,
                 "batch_ids": [
-                  "e85a28ac-8e57-4593-b446-444f5407161c",
-                  "6cfe98a9-3f01-4699-a750-f8b3210dca84"
+                  "5410f63c-787d-4cde-8696-04293c0df97c"
                 ],
-                "db_status_summary": "batches=[batch:e85a28ac-8e57-4593-b446-444f5407161c status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none | batch:6cfe98a9-3f01-4699-a750-f8b3210dca84 status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:fe9bc2c1-0488-4693-8338-8311ab6f681b status:BATCHED batch:e85a28ac-8e57-4593-b446-444f5407161c failure:none | payment:d79bfab8-c743-42b0-8eab-f25eecc74e74 status:BATCHED batch:e85a28ac-8e57-4593-b446-444f5407161c failure:none | payment:32e6b986-0cf0-497e-9750-05470325f642 status:BATCHED batch:6cfe98a9-3f01-4699-a750-f8b3210dca84 failure:none | payment:98f9fa81-dee6-4b6c-abdf-1a44531013fd status:BATCHED batch:6cfe98a9-3f01-4699-a750-f8b3210dca84 failure:none]",
+                "db_status_summary": "batches=[batch:5410f63c-787d-4cde-8696-04293c0df97c status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:cc617060-22f5-47d2-8a6a-975c79c9da6a status:BATCHED batch:5410f63c-787d-4cde-8696-04293c0df97c failure:none | payment:65e0aeab-57b9-42c7-a570-4958435bf77c status:BATCHED batch:5410f63c-787d-4cde-8696-04293c0df97c failure:none]",
                 "double_selection_rejections": 0,
                 "extra": {
                   "rounds": [
@@ -612,75 +763,39 @@
                       "round_index": 1,
                       "target_utxos_after": 2,
                       "tx_count": 1
-                    },
-                    {
-                      "fanout": false,
-                      "outputs_per_tx": 2,
-                      "round_index": 2,
-                      "target_utxos_after": 3,
-                      "tx_count": 1
                     }
                   ]
                 },
                 "failed_batches": 0,
-                "max_serialization_gap_ms": 3,
+                "max_serialization_gap_ms": null,
                 "payment_ids": [
-                  "fe9bc2c1-0488-4693-8338-8311ab6f681b",
-                  "d79bfab8-c743-42b0-8eab-f25eecc74e74",
-                  "32e6b986-0cf0-497e-9750-05470325f642",
-                  "98f9fa81-dee6-4b6c-abdf-1a44531013fd"
+                  "cc617060-22f5-47d2-8a6a-975c79c9da6a",
+                  "65e0aeab-57b9-42c7-a570-4958435bf77c"
                 ],
                 "responses": [
                   {
                     "account_name": "default",
-                    "batch_id": "e85a28ac-8e57-4593-b446-444f5407161c",
+                    "batch_id": "5410f63c-787d-4cde-8696-04293c0df97c",
                     "payments": [
                       {
                         "account_name": "default",
-                        "amount": 1000000,
-                        "client_id": "bench-s1-1782314369414528000-1-1",
-                        "created_at": "2026-06-24T15:19:29Z",
-                        "payment_id": "fe9bc2c1-0488-4693-8338-8311ab6f681b",
+                        "amount": 20000,
+                        "client_id": "bench-s1-1782351883880204000-1-1",
+                        "created_at": "2026-06-25T01:44:43Z",
+                        "payment_id": "cc617060-22f5-47d2-8a6a-975c79c9da6a",
                         "recipient_address": "f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr",
                         "status": "BATCHED",
-                        "updated_at": "2026-06-24T15:19:29Z"
+                        "updated_at": "2026-06-25T01:44:43Z"
                       },
                       {
                         "account_name": "default",
-                        "amount": 1000000,
-                        "client_id": "bench-s1-1782314369414538000-1-2",
-                        "created_at": "2026-06-24T15:19:29Z",
-                        "payment_id": "d79bfab8-c743-42b0-8eab-f25eecc74e74",
+                        "amount": 20000,
+                        "client_id": "bench-s1-1782351883880211000-1-2",
+                        "created_at": "2026-06-25T01:44:43Z",
+                        "payment_id": "65e0aeab-57b9-42c7-a570-4958435bf77c",
                         "recipient_address": "f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr",
                         "status": "BATCHED",
-                        "updated_at": "2026-06-24T15:19:29Z"
-                      }
-                    ],
-                    "status": "PENDING_BATCHING"
-                  },
-                  {
-                    "account_name": "default",
-                    "batch_id": "6cfe98a9-3f01-4699-a750-f8b3210dca84",
-                    "payments": [
-                      {
-                        "account_name": "default",
-                        "amount": 1000000,
-                        "client_id": "bench-s1-1782314369420263000-2-1",
-                        "created_at": "2026-06-24T15:19:29Z",
-                        "payment_id": "32e6b986-0cf0-497e-9750-05470325f642",
-                        "recipient_address": "f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr",
-                        "status": "BATCHED",
-                        "updated_at": "2026-06-24T15:19:29Z"
-                      },
-                      {
-                        "account_name": "default",
-                        "amount": 1000000,
-                        "client_id": "bench-s1-1782314369420270000-2-2",
-                        "created_at": "2026-06-24T15:19:29Z",
-                        "payment_id": "98f9fa81-dee6-4b6c-abdf-1a44531013fd",
-                        "recipient_address": "f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr",
-                        "status": "BATCHED",
-                        "updated_at": "2026-06-24T15:19:29Z"
+                        "updated_at": "2026-06-25T01:44:43Z"
                       }
                     ],
                     "status": "PENDING_BATCHING"
@@ -694,9 +809,9 @@
           "median_wall_ms": null,
           "spread_wall_ms": null,
           "notes": [
-            "Mode 3 S1 drove /v1/payment-batches through real PP topology as a batch-shape analogue to doubling/fanout rounds; attempted_batches=2 attempted_payments=4 amount=1 T cap=2",
+            "Mode 3 S1 drove /v1/payment-batches through real PP topology as a batch-shape analogue to doubling/fanout rounds; attempted_batches=1 attempted_payments=2 amount=0.02 T cap=1",
             "verification_source=payment_processor_db_observed; pending PP batches stay in metrics/notes and are not emitted as confirmed chain-verification rows",
-            "S1 PP summary: attempted_batches=2 attempted_payments=4 accepted_batches=2 failed_batches=0 wall_ms=8; batch_ids=[e85a28ac-8e57-4593-b446-444f5407161c, 6cfe98a9-3f01-4699-a750-f8b3210dca84]; payment_ids=[fe9bc2c1-0488-4693-8338-8311ab6f681b, d79bfab8-c743-42b0-8eab-f25eecc74e74, 32e6b986-0cf0-497e-9750-05470325f642, 98f9fa81-dee6-4b6c-abdf-1a44531013fd]; db_snapshot=batches=[batch:e85a28ac-8e57-4593-b446-444f5407161c status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none | batch:6cfe98a9-3f01-4699-a750-f8b3210dca84 status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:fe9bc2c1-0488-4693-8338-8311ab6f681b status:BATCHED batch:e85a28ac-8e57-4593-b446-444f5407161c failure:none | payment:d79bfab8-c743-42b0-8eab-f25eecc74e74 status:BATCHED batch:e85a28ac-8e57-4593-b446-444f5407161c failure:none | payment:32e6b986-0cf0-497e-9750-05470325f642 status:BATCHED batch:6cfe98a9-3f01-4699-a750-f8b3210dca84 failure:none | payment:98f9fa81-dee6-4b6c-abdf-1a44531013fd status:BATCHED batch:6cfe98a9-3f01-4699-a750-f8b3210dca84 failure:none]; pp_responses=[{\"account_name\":\"default\",\"batch_id\":\"e85a28ac-8e57-4593-b446-444f5407161c\",\"payments\":[{\"account_name\":\"default\",\"amount\":1000000,\"client_id\":\"bench-s1-1782314369414528000-1-1\",\"created_at\":\"2026-06-24T15:19:29Z\",\"payment_id\":\"fe9bc2c1-0488-4693-8338-8311ab6f681b\",\"recipient_address\":\"f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr\",\"status\":\"BATCHED\",\"updated_at\":\"2026-06-24T15:19:29Z\"},{\"account_name\":\"default\",\"amount\":1000000,\"client_id\":\"bench-s1-1782314369...<truncated>"
+            "S1 PP summary: attempted_batches=1 attempted_payments=2 accepted_batches=1 failed_batches=0 wall_ms=6; batch_ids=[5410f63c-787d-4cde-8696-04293c0df97c]; payment_ids=[cc617060-22f5-47d2-8a6a-975c79c9da6a, 65e0aeab-57b9-42c7-a570-4958435bf77c]; db_snapshot=batches=[batch:5410f63c-787d-4cde-8696-04293c0df97c status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:cc617060-22f5-47d2-8a6a-975c79c9da6a status:BATCHED batch:5410f63c-787d-4cde-8696-04293c0df97c failure:none | payment:65e0aeab-57b9-42c7-a570-4958435bf77c status:BATCHED batch:5410f63c-787d-4cde-8696-04293c0df97c failure:none]; pp_responses=[{\"account_name\":\"default\",\"batch_id\":\"5410f63c-787d-4cde-8696-04293c0df97c\",\"payments\":[{\"account_name\":\"default\",\"amount\":20000,\"client_id\":\"bench-s1-1782351883880204000-1-1\",\"created_at\":\"2026-06-25T01:44:43Z\",\"payment_id\":\"cc617060-22f5-47d2-8a6a-975c79c9da6a\",\"recipient_address\":\"f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr\",\"status\":\"BATCHED\",\"updated_at\":\"2026-06-25T01:44:43Z\"},{\"account_name\":\"default\",\"amount\":20000,\"client_id\":\"bench-s1-17823518838802...<truncated>"
           ]
         },
         "S2": {
@@ -729,7 +844,7 @@
             {
               "run": 1,
               "status": "failed",
-              "wall_ms": 60010,
+              "wall_ms": 60009,
               "success_count": 1,
               "failure_count": 0,
               "fee_microtari": null,
@@ -739,30 +854,30 @@
                 "attempted_batches": 1,
                 "attempted_payments": 1,
                 "batch_ids": [
-                  "d53ff60c-3a40-451a-976b-31b28e917414"
+                  "8192f876-0c49-483b-bcf5-5264d55bf1a7"
                 ],
-                "db_status_summary": "batches=[batch:d53ff60c-3a40-451a-976b-31b28e917414 status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:3d495ffc-8928-4d7f-9ea8-b6fca5f5f979 status:BATCHED batch:d53ff60c-3a40-451a-976b-31b28e917414 failure:none]",
+                "db_status_summary": "batches=[batch:8192f876-0c49-483b-bcf5-5264d55bf1a7 status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:ce24ba74-4890-43c2-bae5-9262106e31c5 status:BATCHED batch:8192f876-0c49-483b-bcf5-5264d55bf1a7 failure:none]",
                 "double_selection_rejections": 0,
                 "extra": {},
                 "failed_batches": 0,
                 "max_serialization_gap_ms": null,
                 "payment_ids": [
-                  "3d495ffc-8928-4d7f-9ea8-b6fca5f5f979"
+                  "ce24ba74-4890-43c2-bae5-9262106e31c5"
                 ],
                 "responses": [
                   {
                     "account_name": "default",
-                    "batch_id": "d53ff60c-3a40-451a-976b-31b28e917414",
+                    "batch_id": "8192f876-0c49-483b-bcf5-5264d55bf1a7",
                     "payments": [
                       {
                         "account_name": "default",
-                        "amount": 1000000,
-                        "client_id": "bench-s4-1782314429427894000-1-1",
-                        "created_at": "2026-06-24T15:20:29Z",
-                        "payment_id": "3d495ffc-8928-4d7f-9ea8-b6fca5f5f979",
+                        "amount": 20000,
+                        "client_id": "bench-s4-1782351943892109000-1-1",
+                        "created_at": "2026-06-25T01:45:43Z",
+                        "payment_id": "ce24ba74-4890-43c2-bae5-9262106e31c5",
                         "recipient_address": "f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr",
                         "status": "BATCHED",
-                        "updated_at": "2026-06-24T15:20:29Z"
+                        "updated_at": "2026-06-25T01:45:43Z"
                       }
                     ],
                     "status": "PENDING_BATCHING"
@@ -778,7 +893,7 @@
           "notes": [
             "Mode 3 S4 dispatched configured concurrent_batches=[1] through real PP /v1/payment-batches; per-batch cap=1",
             "verification_source=payment_processor_db_observed; pending PP batches stay in metrics/notes and are not emitted as confirmed chain-verification rows",
-            "S4 PP summary: attempted_batches=1 attempted_payments=1 accepted_batches=1 failed_batches=0 wall_ms=60010; batch_ids=[d53ff60c-3a40-451a-976b-31b28e917414]; payment_ids=[3d495ffc-8928-4d7f-9ea8-b6fca5f5f979]; db_snapshot=batches=[batch:d53ff60c-3a40-451a-976b-31b28e917414 status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:3d495ffc-8928-4d7f-9ea8-b6fca5f5f979 status:BATCHED batch:d53ff60c-3a40-451a-976b-31b28e917414 failure:none]; pp_responses=[{\"account_name\":\"default\",\"batch_id\":\"d53ff60c-3a40-451a-976b-31b28e917414\",\"payments\":[{\"account_name\":\"default\",\"amount\":1000000,\"client_id\":\"bench-s4-1782314429427894000-1-1\",\"created_at\":\"2026-06-24T15:20:29Z\",\"payment_id\":\"3d495ffc-8928-4d7f-9ea8-b6fca5f5f979\",\"recipient_address\":\"f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr\",\"status\":\"BATCHED\",\"updated_at\":\"2026-06-24T15:20:29Z\"}],\"status\":\"PENDING_BATCHING\"}]; batches=configured_batch:1 attempted:1 accepted:1 failed:0 wall_ms:6"
+            "S4 PP summary: attempted_batches=1 attempted_payments=1 accepted_batches=1 failed_batches=0 wall_ms=60009; batch_ids=[8192f876-0c49-483b-bcf5-5264d55bf1a7]; payment_ids=[ce24ba74-4890-43c2-bae5-9262106e31c5]; db_snapshot=batches=[batch:8192f876-0c49-483b-bcf5-5264d55bf1a7 status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:ce24ba74-4890-43c2-bae5-9262106e31c5 status:BATCHED batch:8192f876-0c49-483b-bcf5-5264d55bf1a7 failure:none]; pp_responses=[{\"account_name\":\"default\",\"batch_id\":\"8192f876-0c49-483b-bcf5-5264d55bf1a7\",\"payments\":[{\"account_name\":\"default\",\"amount\":20000,\"client_id\":\"bench-s4-1782351943892109000-1-1\",\"created_at\":\"2026-06-25T01:45:43Z\",\"payment_id\":\"ce24ba74-4890-43c2-bae5-9262106e31c5\",\"recipient_address\":\"f29NVuWpUDnVvHU59g2eM8QroRNBNseVo4sNvQ6ZVcmGxHvhLPtPF5SvqqVohZjogxVMX2snPhydzgd9MDnWHvqKEVr\",\"status\":\"BATCHED\",\"updated_at\":\"2026-06-25T01:45:43Z\"}],\"status\":\"PENDING_BATCHING\"}]; batches=configured_batch:1 attempted:1 accepted:1 failed:0 wall_ms:5"
           ]
         },
         "S5": {
@@ -799,41 +914,41 @@
                 "attempted_batches": 1,
                 "attempted_payments": 2,
                 "batch_ids": [
-                  "7e3c8c93-c117-45e5-8e29-0808ab5f6f5f"
+                  "4fe8d005-63dd-4fbd-9a81-359b8c362dc7"
                 ],
-                "db_status_summary": "batches=[batch:7e3c8c93-c117-45e5-8e29-0808ab5f6f5f status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:9ebf812e-99f8-4deb-b618-489d06a9247d status:BATCHED batch:7e3c8c93-c117-45e5-8e29-0808ab5f6f5f failure:none | payment:ae7d8b78-2ab2-4fe5-8811-ab4eee6c7d9d status:BATCHED batch:7e3c8c93-c117-45e5-8e29-0808ab5f6f5f failure:none]",
+                "db_status_summary": "batches=[batch:4fe8d005-63dd-4fbd-9a81-359b8c362dc7 status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:3b158258-e059-467a-9b32-0e3db6558078 status:BATCHED batch:4fe8d005-63dd-4fbd-9a81-359b8c362dc7 failure:none | payment:ce45dc03-7b07-4e75-8e9a-33e188c8fb22 status:BATCHED batch:4fe8d005-63dd-4fbd-9a81-359b8c362dc7 failure:none]",
                 "double_selection_rejections": 0,
                 "extra": {},
                 "failed_batches": 0,
                 "max_serialization_gap_ms": null,
                 "payment_ids": [
-                  "9ebf812e-99f8-4deb-b618-489d06a9247d",
-                  "ae7d8b78-2ab2-4fe5-8811-ab4eee6c7d9d"
+                  "3b158258-e059-467a-9b32-0e3db6558078",
+                  "ce45dc03-7b07-4e75-8e9a-33e188c8fb22"
                 ],
                 "responses": [
                   {
                     "account_name": "default",
-                    "batch_id": "7e3c8c93-c117-45e5-8e29-0808ab5f6f5f",
+                    "batch_id": "4fe8d005-63dd-4fbd-9a81-359b8c362dc7",
                     "payments": [
                       {
                         "account_name": "default",
-                        "amount": 1000000,
-                        "client_id": "bench-s5-1782314549489120000-1-1",
-                        "created_at": "2026-06-24T15:22:29Z",
-                        "payment_id": "9ebf812e-99f8-4deb-b618-489d06a9247d",
+                        "amount": 20000,
+                        "client_id": "bench-s5-1782352063943326000-1-1",
+                        "created_at": "2026-06-25T01:47:43Z",
+                        "payment_id": "3b158258-e059-467a-9b32-0e3db6558078",
                         "recipient_address": "f2NiyETdbJ7wQh6qnesTaKJjxdgUE7xzZMfE8C9yjhg6xiHYVWHVEEaeQ4MzMMh7JYsAhtqobK8NjrPBidfqNe26NC7",
                         "status": "BATCHED",
-                        "updated_at": "2026-06-24T15:22:29Z"
+                        "updated_at": "2026-06-25T01:47:43Z"
                       },
                       {
                         "account_name": "default",
-                        "amount": 1000000,
-                        "client_id": "bench-s5-1782314549489125000-1-2",
-                        "created_at": "2026-06-24T15:22:29Z",
-                        "payment_id": "ae7d8b78-2ab2-4fe5-8811-ab4eee6c7d9d",
+                        "amount": 20000,
+                        "client_id": "bench-s5-1782352063943331000-1-2",
+                        "created_at": "2026-06-25T01:47:43Z",
+                        "payment_id": "ce45dc03-7b07-4e75-8e9a-33e188c8fb22",
                         "recipient_address": "f2AuVo7tneduzVJqN8yq1WtqwcymHutwaRZXD15xu99N9hRbi4d17QTkHW3y3kWmFgUf9RzrixVfwJzdABMF25ssden",
                         "status": "BATCHED",
-                        "updated_at": "2026-06-24T15:22:29Z"
+                        "updated_at": "2026-06-25T01:47:43Z"
                       }
                     ],
                     "status": "PENDING_BATCHING"
@@ -849,7 +964,7 @@
           "notes": [
             "Mode 3 S5 payment-batch arm used one /v1/payment-batches request with items=2 of configured S5_M=100 and S5_K=10; cap=2",
             "verification_source=payment_processor_db_observed; pending PP batches stay in metrics/notes and are not emitted as confirmed chain-verification rows",
-            "S5 PP summary: attempted_batches=1 attempted_payments=2 accepted_batches=1 failed_batches=0 wall_ms=3; batch_ids=[7e3c8c93-c117-45e5-8e29-0808ab5f6f5f]; payment_ids=[9ebf812e-99f8-4deb-b618-489d06a9247d, ae7d8b78-2ab2-4fe5-8811-ab4eee6c7d9d]; db_snapshot=batches=[batch:7e3c8c93-c117-45e5-8e29-0808ab5f6f5f status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:9ebf812e-99f8-4deb-b618-489d06a9247d status:BATCHED batch:7e3c8c93-c117-45e5-8e29-0808ab5f6f5f failure:none | payment:ae7d8b78-2ab2-4fe5-8811-ab4eee6c7d9d status:BATCHED batch:7e3c8c93-c117-45e5-8e29-0808ab5f6f5f failure:none]; pp_responses=[{\"account_name\":\"default\",\"batch_id\":\"7e3c8c93-c117-45e5-8e29-0808ab5f6f5f\",\"payments\":[{\"account_name\":\"default\",\"amount\":1000000,\"client_id\":\"bench-s5-1782314549489120000-1-1\",\"created_at\":\"2026-06-24T15:22:29Z\",\"payment_id\":\"9ebf812e-99f8-4deb-b618-489d06a9247d\",\"recipient_address\":\"f2NiyETdbJ7wQh6qnesTaKJjxdgUE7xzZMfE8C9yjhg6xiHYVWHVEEaeQ4MzMMh7JYsAhtqobK8NjrPBidfqNe26NC7\",\"status\":\"BATCHED\",\"updated_at\":\"2026-06-24T15:22:29Z\"},{\"account_name\":\"default\",\"amount\":1000000,\"client_id\":\"bench-s5-1782314549...<truncated>"
+            "S5 PP summary: attempted_batches=1 attempted_payments=2 accepted_batches=1 failed_batches=0 wall_ms=3; batch_ids=[4fe8d005-63dd-4fbd-9a81-359b8c362dc7]; payment_ids=[3b158258-e059-467a-9b32-0e3db6558078, ce45dc03-7b07-4e75-8e9a-33e188c8fb22]; db_snapshot=batches=[batch:4fe8d005-63dd-4fbd-9a81-359b8c362dc7 status:PENDING_BATCHING retries:0 unsigned:false signed:false error:none] payments=[payment:3b158258-e059-467a-9b32-0e3db6558078 status:BATCHED batch:4fe8d005-63dd-4fbd-9a81-359b8c362dc7 failure:none | payment:ce45dc03-7b07-4e75-8e9a-33e188c8fb22 status:BATCHED batch:4fe8d005-63dd-4fbd-9a81-359b8c362dc7 failure:none]; pp_responses=[{\"account_name\":\"default\",\"batch_id\":\"4fe8d005-63dd-4fbd-9a81-359b8c362dc7\",\"payments\":[{\"account_name\":\"default\",\"amount\":20000,\"client_id\":\"bench-s5-1782352063943326000-1-1\",\"created_at\":\"2026-06-25T01:47:43Z\",\"payment_id\":\"3b158258-e059-467a-9b32-0e3db6558078\",\"recipient_address\":\"f2NiyETdbJ7wQh6qnesTaKJjxdgUE7xzZMfE8C9yjhg6xiHYVWHVEEaeQ4MzMMh7JYsAhtqobK8NjrPBidfqNe26NC7\",\"status\":\"BATCHED\",\"updated_at\":\"2026-06-25T01:47:43Z\"},{\"account_name\":\"default\",\"amount\":20000,\"client_id\":\"bench-s5-17823520639433...<truncated>"
           ]
         },
         "S6": {
@@ -925,63 +1040,90 @@
     "tx_mined_confirmed_status_value": 6,
     "verified_transactions": [
       {
-        "tx_id": "15297395523124947594",
+        "tx_id": "14858780110045966490",
         "status_value": 2,
         "mode": "old_wallet",
         "scenario": "S1",
-        "amount_microtari": 2000000,
+        "amount_microtari": 40000,
         "fee_microtari": 945,
-        "mined_height": 710565,
+        "mined_height": 711323,
         "confirmed": true
       },
       {
-        "tx_id": "16571143755989443134",
-        "status_value": 2,
+        "tx_id": "6263396227549309864",
+        "status_value": 6,
         "mode": "old_wallet",
         "scenario": "S4",
-        "amount_microtari": 1000000,
-        "fee_microtari": 700,
-        "mined_height": 710568,
-        "confirmed": true
-      },
-      {
-        "tx_id": "1810960988092390726",
-        "status_value": 6,
-        "mode": "old_wallet",
-        "scenario": "S5",
-        "amount_microtari": 1000000,
-        "fee_microtari": 945,
-        "mined_height": 710570,
-        "confirmed": true
-      },
-      {
-        "tx_id": "10759835787874539413",
-        "status_value": 6,
-        "mode": "old_wallet",
-        "scenario": "S5",
-        "amount_microtari": 1000000,
-        "fee_microtari": 945,
-        "mined_height": 710570,
-        "confirmed": true
-      },
-      {
-        "tx_id": "9489914261621933203",
-        "status_value": 2,
-        "mode": "old_wallet",
-        "scenario": "S5",
-        "amount_microtari": 1000000,
+        "amount_microtari": 20000,
         "fee_microtari": 660,
-        "mined_height": 710577,
+        "mined_height": 711324,
         "confirmed": true
       },
       {
-        "tx_id": "17517677251440746429",
+        "tx_id": "181418807368016324",
+        "status_value": 6,
+        "mode": "old_wallet",
+        "scenario": "S5",
+        "amount_microtari": 20000,
+        "fee_microtari": 945,
+        "mined_height": 711329,
+        "confirmed": true
+      },
+      {
+        "tx_id": "9589664585746981326",
+        "status_value": 6,
+        "mode": "old_wallet",
+        "scenario": "S5",
+        "amount_microtari": 20000,
+        "fee_microtari": 945,
+        "mined_height": 711329,
+        "confirmed": true
+      },
+      {
+        "tx_id": "1552568187080471278",
         "status_value": 2,
         "mode": "old_wallet",
         "scenario": "S5",
-        "amount_microtari": 1000000,
+        "amount_microtari": 20000,
+        "fee_microtari": 660,
+        "mined_height": 711333,
+        "confirmed": true
+      },
+      {
+        "tx_id": "4961869139025709192",
+        "status_value": 2,
+        "mode": "old_wallet",
+        "scenario": "S5",
+        "amount_microtari": 20000,
+        "fee_microtari": 660,
+        "mined_height": 711333,
+        "confirmed": true
+      },
+      {
+        "tx_id": "3342988131844877001",
+        "status_value": 6,
+        "mode": "new_wallet",
+        "scenario": "S1",
+        "fee_microtari": 990,
+        "mined_height": 711336,
+        "confirmed": true
+      },
+      {
+        "tx_id": "5756695120974193262",
+        "status_value": 6,
+        "mode": "new_wallet",
+        "scenario": "S4",
         "fee_microtari": 700,
-        "mined_height": 710577,
+        "mined_height": 711341,
+        "confirmed": true
+      },
+      {
+        "tx_id": "5402626848094413870",
+        "status_value": 6,
+        "mode": "new_wallet",
+        "scenario": "S5",
+        "fee_microtari": 700,
+        "mined_height": 711345,
         "confirmed": true
       }
     ]
