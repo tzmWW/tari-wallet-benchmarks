@@ -86,17 +86,41 @@ wallets before starting the profile. Avoid copying old console-wallet DBs with
 historical unmined/rejected rows into a new run directory; fund a fresh Mode 1
 seed and confirm the recipient wallet sees the mined output instead.
 
+For recovered minotari signing wallets, the harness can create multi-output
+one-sided funding transactions without using the benchmark scenario path:
+
+```sh
+source .secrets/seeds.env
+cargo run --features live-minotari -- fund-one-sided \
+  --config harness.toml \
+  --source-db .bench-data/recovered-source/wallet.db \
+  --recipient f2... \
+  --amount "70 T" \
+  --outputs 150 \
+  --batch-size 50
+```
+
+This is an operator funding tool, not a measured benchmark step. Wait for the
+submitted funding transactions to mine and reach `C_min`, scan the recipient DB,
+then run `preflight --check-funds` before starting a benchmark profile.
+
 ## Preflight
 
 ```sh
 source .secrets/seeds.env
 export HARNESS_WALLET_PW='replace-with-a-long-local-password'
 cargo run -- preflight --config harness.toml
+cargo run -- preflight --config harness.toml --check-funds
 ```
 
 Preflight validates the Esmeralda-only guard, seed material, wallet password env,
 and local binary paths. It prints the PP build command if the PP binary is
-missing.
+missing. With `--check-funds`, it also audits wallet DB output-status totals and
+fails if configured live wallets do not have enough spendable outputs or if
+pending, encumbered, invalid, cancelled, not-stored, or unknown outputs are
+present. Text minotari statuses and numeric console-wallet statuses are printed
+with labels. Use `--mode1-db`, `--mode2-db`, and `--payment-receiver-db` to audit
+recovered DBs before updating `harness.toml`.
 
 ## Run
 
@@ -108,6 +132,7 @@ for compatibility or development runs.
 
 ```toml
 live_fresh_scan_cells = true    # long-running B0/S2/S3 fresh database scans
+scan_repetitions = 1            # scan cells; live send cells currently emit one repetition
 
 mode1_live_topology = true      # runs real minotari_console_wallet with gRPC
 mode1_scenario_amount = "1 T"
@@ -131,7 +156,7 @@ mode3_scenario_amount = "1 T"
 mode3_live_max_s1_batches = 1   # 0 means full doubling/fanout target
 mode3_live_max_s4_batch = 1     # 0 means use each concurrent_batches value
 mode3_live_max_s5_items = 2     # 0 means use S5_M
-mode3_worker_sleep_secs = 1     # PP worker cadence during live runs
+mode3_worker_sleep_secs = 10    # PP worker cadence during live runs
 ```
 
 ```sh
@@ -142,6 +167,46 @@ cargo run --features live-minotari -- run \
 
 The result profile is written atomically and does not contain seed phrases or
 passwords. Public addresses may appear in the profile.
+
+Current caveat: `benchmark.repetitions` is recorded in the config metadata, but
+the live stateful send implementations still record one observed repetition per
+scenario. The checked profile generated at `2026-06-29T23:04:13.700658Z` is
+no-cap send evidence with a partial S4 ramp (`concurrent_batches = [1]`), not the
+final reference baseline. Treat it as wallet-behavior evidence unless/until a
+rerun uses the full S4 ramp and enough funded UTXOs for the configured stateful
+shape.
+
+Before the final submission rerun, set the live config to the full reference S4
+ramp and one stateful repetition unless live repetition loops have been funded
+and implemented:
+
+```toml
+concurrent_batches = [8, 16, 32, 64, 128]
+repetitions = 1
+scan_repetitions = 1
+live_fresh_scan_cells = true
+mode1_live_max_s1_txs = 0
+mode1_live_max_s4_batch = 0
+mode1_live_max_s5_items = 0
+mode2_live_max_s1_txs = 0
+mode2_live_max_s4_batch = 0
+mode2_live_max_s5_txs = 0
+mode3_live_max_s1_batches = 0
+mode3_live_max_s4_batch = 0
+mode3_live_max_s5_items = 0
+```
+
+Long live runs also write checkpoint profiles next to the requested profile path,
+for example `baselines/esmeralda_baseline.old_wallet.json`,
+`baselines/esmeralda_baseline.new_wallet.json`,
+`baselines/esmeralda_baseline.fresh_scans.json`, and
+`baselines/esmeralda_baseline.payment_processor.json`. These preserve completed
+stage evidence if an unattended run is interrupted; the final merged profile is
+still written atomically to the requested `--profile` path.
+
+Use `run --fresh-data-dir --yes` only when intentionally starting from clean data
+directories. It deletes enabled mode data dirs before the run, so the generated
+addresses must be funded again before `preflight --check-funds` can pass.
 
 Implementation note: the committed harness currently writes the full result
 profile shape and can exercise Mode 2 plus PP companion fresh scan paths when
@@ -154,10 +219,12 @@ per-cell progress while they execute.
 Fresh scan cells are checkpointed against actual scenario progress. B0 uses an
 empty genesis seed before spends. S2/S3 run only after an S1 checkpoint exists;
 S6/S7 run only after an S5 checkpoint exists. If the prerequisite spend is
-blocked, the scan cell records a note instead of inventing a measurement. Mode 1
-fresh scans launch a real `minotari_console_wallet --recovery` instance with a
-fresh base path and poll its gRPC state until it reaches the public tip. Mode 2
-and PP companion scan cells use the minotari scanner path with fresh databases.
+blocked, the scan cell records an explicit failed repetition with
+`blocked_prerequisite = true`, `wall_ms = null`, `success_count = 0`, and
+`failure_count = 1` instead of inventing a measurement. Mode 1 fresh scans launch
+a real `minotari_console_wallet --recovery` instance with a fresh base path and
+poll its gRPC state until it reaches the public tip. Mode 2 and PP companion scan
+cells use the minotari scanner path with fresh databases.
 
 When `mode2_send_smoke` is enabled, the harness constructs, signs, persists, and
 submits one one-sided transaction from the Mode 2 wallet using a direct JSON-RPC

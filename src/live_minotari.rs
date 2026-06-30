@@ -57,6 +57,7 @@ pub async fn annotate_profile_with_library_smoke(
     config: &Config,
     book: &AddressBook,
     profile: &mut ResultProfile,
+    partial_profile_path: Option<&Path>,
 ) -> anyhow::Result<()> {
     let Some(seed) = book.addresses.get(WalletRole::NewWallet.label()) else {
         return Ok(());
@@ -130,6 +131,7 @@ pub async fn annotate_profile_with_library_smoke(
     } else {
         annotate_mode1_disabled(profile);
     }
+    write_profile_checkpoint(profile, partial_profile_path, "old_wallet")?;
 
     if config.benchmark.mode2_live_scenarios {
         annotate_mode2_live_scenarios(config, book, profile).await?;
@@ -155,18 +157,44 @@ pub async fn annotate_profile_with_library_smoke(
             );
         }
     }
+    write_profile_checkpoint(profile, partial_profile_path, "new_wallet")?;
 
     if config.benchmark.live_fresh_scan_cells {
         annotate_fresh_scan_b0_cells(config, book, profile).await?;
     } else {
         annotate_fresh_scan_cells_disabled(profile);
     }
+    write_profile_checkpoint(profile, partial_profile_path, "fresh_scans")?;
 
     if config.benchmark.mode3_live_topology {
         annotate_mode3_payment_processor(config, book, profile).await?;
     } else {
         annotate_mode3_disabled(profile);
     }
+    write_profile_checkpoint(profile, partial_profile_path, "payment_processor")?;
+    Ok(())
+}
+
+fn write_profile_checkpoint(
+    profile: &ResultProfile,
+    profile_path: Option<&Path>,
+    label: &str,
+) -> anyhow::Result<()> {
+    let Some(profile_path) = profile_path else {
+        return Ok(());
+    };
+    let parent = profile_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = profile_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("profile");
+    let ext = profile_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("json");
+    let checkpoint_path = parent.join(format!("{stem}.{label}.{ext}"));
+    profile.write_atomic(&checkpoint_path)?;
+    println!("wrote checkpoint {}", checkpoint_path.display());
     Ok(())
 }
 
@@ -262,6 +290,17 @@ fn annotate_fresh_scan_cells_disabled(profile: &mut ResultProfile) {
         ScenarioName::S6,
         ScenarioName::S7,
     ] {
+        if let Some(cell) = profile
+            .modes
+            .get_mut("old_wallet")
+            .and_then(|mode| mode.scenarios.get_mut(scenario.as_str()))
+        {
+            cell.notes.push(
+                "fresh live scan cell disabled for this run; set benchmark.live_fresh_scan_cells=true for the long baseline pass"
+                    .to_string(),
+            );
+        }
+
         if let Some(cell) = profile
             .modes
             .get_mut("new_wallet")
@@ -1367,17 +1406,18 @@ async fn wait_for_mode1_summary_verification(
     summary.backfill_verified_fee_total();
 }
 
-async fn verify_mode2_transactions(
+async fn verify_mode2_transactions_with_client(
     config: &Config,
     db_path: &Path,
     tx_ids: &[String],
     scenario: ScenarioName,
+    client: &reqwest::Client,
 ) -> anyhow::Result<Mode2VerificationResult> {
     if tx_ids.is_empty() || !db_path.exists() {
         return Ok(Mode2VerificationResult::default());
     }
     let conn = Connection::open(db_path)?;
-    let tip_height = base_node_tip_height(&config.network.base_node_http_url)
+    let tip_height = base_node_tip_height_with_client(client, &config.network.base_node_http_url)
         .await
         .ok();
     let mut result = Mode2VerificationResult::default();
@@ -1394,6 +1434,7 @@ async fn verify_mode2_transactions(
                 match kernel_query {
                     Ok(kernel_query) => {
                         let query = query_mode2_transaction(
+                            client,
                             &config.network.base_node_http_url,
                             &kernel_query,
                         )
@@ -1571,13 +1612,12 @@ fn mode2_kernel_query_from_serialized_transaction(
 }
 
 async fn query_mode2_transaction(
+    client: &reqwest::Client,
     base_node_url: &str,
     query: &Mode2KernelQuery,
 ) -> anyhow::Result<TxQueryResponse> {
     let url = mode2_transaction_query_url(base_node_url, query)?;
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?
+    let response = client
         .get(url)
         .send()
         .await
@@ -1807,14 +1847,20 @@ async fn annotate_mode2_live_scenarios(
     let mut s1_request = request.clone();
     s1_request.recipient = sender_seed.address.clone();
     let mut s1 = run_mode2_s1_rounds(config, s1_request).await;
-    let s1_verification = verify_mode2_transactions(
-        config,
-        &config.modes.new_wallet_database,
-        &s1.tx_ids,
-        ScenarioName::S1,
-    )
-    .await?;
+    let (s1_verification, s1_verification_attempts, s1_verification_wall_ms) =
+        verify_mode2_transactions_until_confirmed(
+            config,
+            &config.modes.new_wallet_database,
+            &s1.tx_ids,
+            ScenarioName::S1,
+        )
+        .await?;
     s1.apply_mode2_verification(s1_verification);
+    record_mode2_verification_loop_metrics(
+        &mut s1,
+        s1_verification_attempts,
+        s1_verification_wall_ms,
+    );
     record_mode2_send_summary(
         profile,
         ScenarioName::S1,
@@ -1845,14 +1891,20 @@ async fn annotate_mode2_live_scenarios(
         .await?;
     }
     let mut s4 = run_s4_batches(config, request.clone()).await;
-    let s4_verification = verify_mode2_transactions(
-        config,
-        &config.modes.new_wallet_database,
-        &s4.tx_ids,
-        ScenarioName::S4,
-    )
-    .await?;
+    let (s4_verification, s4_verification_attempts, s4_verification_wall_ms) =
+        verify_mode2_transactions_until_confirmed(
+            config,
+            &config.modes.new_wallet_database,
+            &s4.tx_ids,
+            ScenarioName::S4,
+        )
+        .await?;
     s4.apply_mode2_verification(s4_verification);
+    record_mode2_verification_loop_metrics(
+        &mut s4,
+        s4_verification_attempts,
+        s4_verification_wall_ms,
+    );
     record_mode2_send_summary(
         profile,
         ScenarioName::S4,
@@ -1902,14 +1954,20 @@ async fn annotate_mode2_live_scenarios(
             .await?,
         )
     };
-    let s5_verification = verify_mode2_transactions(
-        config,
-        &config.modes.new_wallet_database,
-        &s5.tx_ids,
-        ScenarioName::S5,
-    )
-    .await?;
+    let (s5_verification, s5_verification_attempts, s5_verification_wall_ms) =
+        verify_mode2_transactions_until_confirmed(
+            config,
+            &config.modes.new_wallet_database,
+            &s5.tx_ids,
+            ScenarioName::S5,
+        )
+        .await?;
     s5.apply_mode2_verification(s5_verification);
+    record_mode2_verification_loop_metrics(
+        &mut s5,
+        s5_verification_attempts,
+        s5_verification_wall_ms,
+    );
     record_mode2_send_summary(
         profile,
         ScenarioName::S5,
@@ -1929,30 +1987,6 @@ async fn annotate_mode2_live_scenarios(
     if let Some(note) = s5_settle_note {
         append_mode2_note(profile, ScenarioName::S5, note);
     }
-    refresh_recorded_mode2_verification(
-        config,
-        profile,
-        &config.modes.new_wallet_database,
-        ScenarioName::S1,
-        &mut s1,
-    )
-    .await?;
-    refresh_recorded_mode2_verification(
-        config,
-        profile,
-        &config.modes.new_wallet_database,
-        ScenarioName::S4,
-        &mut s4,
-    )
-    .await?;
-    refresh_recorded_mode2_verification(
-        config,
-        profile,
-        &config.modes.new_wallet_database,
-        ScenarioName::S5,
-        &mut s5,
-    )
-    .await?;
     if config.benchmark.live_fresh_scan_cells {
         let checkpoint = checkpoint_from_mode2_summary(&s5, ScanCheckpoint::PostS5Complete);
         run_library_checkpoint_scan_cells(
@@ -1969,57 +2003,26 @@ async fn annotate_mode2_live_scenarios(
     Ok(())
 }
 
-async fn refresh_recorded_mode2_verification(
-    config: &Config,
-    profile: &mut ResultProfile,
-    db_path: &Path,
-    scenario: ScenarioName,
-    summary: &mut ScenarioSendSummary,
-) -> anyhow::Result<()> {
-    if summary.tx_ids.is_empty() {
-        return Ok(());
-    }
-    let (verification, verification_attempts, verification_wall_ms) =
-        verify_mode2_transactions_until_confirmed(config, db_path, &summary.tx_ids, scenario)
-            .await?;
-    summary.apply_mode2_verification(verification);
-    let observed_count = summary.tx_infos.len();
-    let confirmed_count = summary.verified_transactions().len();
-    summary.extra_metrics.insert(
-        "verification_refresh".to_string(),
-        serde_json::json!({
-            "pass": "post_s5_settle",
-            "attempts": verification_attempts,
-            "wall_ms": verification_wall_ms,
-            "observed_tx_count": observed_count,
-            "confirmed_tx_count": confirmed_count
-        }),
-    );
-    refresh_recorded_mode2_send_summary(
-        profile,
-        scenario,
-        summary,
-        format!(
-            "Mode 2 {} post-S5 verification refresh: observed_tx_count={observed_count} confirmed_tx_count={confirmed_count}",
-            scenario.as_str()
-        ),
-    );
-    Ok(())
-}
-
 async fn verify_mode2_transactions_until_confirmed(
     config: &Config,
     db_path: &Path,
     tx_ids: &[String],
     scenario: ScenarioName,
 ) -> anyhow::Result<(Mode2VerificationResult, u32, u128)> {
+    if tx_ids.is_empty() {
+        return Ok((Mode2VerificationResult::default(), 0, 0));
+    }
+
     let start = Instant::now();
     let timeout = config.timeout(config.timeouts.confirmation_secs);
     let mut attempts = 0u32;
+    let client = base_node_http_client()?;
 
     loop {
         attempts = attempts.saturating_add(1);
-        let verification = verify_mode2_transactions(config, db_path, tx_ids, scenario).await?;
+        let verification =
+            verify_mode2_transactions_with_client(config, db_path, tx_ids, scenario, &client)
+                .await?;
         if mode2_verification_confirmed(&verification, tx_ids) || start.elapsed() >= timeout {
             return Ok((verification, attempts, start.elapsed().as_millis()));
         }
@@ -2031,6 +2034,20 @@ async fn verify_mode2_transactions_until_confirmed(
         }
         settle_gate_pause(sleep_for).await;
     }
+}
+
+fn record_mode2_verification_loop_metrics(
+    summary: &mut ScenarioSendSummary,
+    attempts: u32,
+    wall_ms: u128,
+) {
+    summary.extra_metrics.insert(
+        "verification_loop".to_string(),
+        serde_json::json!({
+            "attempts": attempts,
+            "wall_ms": wall_ms
+        }),
+    );
 }
 
 fn mode2_verification_confirmed(verification: &Mode2VerificationResult, tx_ids: &[String]) -> bool {
@@ -2048,12 +2065,14 @@ async fn wait_for_mode2_scan_advance(
     password: &str,
     label: &str,
 ) -> anyhow::Result<String> {
+    let client = base_node_http_client()?;
     let initial_scan_height = account_snapshot(db_path)
         .with_context(|| format!("mode2 settle gate {label} could not read wallet scan height"))?
         .max_height;
-    let initial_tip_height = base_node_tip_height(&config.network.base_node_http_url)
-        .await
-        .with_context(|| format!("mode2 settle gate {label} could not read base-node tip"))?;
+    let initial_tip_height =
+        base_node_tip_height_with_client(&client, &config.network.base_node_http_url)
+            .await
+            .with_context(|| format!("mode2 settle gate {label} could not read base-node tip"))?;
     let target_tip_height = initial_tip_height.saturating_add(config.settle_wait_blocks());
     let timeout = config.timeout(config.timeouts.confirmation_secs);
     let start = Instant::now();
@@ -2077,9 +2096,12 @@ async fn wait_for_mode2_scan_advance(
                 format!("mode2 settle gate {label} could not read wallet scan height")
             })?
             .max_height;
-        let tip_height = base_node_tip_height(&config.network.base_node_http_url)
-            .await
-            .with_context(|| format!("mode2 settle gate {label} could not read base-node tip"))?;
+        let tip_height =
+            base_node_tip_height_with_client(&client, &config.network.base_node_http_url)
+                .await
+                .with_context(|| {
+                    format!("mode2 settle gate {label} could not read base-node tip")
+                })?;
         println!(
             "mode2 settle gate {label}: scanned_height={last_height} tip_height={tip_height} target_tip={target_tip_height}"
         );
@@ -2109,8 +2131,16 @@ async fn settle_gate_pause(duration: Duration) {
 }
 
 async fn base_node_tip_height(base_node_url: &str) -> anyhow::Result<u64> {
+    let client = base_node_http_client()?;
+    base_node_tip_height_with_client(&client, base_node_url).await
+}
+
+async fn base_node_tip_height_with_client(
+    client: &reqwest::Client,
+    base_node_url: &str,
+) -> anyhow::Result<u64> {
     let url = base_node_endpoint_url(base_node_url, "/get_tip_info")?;
-    let response = reqwest::Client::new()
+    let response = client
         .get(url)
         .send()
         .await
@@ -2124,6 +2154,14 @@ async fn base_node_tip_height(base_node_url: &str) -> anyhow::Result<u64> {
         .pointer("/metadata/best_block_height")
         .and_then(serde_json::Value::as_u64)
         .with_context(|| format!("base-node tip info missing best_block_height: {response}"))
+}
+
+fn base_node_http_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .build()
+        .context("building base-node HTTP client")
 }
 
 fn base_node_endpoint_url(base_node_url: &str, path: &str) -> anyhow::Result<url::Url> {
@@ -2325,6 +2363,7 @@ fn record_mode2_send_summary(
     cell.notes.extend(notes);
 }
 
+#[cfg(test)]
 fn refresh_recorded_mode2_send_summary(
     profile: &mut ResultProfile,
     scenario: ScenarioName,
@@ -3015,7 +3054,7 @@ async fn run_library_fresh_scan_for_cell(
         return Ok(());
     };
     if !spec.checkpoint.runnable() {
-        cell.notes.push(spec.checkpoint.blocked_note(spec.scenario));
+        record_blocked_checkpoint_scan(cell, spec);
         return Ok(());
     }
     run_library_fresh_scan_cell(config, mode, funded_seed_words, spec, cell).await
@@ -3054,10 +3093,28 @@ async fn run_mode1_fresh_scan_for_cell(
         return Ok(());
     };
     if !spec.checkpoint.runnable() {
-        cell.notes.push(spec.checkpoint.blocked_note(spec.scenario));
+        record_blocked_checkpoint_scan(cell, spec);
         return Ok(());
     }
     run_mode1_fresh_scan_cell(config, old_seed, spec, cell).await
+}
+
+fn record_blocked_checkpoint_scan(cell: &mut ScenarioCell, spec: FreshScanSpec) {
+    let note = spec.checkpoint.blocked_note(spec.scenario);
+    cell.notes.push(note.clone());
+    cell.record_repetition(Repetition {
+        run: 1,
+        status: CellStatus::Failed,
+        wall_ms: None,
+        success_count: 0,
+        failure_count: 1,
+        fee_microtari: None,
+        error: Some(note),
+        metrics: Some(serde_json::json!({
+            "blocked_prerequisite": true,
+            "scan_checkpoint": spec.checkpoint.label()
+        })),
+    });
 }
 
 async fn run_library_fresh_scan_cell(
@@ -3067,11 +3124,11 @@ async fn run_library_fresh_scan_cell(
     spec: FreshScanSpec,
     cell: &mut ScenarioCell,
 ) -> anyhow::Result<()> {
-    for run in 1..=config.benchmark.repetitions {
+    for run in 1..=config.benchmark.scan_repetitions {
         println!(
             "live scan {mode}/{} run {run}/{} birthday={} starting",
             spec.scenario.as_str(),
-            config.benchmark.repetitions,
+            config.benchmark.scan_repetitions,
             spec.birthday()
         );
         let scan = run_library_fresh_scan(config, mode, spec, run, funded_seed_words).await;
@@ -3124,11 +3181,11 @@ async fn run_mode1_fresh_scan_cell(
     spec: FreshScanSpec,
     cell: &mut ScenarioCell,
 ) -> anyhow::Result<()> {
-    for run in 1..=config.benchmark.repetitions {
+    for run in 1..=config.benchmark.scan_repetitions {
         println!(
             "live scan old_wallet/{} run {run}/{} birthday={} starting",
             spec.scenario.as_str(),
-            config.benchmark.repetitions,
+            config.benchmark.scan_repetitions,
             spec.birthday()
         );
         let scan = run_mode1_fresh_scan(config, old_seed, spec, run).await;
@@ -4453,6 +4510,67 @@ pub async fn construct_sign_broadcast_one_sided_multi_recipient(
     .await
 }
 
+pub async fn fund_one_sided_outputs(
+    config: &Config,
+    source_db: &Path,
+    recipient: &str,
+    amount: &str,
+    outputs: u32,
+    batch_size: u32,
+) -> anyhow::Result<()> {
+    if outputs == 0 {
+        bail!("--outputs must be greater than 0");
+    }
+    if batch_size == 0 {
+        bail!("--batch-size must be greater than 0");
+    }
+    if !source_db.exists() {
+        bail!("source DB not found at {}", source_db.display());
+    }
+    let amount = parse_amount(amount)?;
+    let request = OwnedOneSidedSendRequest {
+        db_path: source_db.to_path_buf(),
+        password: wallet_password(&config.seeds.wallet_password_env)?,
+        base_node_url: config.network.base_node_http_url.clone(),
+        recipient: recipient.to_string(),
+        amount,
+        fee_rate: config.fee_rate()?,
+        seconds_to_lock: config.timeouts.transaction_lock_secs,
+        confirmation_window: config.benchmark.c_min,
+        request_timeout: Duration::from_secs(30),
+    };
+
+    let mut remaining = outputs;
+    let mut batch_index = 0u32;
+    let mut tx_ids = Vec::new();
+    while remaining > 0 {
+        batch_index = batch_index.saturating_add(1);
+        let batch_outputs = remaining.min(batch_size);
+        println!(
+            "fund-one-sided batch {batch_index}: outputs={batch_outputs} amount_microtari={}",
+            amount.0
+        );
+        let recipients = repeated_recipient(recipient, batch_outputs as usize);
+        let outcome =
+            construct_sign_broadcast_one_sided_multi_recipient_owned(request.clone(), recipients)
+                .await?;
+        println!(
+            "fund-one-sided batch {batch_index} accepted={} synced={} tx_id={} fee_microtari={}",
+            outcome.accepted, outcome.is_synced, outcome.tx_id, outcome.fee_microtari
+        );
+        tx_ids.push(outcome.tx_id);
+        remaining -= batch_outputs;
+    }
+
+    println!(
+        "fund-one-sided submitted {} txs for {} outputs: {}",
+        tx_ids.len(),
+        outputs,
+        tx_ids.join(",")
+    );
+    Ok(())
+}
+
 async fn finalize_transaction_and_broadcast_without_retry(
     sender: &TransactionSender,
     signed: SignedOneSidedTransactionResult,
@@ -4847,7 +4965,12 @@ impl ScanMeasurement {
     }
 
     fn metrics(&self, mode: &str, spec: FreshScanSpec) -> serde_json::Value {
-        let blocks_scanned = (self.birthday == 0).then_some(self.max_height);
+        let blocks_scanned = if self.birthday == 0 {
+            Some(self.max_height)
+        } else {
+            self.tip_end
+                .map(|tip| tip.saturating_sub(u64::from(self.birthday)))
+        };
         let blocks_per_sec = blocks_scanned.and_then(|blocks| {
             if self.wall_ms == 0 {
                 None
@@ -5127,6 +5250,24 @@ mod tests {
         assert!(mode2_verification_confirmed(&all_confirmed, &tx_ids));
     }
 
+    #[tokio::test]
+    async fn mode2_verification_returns_immediately_without_tx_ids() {
+        let config = Config::default();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("unused-wallet.db");
+
+        let (verification, attempts, wall_ms) =
+            verify_mode2_transactions_until_confirmed(&config, &db_path, &[], ScenarioName::S4)
+                .await
+                .unwrap();
+
+        assert_eq!(attempts, 0);
+        assert_eq!(wall_ms, 0);
+        assert!(verification.observed_transactions.is_empty());
+        assert!(verification.observations.is_empty());
+        assert!(!verification.used_base_node_query);
+    }
+
     #[test]
     fn scan_checkpoint_gates_missing_prerequisites() {
         assert!(!ScanCheckpoint::PostS1Blocked.runnable());
@@ -5136,6 +5277,48 @@ mod tests {
             ScanCheckpoint::PostS1Blocked
                 .blocked_note(ScenarioName::S2)
                 .contains("post_s1_blocked")
+        );
+    }
+
+    #[test]
+    fn blocked_checkpoint_scan_records_failed_repetition() {
+        let mut cell = ScenarioCell {
+            scenario: ScenarioName::S6,
+            surface: "minotari_library".to_string(),
+            status: CellStatus::ReadyForLiveRun,
+            repetitions: Vec::new(),
+            median_wall_ms: None,
+            spread_wall_ms: None,
+            notes: Vec::new(),
+        };
+        let spec = FreshScanSpec {
+            scenario: ScenarioName::S6,
+            wallet_state: FreshScanWalletState::FundedGenesis,
+            checkpoint: ScanCheckpoint::PostS5Blocked,
+        };
+
+        record_blocked_checkpoint_scan(&mut cell, spec);
+
+        assert_eq!(cell.status, CellStatus::Failed);
+        assert_eq!(cell.median_wall_ms, None);
+        assert_eq!(cell.spread_wall_ms, None);
+        assert_eq!(cell.repetitions.len(), 1);
+        assert_eq!(cell.repetitions[0].status, CellStatus::Failed);
+        assert_eq!(cell.repetitions[0].wall_ms, None);
+        assert_eq!(cell.repetitions[0].success_count, 0);
+        assert_eq!(cell.repetitions[0].failure_count, 1);
+        assert!(
+            cell.repetitions[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("post_s5_blocked")
+        );
+        let metrics = cell.repetitions[0].metrics.as_ref().unwrap();
+        assert_eq!(metrics["blocked_prerequisite"], serde_json::json!(true));
+        assert_eq!(
+            metrics["scan_checkpoint"],
+            serde_json::json!("post_s5_blocked")
         );
     }
 
@@ -5181,6 +5364,10 @@ mod tests {
         let config = Config::default();
         let mut profile = ResultProfile::new(&config, crate::env_capture::capture());
         profile.modes.insert(
+            ModeName::OldWallet.as_str().to_string(),
+            empty_mode_profile(ModeName::OldWallet, None),
+        );
+        profile.modes.insert(
             ModeName::NewWallet.as_str().to_string(),
             empty_mode_profile(ModeName::NewWallet, None),
         );
@@ -5210,6 +5397,39 @@ mod tests {
             .unwrap()
             .scenarios[ScenarioName::B0.as_str()];
         assert_eq!(new_b0.status, CellStatus::ReadyForLiveRun);
+        let old_b0 = &profile
+            .modes
+            .get(ModeName::OldWallet.as_str())
+            .unwrap()
+            .scenarios[ScenarioName::B0.as_str()];
+        assert!(
+            old_b0
+                .notes
+                .iter()
+                .any(|note| note.contains("fresh live scan cell disabled"))
+        );
+    }
+
+    #[test]
+    fn birthday_scan_metrics_include_blocks_per_second() {
+        let measurement = ScanMeasurement {
+            birthday: 1_635,
+            max_height: 711_305,
+            wall_ms: 10_000,
+            available_microtari: 1,
+            tip_start: Some(711_300),
+            tip_end: Some(711_305),
+            detected_outputs: 1,
+        };
+        let spec = FreshScanSpec {
+            scenario: ScenarioName::S3,
+            wallet_state: FreshScanWalletState::FundedBirthday { birthday: 1_635 },
+            checkpoint: ScanCheckpoint::PostS1,
+        };
+        let metrics = measurement.metrics("new_wallet", spec);
+
+        assert_eq!(metrics["blocks_scanned"], serde_json::json!(709_670));
+        assert!(metrics["blocks_per_sec"].as_f64().unwrap() > 0.0);
     }
 
     #[test]

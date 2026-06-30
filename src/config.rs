@@ -48,6 +48,8 @@ pub struct BenchmarkConfig {
     pub s5_k: u32,
     pub fee_rate: String,
     pub repetitions: u32,
+    #[serde(default = "default_scan_repetitions")]
+    pub scan_repetitions: u32,
     #[serde(default = "default_scan_batch_size")]
     pub scan_batch_size: u64,
     #[serde(default)]
@@ -176,6 +178,9 @@ impl Config {
         if self.benchmark.repetitions == 0 {
             bail!("benchmark.repetitions must be greater than 0");
         }
+        if self.benchmark.scan_repetitions == 0 {
+            bail!("benchmark.scan_repetitions must be greater than 0");
+        }
         if self.benchmark.scan_batch_size == 0 {
             bail!("benchmark.scan_batch_size must be greater than 0");
         }
@@ -212,6 +217,17 @@ impl Config {
         }
         if self.benchmark.settle_cooldown_secs == 0 {
             bail!("benchmark.settle_cooldown_secs must be greater than 0");
+        }
+        if self.benchmark.mode1_live_topology && self.funding.old_wallet.is_none() {
+            bail!("funding.old_wallet must be set when benchmark.mode1_live_topology=true");
+        }
+        if (self.benchmark.mode2_live_scenarios || self.benchmark.mode2_send_smoke)
+            && self.funding.new_wallet.is_none()
+        {
+            bail!("funding.new_wallet must be set when Mode 2 live sends are enabled");
+        }
+        if self.benchmark.mode3_live_topology && self.funding.payment_processor.is_none() {
+            bail!("funding.payment_processor must be set when benchmark.mode3_live_topology=true");
         }
         self.a_fund()?;
         self.fee_rate()?;
@@ -271,6 +287,10 @@ impl Config {
             (
                 "repetitions".to_string(),
                 serde_json::json!(self.benchmark.repetitions),
+            ),
+            (
+                "scan_repetitions".to_string(),
+                serde_json::json!(self.benchmark.scan_repetitions),
             ),
             (
                 "scan_batch_size".to_string(),
@@ -387,6 +407,7 @@ impl Default for Config {
                 s5_k: 10,
                 fee_rate: "5 uT".to_string(),
                 repetitions: 3,
+                scan_repetitions: default_scan_repetitions(),
                 scan_batch_size: default_scan_batch_size(),
                 mode1_live_topology: false,
                 mode1_scenario_amount: default_mode1_scenario_amount(),
@@ -444,6 +465,10 @@ fn default_scan_batch_size() -> u64 {
     1_000
 }
 
+fn default_scan_repetitions() -> u32 {
+    1
+}
+
 fn default_settle_cooldown_secs() -> u64 {
     60
 }
@@ -465,7 +490,7 @@ fn default_mode3_scenario_amount() -> String {
 }
 
 fn default_mode3_worker_sleep_secs() -> u64 {
-    1
+    10
 }
 
 impl FundingConfig {

@@ -12,21 +12,23 @@ The harness targets Esmeralda only and models the three required wallet surfaces
 Current implementation status: CLI/config/schema/seed handling, Esmeralda
 guarding, result-profile generation, PP environment/API contract, static
 "no hidden wallet pain" rules, and live evidence paths for all three wallet
-surfaces are in place. Mode 2 submitted transactions are independently queried
-through the public base-node `/transactions` endpoint by extracting kernel
-signature data from the wallet DB's serialized transaction. Top-level chain
-verification rows are emitted only for mined transactions that are at least
-`C_min` deep; Mode 2 live runs perform a post-S5 confirmation refresh so cells
-are not left failed just because the first query landed before the configured
-depth. Fresh scan cells are checkpointed: B0 uses an empty genesis seed, S2/S3
-run after a valid S1 checkpoint, and S6/S7 run after S5. Mode 1 scan cells use
-real `minotari_console_wallet --recovery`; Mode 2 and PP companion scans use
-fresh minotari scanner databases. The checked baseline includes capped real Mode
-1 `minotari_console_wallet` gRPC S0/S1/S4/S5 evidence, capped fresh-funded Mode
-2 S1/S4/S5 send-side proof with base-node transaction-query verification, and
-capped real Mode 3 payment-processor S0/S1/S4/S5 coverage through the pinned PP
-daemon. The remaining bounty-critical work is running the long fresh-scan matrix
-and repeated statistical evidence where wallet state can honestly support it.
+surfaces are in place. The harness writes per-stage checkpoint profiles during
+live runs, supports `preflight --check-funds` for wallet DB UTXO audits, and
+separates the configured send repetition count from long fresh-scan repetitions
+via `scan_repetitions`. Current live stateful send cells still emit one observed
+repetition per scenario. It also includes `fund-one-sided` for operator-controlled
+multi-output Esmeralda funding from a recovered minotari signing wallet. Mode 2
+submitted transactions are independently queried through the public base-node
+`/transactions` endpoint by extracting kernel signature data from the wallet DB's
+serialized transaction. Top-level chain verification rows are emitted only for
+mined transactions that are at least `C_min` deep. Fresh scan cells are
+checkpointed: B0 uses an empty genesis seed, S2/S3 run after a valid S1
+checkpoint, and S6/S7 run after S5. Mode 1 scan cells use real
+`minotari_console_wallet --recovery`; Mode 2 and PP companion scans use fresh
+minotari scanner databases. The checked baseline is no-cap send evidence with a
+partial S4 ramp (`concurrent_batches = [1]`); it records real Mode 1 and Mode 2
+pending-funds failures rather than hiding them, but it is not the final reference
+baseline for the bounty.
 
 Start by generating fundable addresses:
 
@@ -42,14 +44,19 @@ Then fund the printed addresses on Esmeralda, run `preflight`, and execute the b
 ```sh
 source .secrets/seeds.env
 cargo run -- preflight --config harness.toml
+cargo run -- preflight --config harness.toml --check-funds
 cargo run --features live-minotari -- run --config harness.toml --profile baselines/esmeralda_baseline.json
 ```
 
 Full operator detail is in [RUNBOOK.md](RUNBOOK.md).
 
 The committed baseline JSON is schema-valid harness output and deliberately
-contains no secrets. It includes funding evidence plus capped Mode 1, fresh-funded
-Mode 2, and real Mode 3 live evidence. It is not the completed all-mode benchmark
-matrix: fresh scan cells are disabled in the checked proof, repetitions are `1`,
-and PP S1/S4/S5 preserve accepted-but-not-confirmed DB observations as
-`payment_processor_db_observed` rather than synthetic chain confirmations.
+contains no secrets. It includes final funding evidence, all live topology flags,
+no live caps, the fresh-scan matrix, independent Mode 2 base-node transaction
+queries, and confirmed PP chain evidence from the partial S4-ramp run. It is not
+an all-ok, complete S4-reference, or three-repetition statistical baseline:
+current live stateful send paths record one repetition, and the no-cap Mode 1/2
+runs expose wallet pending-funds behavior in the result profile. A final
+submission rerun still needs `concurrent_batches = [8, 16, 32, 64, 128]`,
+`repetitions = 1`, all live caps at `0`, and clean spendable Mode 1, Mode 2, and
+PP wallets.

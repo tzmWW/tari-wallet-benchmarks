@@ -12,3 +12,98 @@ the three harness-generated wallets with `50000 T` each.
 Funding is outside the measured benchmark path. The result profile records these
 transactions as benchmark inputs so later scenario results can be tied back to
 the funded wallet state without storing seed phrases or passwords.
+
+## 2026-06-26 Recoup Audit
+
+Several interrupted live runs left funds spread across ignored local wallet DBs.
+Supported scans/rescans recovered the usable pools below:
+
+- `HARNESS_SEED_OLD` console wallet: `818` spendable outputs,
+  `15476.624585 T`. Four status-`4` console outputs totaling about `50303 T` are
+  `Invalid` in the pinned console-wallet enum, not locked funds; do not count
+  them as recoverable without upstream wallet repair.
+- `HARNESS_SEED_NEW` / `HARNESS_SEED_NEW_FULL`: the latest recovered minotari DB
+  `.bench-data/fund-old-final2-20260625T161138Z/new-wallet/wallet.db` has `15`
+  spendable outputs, `38001.290980 T`, after scanning through the confirmed Mode
+  1 funding tx.
+- `HARNESS_SEED_PP`: `.bench-data/payment-receiver/wallet.db` has `1` spendable
+  output, `49991.996505 T`, after scanning to reconcile the prior PP send.
+- `HARNESS_SEED_OLD_FINAL2`: fresh recovery DB found `1` spendable output,
+  `12000 T`, at height `711891`.
+- `HARNESS_SEED_PP_FULL`: fresh recovery plus continued scan found the expected
+  `150` confirmed `70 T` outputs, `10500 T` total, at heights `711784`-`711785`.
+- `HARNESS_SEED_NEW_FRESH`: supported scan recovered `12` small spendable
+  outputs, `4.274230 T`.
+
+Do not double-count historical backup DBs: several contain older scan states for
+the same seed. The usable post-recoup pool is roughly `125974 T` excluding the
+invalid console-wallet outputs.
+
+Fresh final-baseline funding was started from `.secrets/final-baseline.env`:
+
+- Mode 1 first attempted console-wallet send tx `1052930016067525279` for
+  `10000 T`, but the source wallet recorded `send_count=0`; querying the public
+  base node by kernel signature returned `NotStored`, and a fresh recipient scan
+  found no output.
+- Mode 1 was re-funded from `.bench-data/recoup-old-final/wallet.db` with
+  `fund-one-sided` tx `18012736798975040370` for `10000 T`. Public base-node
+  query reported `Mined` at height `719363`, and a fresh check DB
+  `.bench-data/final-baseline/old-check-719350/wallet.db` found `UNSPENT|1|10000000000`.
+- Mode 2 fresh address received a `fund-one-sided` tx `941100472214723063` with
+  `64 x 160 T` outputs. Recipient DB
+  `.bench-data/final-baseline/new-wallet/wallet.db` shows
+  `UNSPENT|64|10240000000`.
+- PP fresh address received `50 x 70 T` from tx `15213625203447512294`, then
+  another `100 x 70 T` from txs `16863047476553249751` and
+  `6385847600539795173`. Recipient DB
+  `.bench-data/final-baseline/payment-receiver/wallet.db` shows
+  `UNSPENT|150|10500000000`.
+
+Before the final no-cap run, `preflight --check-funds` passed against the final
+DBs with required output counts: Mode 1 `1`, Mode 2 `64`, PP `150`. SQLite
+backups were written under `.bench-data/_backups/pre-nocaps-20260629T230200Z`.
+
+The final no-cap run wrote `baselines/esmeralda_baseline.json` with
+`generated_at = 2026-06-29T23:04:13.700658Z`. It is a no-cap live evidence run,
+not a three-repetition statistical profile: current live stateful send cells
+still emit one repetition even when `benchmark.repetitions = 3`. The run records
+real Mode 1 and Mode 2 pending-funds/selection failures and a successful no-cap
+PP path; see `baselines/esmeralda_baseline.summary.md` for cell counts.
+
+## 2026-06-30 Post-run Spendability
+
+The pre-run backups under `.bench-data/_backups/pre-nocaps-20260629T230200Z`
+prove that the no-cap evidence run started from clean spendable wallets:
+
+- Mode 1 check DB:
+  `.bench-data/final-baseline/old-check-719350/wallet.db` showed
+  `UNSPENT|1|10000000000`.
+- Mode 2 backup:
+  `.bench-data/_backups/pre-nocaps-20260629T230200Z/new-wallet.wallet.db`
+  showed `UNSPENT|64|10240000000`.
+- PP receiver backup:
+  `.bench-data/_backups/pre-nocaps-20260629T230200Z/payment-receiver.wallet.db`
+  showed `UNSPENT|150|10500000000`.
+
+Those backups are evidence of starting state, not reusable live state for another
+benchmark run. The current post-run final DBs have locked/spent outputs:
+
+- Final Mode 1 console wallet:
+  `0|3|9995995390` plus `1|8|39992994615` (`0 = Unspent`,
+  `1 = Spent`). It has enough spendable outputs for Mode 1 preflight, but it is
+  no longer a pristine one-output S0 starting point.
+- Final Mode 2 wallet:
+  `LOCKED|64|10240000000` plus `UNSPENT|1|1000000`. This is not ready for a
+  final rerun.
+- Final PP receiver:
+  `LOCKED|138|9660000000` plus `UNSPENT|12|840000000`. This is not ready for a
+  final rerun.
+
+Before another submission-quality run, first try supported scan/rescan recoup on
+the final Mode 2 and PP receiver DBs. If locked state remains, fund fresh seeds
+from known spendable pools and prove readiness with `preflight --check-funds`
+before running the profile. The known spendable source pools include
+`.bench-data/recovery-audit-20260625T122926Z/original-new/wallet.db`
+(`UNSPENT|15|50001291680`) and `.bench-data/payment-receiver/wallet.db`
+(`UNSPENT|1|49991996505`), but do not double-count older backup DBs for the same
+seed.

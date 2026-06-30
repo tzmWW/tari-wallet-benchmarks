@@ -19,17 +19,59 @@ async fn main() -> anyhow::Result<()> {
             enforce_esmeralda(&config)?;
             generate_addresses(&config, &out)?;
         }
-        Command::Preflight { config } => {
+        Command::Preflight {
+            config,
+            check_funds,
+            mode1_db,
+            mode2_db,
+            payment_receiver_db,
+        } => {
             let config =
                 Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
             enforce_esmeralda(&config)?;
-            preflight(&config).await?;
+            preflight(
+                &config,
+                check_funds,
+                mode1_db,
+                mode2_db,
+                payment_receiver_db,
+            )
+            .await?;
         }
-        Command::Run { config, profile } => {
+        Command::Run {
+            config,
+            profile,
+            fresh_data_dir,
+            yes,
+        } => {
             let config =
                 Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
             enforce_esmeralda(&config)?;
-            run_profile(&config, &profile).await?;
+            run_profile(&config, &profile, fresh_data_dir, yes).await?;
+        }
+        Command::FundOneSided {
+            config,
+            source_db,
+            recipient,
+            amount,
+            outputs,
+            batch_size,
+        } => {
+            let config =
+                Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
+            enforce_esmeralda(&config)?;
+            #[cfg(feature = "live-minotari")]
+            {
+                wallet_bench::live_minotari::fund_one_sided_outputs(
+                    &config, &source_db, &recipient, &amount, outputs, batch_size,
+                )
+                .await?;
+            }
+            #[cfg(not(feature = "live-minotari"))]
+            {
+                let _ = (&source_db, &recipient, &amount, outputs, batch_size);
+                anyhow::bail!("fund-one-sided requires --features live-minotari");
+            }
         }
         Command::Schema { out } => write_schema(&out)?,
     }

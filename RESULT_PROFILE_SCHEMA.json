@@ -22,6 +22,8 @@
       "verification_source",
       "verification_observations",
       "observed_transactions",
+      "verification_loop",
+      "blocked_prerequisite",
       "scan_checkpoint",
       "birthday",
       "tip_start",

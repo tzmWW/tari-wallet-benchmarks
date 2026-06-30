@@ -283,6 +283,8 @@ pub fn write_schema(path: &PathBuf) -> anyhow::Result<()> {
                 "verification_source",
                 "verification_observations",
                 "observed_transactions",
+                "verification_loop",
+                "blocked_prerequisite",
                 "scan_checkpoint",
                 "birthday",
                 "tip_start",
@@ -351,10 +353,10 @@ fn default_findings() -> Vec<Finding> {
                 .to_string(),
         },
         Finding {
-            id: "mode2-single-recipient-library-limit".to_string(),
-            title: "Pinned Mode 2 library path is single-recipient for direct sends".to_string(),
-            status: "reported_as_wallet_surface_limit".to_string(),
-            recommendation: "Use the real multi-recipient CLI/API path when available and record unsupported behavior explicitly."
+            id: "mode2-multi-recipient-s1-builder".to_string(),
+            title: "Mode 2 S1 uses the multi-recipient one-sided builder".to_string(),
+            status: "implemented_for_s1_round_shape".to_string(),
+            recommendation: "Keep S1 on the lower-level multi-recipient builder; S4/S5 remain single-recipient by scenario shape."
                 .to_string(),
         },
         Finding {

@@ -2,93 +2,81 @@
 
 This summary accompanies `baselines/esmeralda_baseline.json`.
 
-The checked-in profile was regenerated on `2026-06-25T00:54:28.628697Z` with
-schema v3. It is a capped live proof, not a full statistical B0/S0-S7 baseline:
-`repetitions = 1`, `live_fresh_scan_cells = false`, and Mode 1/2/3 live
-topologies were enabled with low safety caps. This profile includes the
-post-REVIEW_v4 independent Mode 2 base-node transaction-query metrics and the
-post-V5 fresh-funded Mode 2 proof.
+The checked-in profile was regenerated on `2026-06-29T23:04:13.700658Z` with schema v3. It is no-cap send evidence with `live_fresh_scan_cells = true`, all live caps set to `0`, and `scan_repetitions = 1` for long scan cells, but it used `concurrent_batches = [1]` and therefore only contains a partial S4 ramp. The config records `repetitions = 3`, but the current live stateful send paths still emit one repetition per scenario. Treat this profile as valuable wallet-behavior evidence, not the final bounty reference baseline.
 
-- Network: Esmeralda only.
-- Harness repository: `https://github.com/tzmWW/tari-wallet-benchmarks`.
-- Mode 1 surface: `minotari_console_wallet` gRPC.
-- Mode 2 surface: pinned `minotari` crate APIs.
-- Mode 3 surface: real `minotari_payment_processor` plus companion minotari
-  wallet.
-- Environment metadata now records OS/CPU/memory, disk type/name, and base-node
-  network path. This baseline was captured on `macOS 26.5.1`, Apple M1 Pro,
-  SSD, with remote base node `rpc.esmeralda.tari.com`.
-- Seed phrases and wallet passwords are excluded from result profiles.
+## Run Context
 
-Current checked-in live evidence:
+| Item | Value |
+|---|---|
+| Network | Esmeralda |
+| Harness repository | `https://github.com/tzmWW/tari-wallet-benchmarks` |
+| Mode 1 surface | `minotari_console_wallet` gRPC |
+| Mode 2 surface | pinned `minotari` crate APIs |
+| Mode 3 surface | real `minotari_payment_processor` plus companion minotari wallet |
+| Environment | macOS 26.5.1, Apple M1 Pro, SSD, remote `rpc.esmeralda.tari.com` |
+| Top-level verified transactions | 208 |
 
-- Mode 1 S0 started a real `minotari_console_wallet` process with gRPC enabled.
-- Mode 1 S1 submitted one capped `0.02 T` CoinSplit round with two outputs. Tx
-  `14858780110045966490` was confirmed at height `711323` with fee `945`
-  microtari.
-- Mode 1 S4 submitted one capped concurrent-batch gRPC transfer. Tx
-  `6263396227549309864` was confirmed at height `711324` with fee `660`
-  microtari.
-- Mode 1 S5 submitted the capped batch arm plus individual arm against
-  deterministic distinct recipients. Four txs were confirmed:
-  `181418807368016324`, `9589664585746981326`, `1552568187080471278`, and
-  `4961869139025709192`.
-- Mode 2 used the ignored fresh-proof wallet DB
-  `.bench-data/new-wallet-fresh-proof/wallet.db`, which matches
-  `HARNESS_SEED_NEW_FRESH`. It was funded from the old wallet with six
-  independent `0.09 T` one-sided transactions:
-  `16088670335361737216`, `2162886295002035165`, `3062470075941489107`,
-  `12073750951134594766`, `17402180299222494064`, and
-  `14747389757172597130`. Those funding txs mined at height `711302`; a
-  supported scanner catch-up to height `711305` made them spendable before the
-  proof.
-- Mode 2 S0 detected `360000` available microtari in the fresh-proof wallet for
-  the promoted all-mode run.
-- Mode 2 S1 used the self-directed multi-recipient one-sided builder. Tx
-  `3342988131844877001` was verified through
-  `base_node_transaction_query` as `Mined` at height `711336`, at least `C_min`
-  deep, with fee `990` microtari.
-- Mode 2 S4 tx `5756695120974193262` was verified through
-  `base_node_transaction_query` as `Mined` at height `711341`, fee `700`
-  microtari.
-- Mode 2 S5 tx `5402626848094413870` was verified through
-  `base_node_transaction_query` as `Mined` at height `711345`, fee `700`
-  microtari.
-- Mode 2 wallet DB observations still reported the submitted txs as `broadcast`;
-  confirmed evidence comes from deserializing
-  `completed_transactions.serialized_transaction`, querying the public base-node
-  `/transactions` endpoint by kernel excess signature, and checking `/get_tip_info`
-  for `C_min` depth. Broadcast, pending, mempool-only, timeout, or query-failed
-  cases remain metrics/notes rather than top-level chain-verification rows.
-- Mode 3 S0 started the real `minotari_payment_processor` plus companion
-  payment receiver.
-- Mode 3 S1 drove PP `/v1/payment-batches` in S1 round shape. Batch
-  `5410f63c-787d-4cde-8696-04293c0df97c` was accepted and recorded as
-  `PENDING_BATCHING` in the profile.
-- Mode 3 S4 accepted batch `8192f876-0c49-483b-bcf5-5264d55bf1a7`; Mode 3 S5
-  accepted batch `4fe8d005-63dd-4fbd-9a81-359b8c362dc7`. Both remained
-  `PENDING_BATCHING` in the profile.
-- PP DB observations are labeled `payment_processor_db_observed`; pending PP
-  batches stay in metrics/notes and are not emitted as confirmed
-  chain-verification rows.
-- Mode 3 scan-shape cells are `not_applicable` when
-  `live_fresh_scan_cells=false` because PP has no direct scan API. Companion
-  wallet scans are only recorded when explicitly enabled.
+## Final Funding
 
-REVIEW_v3 status:
+| Mode | Amount | Tx ID | Height |
+|---|---:|---|---:|
+| `old_wallet` | `10000 T` | `18012736798975040370` | 719363 |
+| `new_wallet` | `10240 T` | `941100472214723063` | 712153 |
+| `payment_processor` | `10500 T` | `15213625203447512294`, `16863047476553249751`, `6385847600539795173` | 712161 |
 
-- Fixed after the review: Mode 2 S1 multi-recipient round shape, Mode 2
-  settlement gates, Mode 1 verified fee backfill, Mode 3 S1 PP batch shape,
-  confirmed-only top-level verification rows, and PP scan-cell ambiguity.
-- Fixed after REVIEW_v4: environment capture includes disk/network-path fields,
-  direct `time::sleep(...)` alias calls are covered by ast-grep, Mode 2 DB
-  status mapping is extracted/tested against the pinned minotari status strings,
-  Mode 2 chain verification uses base-node transaction queries instead of DB-only
-  confirmation, and fresh scan cells are checkpointed instead of predeclared.
-- Fixed in the promoted V5 evidence pass: fresh-funded Mode 2 S1/S4/S5 now
-  construct, sign, broadcast, and produce confirmed base-node transaction-query
-  rows from independent spendable UTXOs.
-- Still not claimed as complete: three-repetition statistical evidence, the full
-  fresh-scan matrix (`B0/S2/S3/S6/S7`), full-volume stateful spend cells, and a PP
-  terminal-confirmation rerun. The current profile is intentionally labeled as
-  capped proof rather than final performance data.
+Pre-run fund preflight passed with `old_wallet = 1 x 10000 T`, `new_wallet = 64 x 160 T`, and `payment_processor = 150 x 70 T` spendable outputs. Post-run Mode 2 and PP state is locked/spent enough that another final run needs recoup or fresh funding before `preflight --check-funds` can pass again.
+
+## Cell Results
+
+| Mode | Cell | Status | Successes | Failures | Wall ms |
+|---|---|---|---:|---:|---:|
+| `old_wallet` | B0 | ok | 1 | 0 | 2321439 |
+| `old_wallet` | S0 | ok | 1 | 0 | 24649 |
+| `old_wallet` | S1 | failed | 2 | 2 | 401165 |
+| `old_wallet` | S2 | ok | 1 | 0 | 2892440 |
+| `old_wallet` | S3 | ok | 1 | 0 | 24465 |
+| `old_wallet` | S4 | ok | 1 | 0 | 31 |
+| `old_wallet` | S5 | failed | 3 | 197 | 361033 |
+| `old_wallet` | S6 | ok | 1 | 0 | 2588512 |
+| `old_wallet` | S7 | ok | 1 | 0 | 19443 |
+| `new_wallet` | B0 | ok | 1 | 0 | 778814 |
+| `new_wallet` | S0 | ok | 1 | 0 | 1924 |
+| `new_wallet` | S1 | failed | 64 | 63 | 871093 |
+| `new_wallet` | S2 | ok | 1 | 0 | 841665 |
+| `new_wallet` | S3 | ok | 1 | 0 | 6474 |
+| `new_wallet` | S4 | failed | 0 | 1 | 286 |
+| `new_wallet` | S5 | failed | 0 | 100 | 28227 |
+| `new_wallet` | S6 | failed | 0 | 1 | n/a |
+| `new_wallet` | S7 | failed | 0 | 1 | n/a |
+| `payment_processor` | B0 | ok | 1 | 0 | 1134332 |
+| `payment_processor` | S0 | ok | 1 | 0 | 2209 |
+| `payment_processor` | S1 | ok | 127 | 0 | 336 |
+| `payment_processor` | S2 | ok | 1 | 0 | 837108 |
+| `payment_processor` | S3 | ok | 1 | 0 | 6352 |
+| `payment_processor` | S4 | ok | 1 | 0 | 123006 |
+| `payment_processor` | S5 | ok | 10 | 0 | 45 |
+| `payment_processor` | S6 | ok | 1 | 0 | 760019 |
+| `payment_processor` | S7 | ok | 1 | 0 | 6527 |
+
+## Chain Evidence
+
+| Mode/Scenario | Confirmed txs | Mined height range |
+|---|---:|---|
+| `old_wallet/S1` | 2 | 719444-719449 |
+| `old_wallet/S4` | 1 | 719581 |
+| `old_wallet/S5` | 3 | 719593-719599 |
+| `new_wallet/S1` | 64 | 719704-719731 |
+| `payment_processor/S1` | 127 | 720060-720061 |
+| `payment_processor/S4` | 1 | 720090 |
+| `payment_processor/S5` | 10 | 720095 |
+
+## Interpretation
+
+- Mode 1 started from a fresh final console-wallet recovery and proved S0/S4 plus all scan cells. S1 stopped during round 2 after the console wallet returned `OutputManagerError(NotEnoughFunds)`, and S5 recorded pending-funds failures after three confirmed sends. These failures are recorded as benchmark signal, not hidden with harness retries.
+- Mode 2 proved 64 no-cap S1 transactions through independent base-node kernel-signature queries. The final fan-out arm then failed 63 attempts with `Funds are pending`; S4 and S5 also failed for the same pending-funds state. Confirmed Mode 2 evidence remains top-level `chain_verification`; failed attempts remain in cell metrics/notes. S6/S7 are explicit failed rows because S5 did not produce a runnable checkpoint.
+- Mode 3 completed the no-cap PP path: S1 accepted and confirmed 127 payment batches, S4 confirmed one batch, S5 confirmed ten batches, and all PP companion scan cells completed.
+- Seed phrases and wallet passwords are excluded from result profiles. Public addresses, funding tx ids, and verified tx ids are intentionally present for auditability.
+
+## Final Rerun Needed
+
+The next submission-quality run should use `concurrent_batches = [8, 16, 32, 64, 128]`, `repetitions = 1`, `scan_repetitions = 1`, `live_fresh_scan_cells = true`, and all live caps at `0`. Run it only after Mode 1, Mode 2, and PP fund preflight passes with no locked, pending, invalid, cancelled, not-stored, or unknown outputs.
