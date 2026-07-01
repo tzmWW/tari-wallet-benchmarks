@@ -73,6 +73,25 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("fund-one-sided requires --features live-minotari");
             }
         }
+        Command::ScanWallet {
+            config,
+            db,
+            seed_env,
+        } => {
+            let config =
+                Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
+            enforce_esmeralda(&config)?;
+            #[cfg(feature = "live-minotari")]
+            {
+                wallet_bench::live_minotari::scan_wallet_db(&config, &db, seed_env.as_deref())
+                    .await?;
+            }
+            #[cfg(not(feature = "live-minotari"))]
+            {
+                let _ = (db, seed_env);
+                anyhow::bail!("scan-wallet requires --features live-minotari");
+            }
+        }
         Command::Schema { out } => write_schema(&out)?,
     }
 

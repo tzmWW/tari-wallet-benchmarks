@@ -107,3 +107,36 @@ before running the profile. The known spendable source pools include
 (`UNSPENT|15|50001291680`) and `.bench-data/payment-receiver/wallet.db`
 (`UNSPENT|1|49991996505`), but do not double-count older backup DBs for the same
 seed.
+
+## 2026-07-01 Final-rerun Readiness
+
+The 2026-07-01 final-run attempts consumed additional Mode 1 and Mode 2 wallet
+state before being interrupted in the Mode 1 S2 genesis recovery scan. They are
+not final profiles, but the active final wallet paths were checked afterward and
+remain spendable for another full uncapped attempt:
+
+- Mode 1 final console wallet:
+  `0(Unspent):759:10727996113`.
+- Mode 2 final wallet:
+  `SPENT|764|30896757960`, `UNSPENT|778|10565612275`.
+- PP final receiver:
+  `SPENT|138|9660000000`, `UNSPENT|151|10005737635`.
+
+`cargo run --features live-minotari -- preflight --config harness.toml --check-funds`
+passed with those active paths after the interrupted rerun. No benchmark,
+console-wallet, minotari daemon, or payment-processor child processes were left
+running.
+
+Fresh ignored ready-state backups were written after that passing preflight:
+`.bench-data/_backups/pre-next-uncapped-20260701T151331Z/`.
+
+Before starting the next full live uncapped test:
+
+1. Source `.secrets/final-baseline.env`.
+2. Run `cargo run --features live-minotari -- preflight --config harness.toml --check-funds`.
+3. Create fresh local backups of the three active wallet DBs under
+   `.bench-data/_backups/`.
+4. Start the run with a timestamped log under `logs/`.
+
+Do not reuse `.bench-data/_backups/pre-nocaps-20260629T230200Z` as live state;
+it remains starting-state evidence for the older no-cap run only.

@@ -53,6 +53,39 @@ use crate::{
 
 const MODE1_DB_LOCK_RETRY_ATTEMPTS: u32 = 8;
 
+pub async fn scan_wallet_db(
+    config: &Config,
+    db_path: &Path,
+    seed_env: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(seed_env) = seed_env {
+        let seed_words = std::env::var(seed_env)
+            .with_context(|| format!("reading seed words from env var {seed_env}"))?;
+        ensure_signing_wallet(db_path, &seed_words, &config.seeds.wallet_password_env)?;
+    } else if !db_path.exists() {
+        bail!(
+            "wallet DB not found at {}; pass --seed-env to initialize it before scanning",
+            db_path.display()
+        );
+    }
+    let wall_ms = scan_to_tip(
+        db_path,
+        &wallet_password(&config.seeds.wallet_password_env)?,
+        &config.network.base_node_http_url,
+        config.benchmark.scan_batch_size,
+        config.benchmark.c_min,
+    )
+    .await?;
+    let balance = account_balance(db_path)?;
+    println!(
+        "scan-wallet db={} wall_ms={} balance={}",
+        db_path.display(),
+        wall_ms,
+        balance
+    );
+    Ok(())
+}
+
 pub async fn annotate_profile_with_library_smoke(
     config: &Config,
     book: &AddressBook,
@@ -572,9 +605,12 @@ async fn wait_for_mode1_scan_to_tip(
     client: &mut WalletGrpcClient<tonic::transport::Channel>,
     target_tip: Option<u64>,
     timeout: Duration,
+    no_progress_timeout: Duration,
 ) -> anyhow::Result<u64> {
     let start = Instant::now();
+    let mut last_progress = Instant::now();
     let mut interval = time::interval(Duration::from_secs(5));
+    let mut last_scanned_height = None;
     loop {
         interval.tick().await;
         if let Some(status) = process.try_wait()? {
@@ -584,14 +620,67 @@ async fn wait_for_mode1_scan_to_tip(
                 process.stderr_path.display()
             );
         }
-        let state = client
-            .get_state(grpc::GetStateRequest {})
-            .await?
-            .into_inner();
+        if start.elapsed() > timeout {
+            bail!(
+                "console wallet fresh scan did not reach target tip {:?} within {:?}; scanned_height={:?}; stdout_log={} stderr_log={}",
+                target_tip,
+                timeout,
+                last_scanned_height,
+                process.stdout_path.display(),
+                process.stderr_path.display()
+            );
+        }
+        let state = match time::timeout(
+            Duration::from_secs(10),
+            client.get_state(grpc::GetStateRequest {}),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response.into_inner(),
+            Ok(Err(error)) => {
+                if start.elapsed() > timeout {
+                    bail!(
+                        "console wallet fresh scan state query failed after {:?}: {error}; scanned_height={:?}; stdout_log={} stderr_log={}",
+                        timeout,
+                        last_scanned_height,
+                        process.stdout_path.display(),
+                        process.stderr_path.display()
+                    );
+                }
+                println!("mode1 fresh scan state query failed: {error}");
+                continue;
+            }
+            Err(_) => {
+                if start.elapsed() > timeout {
+                    bail!(
+                        "console wallet fresh scan state query timed out after {:?}; scanned_height={:?}; stdout_log={} stderr_log={}",
+                        timeout,
+                        last_scanned_height,
+                        process.stdout_path.display(),
+                        process.stderr_path.display()
+                    );
+                }
+                println!("mode1 fresh scan state query timed out after 10s");
+                continue;
+            }
+        };
         let scanned_height = state.scanned_height;
+        if last_scanned_height.is_none_or(|previous| scanned_height > previous) {
+            last_progress = Instant::now();
+        }
+        last_scanned_height = Some(scanned_height);
         let target = target_tip.unwrap_or_else(|| scanned_height.saturating_add(1));
         if scanned_height >= target {
             return Ok(scanned_height);
+        }
+        if last_progress.elapsed() > no_progress_timeout {
+            bail!(
+                "console wallet fresh scan made no height progress for {:?}; target_tip={:?}; scanned_height={scanned_height}; stdout_log={} stderr_log={}",
+                no_progress_timeout,
+                target_tip,
+                process.stdout_path.display(),
+                process.stderr_path.display()
+            );
         }
         if start.elapsed() > timeout {
             bail!(
@@ -3350,6 +3439,7 @@ async fn run_mode1_fresh_scan(
         &mut client,
         tip_start,
         config.timeout(config.timeouts.startup_secs),
+        config.timeout(config.timeouts.scan_batch_secs),
     )
     .await?;
     let balance = client
@@ -3519,6 +3609,7 @@ pub struct OneSidedSendOutcome {
     pub fee_microtari: u64,
     pub accepted: bool,
     pub is_synced: bool,
+    pub rejection_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -3829,8 +3920,13 @@ impl PpScenarioSummary {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         let mut latest = None;
         let mut attempts = 0u64;
+        let mut timed_out = false;
         loop {
             interval.tick().await;
+            if start.elapsed() > timeout {
+                timed_out = true;
+                break;
+            }
             attempts = attempts.saturating_add(1);
             match payment_processor::inspect_payment_processor_db(
                 config,
@@ -3850,6 +3946,7 @@ impl PpScenarioSummary {
                     .push(format!("PP DB inspection failed: {error:#}")),
             }
             if start.elapsed() > timeout {
+                timed_out = true;
                 break;
             }
         }
@@ -3864,6 +3961,10 @@ impl PpScenarioSummary {
         self.extra_metrics.insert(
             "db_observation_wall_ms".to_string(),
             serde_json::json!(start.elapsed().as_millis()),
+        );
+        self.extra_metrics.insert(
+            "db_observation_timed_out".to_string(),
+            serde_json::json!(timed_out),
         );
     }
 
@@ -4555,8 +4656,12 @@ pub async fn fund_one_sided_outputs(
             construct_sign_broadcast_one_sided_multi_recipient_owned(request.clone(), recipients)
                 .await?;
         println!(
-            "fund-one-sided batch {batch_index} accepted={} synced={} tx_id={} fee_microtari={}",
-            outcome.accepted, outcome.is_synced, outcome.tx_id, outcome.fee_microtari
+            "fund-one-sided batch {batch_index} accepted={} synced={} tx_id={} fee_microtari={} rejection_reason={}",
+            outcome.accepted,
+            outcome.is_synced,
+            outcome.tx_id,
+            outcome.fee_microtari,
+            outcome.rejection_reason.as_deref().unwrap_or("None")
         );
         tx_ids.push(outcome.tx_id);
         remaining -= batch_outputs;
@@ -4619,6 +4724,7 @@ async fn finalize_signed_transaction_and_broadcast_without_retry(
                 fee_microtari,
                 accepted: response.accepted,
                 is_synced: response.is_synced,
+                rejection_reason: None,
             })
         }
         Ok(response) if response.rejection_reason == TxSubmissionRejectionReason::AlreadyMined => {
@@ -4627,6 +4733,7 @@ async fn finalize_signed_transaction_and_broadcast_without_retry(
                 fee_microtari,
                 accepted: response.accepted,
                 is_synced: response.is_synced,
+                rejection_reason: Some(response.rejection_reason.to_string()),
             })
         }
         Ok(response) => {

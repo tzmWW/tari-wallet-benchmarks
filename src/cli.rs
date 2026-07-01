@@ -54,6 +54,14 @@ pub enum Command {
         #[arg(long, default_value_t = 1)]
         batch_size: u32,
     },
+    ScanWallet {
+        #[arg(long, default_value = "harness.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        seed_env: Option<String>,
+    },
     Schema {
         #[arg(long, default_value = "RESULT_PROFILE_SCHEMA.json")]
         out: PathBuf,

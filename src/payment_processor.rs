@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, time};
 
@@ -593,22 +593,25 @@ pub fn inspect_payment_processor_db(
     payment_ids: &[String],
 ) -> anyhow::Result<PaymentProcessorDbSnapshot> {
     let db_path = payment_processor_db_path(config);
-    let conn = Connection::open(&db_path)
-        .with_context(|| format!("opening PP database {}", db_path.display()))?;
+    let conn = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening PP database {}", db_path.display()))?;
+    conn.busy_timeout(Duration::from_millis(100))
+        .with_context(|| format!("setting PP database busy timeout {}", db_path.display()))?;
 
-    let batches = batch_ids
-        .iter()
-        .map(|id| inspect_batch(&conn, id))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let payments = payment_ids
-        .iter()
-        .map(|id| inspect_payment(&conn, id))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let batches = inspect_batches(&conn, batch_ids)?;
+    let payments = inspect_payments(&conn, payment_ids)?;
     Ok(PaymentProcessorDbSnapshot { batches, payments })
 }
 
-fn inspect_batch(conn: &Connection, id: &str) -> anyhow::Result<PaymentBatchSnapshot> {
-    conn.query_row(
+fn inspect_batches(conn: &Connection, ids: &[String]) -> anyhow::Result<Vec<PaymentBatchSnapshot>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = sql_placeholders(ids.len());
+    let sql = format!(
         r#"
         SELECT
             id,
@@ -619,42 +622,74 @@ fn inspect_batch(conn: &Connection, id: &str) -> anyhow::Result<PaymentBatchSnap
             signed_tx_json IS NOT NULL,
             mined_height
         FROM payment_batches
-        WHERE id = ?1
-        "#,
-        params![id],
-        |row| {
-            Ok(PaymentBatchSnapshot {
-                id: row.get(0)?,
-                status: row.get(1)?,
-                retry_count: row.get(2)?,
-                error_message: row.get(3)?,
-                has_unsigned_tx: row.get::<_, i64>(4)? != 0,
-                has_signed_tx: row.get::<_, i64>(5)? != 0,
-                mined_height: row.get(6)?,
-            })
-        },
-    )
-    .with_context(|| format!("reading PP batch {id}"))
+        WHERE id IN ({placeholders})
+        "#
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(ids.iter()), |row| {
+        Ok(PaymentBatchSnapshot {
+            id: row.get(0)?,
+            status: row.get(1)?,
+            retry_count: row.get(2)?,
+            error_message: row.get(3)?,
+            has_unsigned_tx: row.get::<_, i64>(4)? != 0,
+            has_signed_tx: row.get::<_, i64>(5)? != 0,
+            mined_height: row.get(6)?,
+        })
+    })?;
+    let mut by_id = rows
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|batch| (batch.id.clone(), batch))
+        .collect::<BTreeMap<_, _>>();
+    ids.iter()
+        .map(|id| {
+            by_id
+                .remove(id)
+                .with_context(|| format!("reading PP batch {id}"))
+        })
+        .collect()
 }
 
-fn inspect_payment(conn: &Connection, id: &str) -> anyhow::Result<PaymentSnapshot> {
-    conn.query_row(
+fn inspect_payments(conn: &Connection, ids: &[String]) -> anyhow::Result<Vec<PaymentSnapshot>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = sql_placeholders(ids.len());
+    let sql = format!(
         r#"
         SELECT id, status, payment_batch_id, failure_reason
         FROM payments
-        WHERE id = ?1
-        "#,
-        params![id],
-        |row| {
-            Ok(PaymentSnapshot {
-                id: row.get(0)?,
-                status: row.get(1)?,
-                payment_batch_id: row.get(2)?,
-                failure_reason: row.get(3)?,
-            })
-        },
-    )
-    .with_context(|| format!("reading PP payment {id}"))
+        WHERE id IN ({placeholders})
+        "#
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(ids.iter()), |row| {
+        Ok(PaymentSnapshot {
+            id: row.get(0)?,
+            status: row.get(1)?,
+            payment_batch_id: row.get(2)?,
+            failure_reason: row.get(3)?,
+        })
+    })?;
+    let mut by_id = rows
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|payment| (payment.id.clone(), payment))
+        .collect::<BTreeMap<_, _>>();
+    ids.iter()
+        .map(|id| {
+            by_id
+                .remove(id)
+                .with_context(|| format!("reading PP payment {id}"))
+        })
+        .collect()
+}
+
+fn sql_placeholders(count: usize) -> String {
+    std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 impl PaymentProcessorClient {
@@ -739,13 +774,16 @@ pub fn build_fetch_command(cache_dir: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use crate::{
         config::Config,
         seeds::{WalletRole, material_from_seed},
     };
+    use rusqlite::{Connection, params};
     use tari_common_types::seeds::cipher_seed::CipherSeed;
 
-    use super::build_env;
+    use super::{build_env, inspect_payment_processor_db, payment_processor_db_path};
 
     #[test]
     fn pp_env_uses_private_view_key() {
@@ -762,5 +800,107 @@ mod tests {
             Some(&seed.private_view_key_hex)
         );
         assert!(env.vars.contains_key("CONSOLE_WALLET_PASSWORD"));
+    }
+
+    #[test]
+    fn inspect_pp_db_reads_requested_rows_in_input_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.paths.data_dir = dir.path().to_path_buf();
+        let db_path = payment_processor_db_path(&cfg);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        create_pp_snapshot_tables(&conn);
+        insert_batch(&conn, "batch-2", "CONFIRMED");
+        insert_batch(&conn, "batch-1", "FAILED");
+        insert_payment(&conn, "payment-2", "CONFIRMED", "batch-2");
+        insert_payment(&conn, "payment-1", "FAILED", "batch-1");
+
+        let snapshot = inspect_payment_processor_db(
+            &cfg,
+            &["batch-1".to_string(), "batch-2".to_string()],
+            &["payment-1".to_string(), "payment-2".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            snapshot
+                .batches
+                .iter()
+                .map(|batch| batch.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["batch-1", "batch-2"]
+        );
+        assert_eq!(
+            snapshot
+                .payments
+                .iter()
+                .map(|payment| payment.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["payment-1", "payment-2"]
+        );
+    }
+
+    #[test]
+    fn inspect_pp_db_reports_missing_requested_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.paths.data_dir = dir.path().to_path_buf();
+        let db_path = payment_processor_db_path(&cfg);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        create_pp_snapshot_tables(&conn);
+
+        let error = inspect_payment_processor_db(&cfg, &["missing-batch".to_string()], &[])
+            .expect_err("missing batch id must fail");
+
+        assert!(format!("{error:#}").contains("reading PP batch missing-batch"));
+    }
+
+    fn create_pp_snapshot_tables(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE payment_batches (
+                id TEXT PRIMARY KEY NOT NULL,
+                status TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                unsigned_tx_json TEXT,
+                signed_tx_json TEXT,
+                mined_height BIGINT
+            );
+            CREATE TABLE payments (
+                id TEXT PRIMARY KEY NOT NULL,
+                status TEXT NOT NULL,
+                payment_batch_id TEXT,
+                failure_reason TEXT
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn insert_batch(conn: &Connection, id: &str, status: &str) {
+        conn.execute(
+            r#"
+            INSERT INTO payment_batches (
+                id, status, retry_count, error_message, unsigned_tx_json, signed_tx_json, mined_height
+            )
+            VALUES (?1, ?2, 0, NULL, '{}', '{}', 42)
+            "#,
+            params![id, status],
+        )
+        .unwrap();
+    }
+
+    fn insert_payment(conn: &Connection, id: &str, status: &str, batch_id: &str) {
+        conn.execute(
+            r#"
+            INSERT INTO payments (id, status, payment_batch_id, failure_reason)
+            VALUES (?1, ?2, ?3, NULL)
+            "#,
+            params![id, status, batch_id],
+        )
+        .unwrap();
     }
 }

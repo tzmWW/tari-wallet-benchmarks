@@ -220,22 +220,25 @@ fn check_live_funds(
                     .join("old-wallet-console/esmeralda/data/wallet/db/console_wallet.db")
             }),
             mode1_required_unspent_outputs(config),
+            Some(config.a_fund()?.0),
         ),
         (
             "new_wallet",
             mode2_db.unwrap_or_else(|| config.modes.new_wallet_database.clone()),
             mode2_required_unspent_outputs(config),
+            Some(config.a_fund()?.0),
         ),
         (
             "payment_processor",
             payment_receiver_db
                 .unwrap_or_else(|| config.paths.data_dir.join("payment-receiver/wallet.db")),
             mode3_required_unspent_outputs(config),
+            Some(config.a_fund()?.0),
         ),
     ];
 
     let mut errors = Vec::new();
-    for (label, db_path, required_unspent) in checks {
+    for (label, db_path, required_unspent, required_value) in checks {
         if !db_path.exists() {
             errors.push(format!(
                 "{label}: wallet DB missing at {}; fund/scan this wallet before live run",
@@ -261,6 +264,14 @@ fn check_live_funds(
             errors.push(format!(
                 "{label}: only {} spendable outputs, require at least {required_unspent} for configured live shape",
                 totals.spendable_count
+            ));
+        }
+        if let Some(required_value) = required_value
+            && totals.spendable_value < required_value
+        {
+            errors.push(format!(
+                "{label}: only {} spendable µT, require at least {required_value} µT for configured A_fund",
+                totals.spendable_value
             ));
         }
         if !totals.pending_rows.is_empty() {
@@ -290,9 +301,11 @@ fn check_live_funds(
 
 fn output_status_summary(db_path: &Path) -> anyhow::Result<Vec<OutputStatusSummary>> {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare(
-        "SELECT CAST(status AS TEXT), count(*), coalesce(sum(value), 0) FROM outputs GROUP BY status ORDER BY CAST(status AS TEXT)",
-    )?;
+    let active_filter = active_output_filter(&conn)?;
+    let sql = format!(
+        "SELECT CAST(status AS TEXT), count(*), coalesce(sum(value), 0) FROM outputs {active_filter} GROUP BY status ORDER BY CAST(status AS TEXT)"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map([], |row| {
             Ok(OutputStatusSummary {
@@ -303,6 +316,23 @@ fn output_status_summary(db_path: &Path) -> anyhow::Result<Vec<OutputStatusSumma
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+fn active_output_filter(conn: &Connection) -> anyhow::Result<&'static str> {
+    let mut stmt = conn.prepare("PRAGMA table_info(outputs)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.iter().any(|column| column == "deleted_at") {
+        Ok("WHERE deleted_at IS NULL")
+    } else if columns
+        .iter()
+        .any(|column| column == "marked_deleted_at_height")
+    {
+        Ok("WHERE marked_deleted_at_height IS NULL")
+    } else {
+        Ok("")
+    }
 }
 
 fn fund_status_totals(summary: &[OutputStatusSummary]) -> FundStatusTotals {
@@ -501,6 +531,82 @@ mod tests {
             ]
         );
         assert!(totals.unknown_rows.is_empty());
+    }
+
+    #[test]
+    fn sqlite_fund_summary_ignores_deleted_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let minotari_db = dir.path().join("minotari-wallet.db");
+        let conn = Connection::open(&minotari_db).unwrap();
+        conn.execute(
+            "CREATE TABLE outputs (status TEXT, value INTEGER, deleted_at INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outputs (status, value, deleted_at) VALUES ('UNSPENT', 100, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outputs (status, value, deleted_at) VALUES ('LOCKED', 200, 123)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let console_db = dir.path().join("console-wallet.db");
+        let conn = Connection::open(&console_db).unwrap();
+        conn.execute(
+            "CREATE TABLE outputs (status INTEGER, value INTEGER, marked_deleted_at_height INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outputs (status, value, marked_deleted_at_height) VALUES (0, 300, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outputs (status, value, marked_deleted_at_height) VALUES (2, 400, 456)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let minotari_totals = fund_status_totals(&output_status_summary(&minotari_db).unwrap());
+        assert_eq!(minotari_totals.spendable_count, 1);
+        assert_eq!(minotari_totals.spendable_value, 100);
+        assert!(minotari_totals.pending_rows.is_empty());
+
+        let console_totals = fund_status_totals(&output_status_summary(&console_db).unwrap());
+        assert_eq!(console_totals.spendable_count, 1);
+        assert_eq!(console_totals.spendable_value, 300);
+        assert!(console_totals.pending_rows.is_empty());
+    }
+
+    #[test]
+    fn fund_preflight_rejects_insufficient_spendable_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_db = dir.path().join("old-wallet.db");
+        let new_db = dir.path().join("new-wallet.db");
+        let pp_db = dir.path().join("payment-receiver.db");
+        write_outputs_db(&old_db, "TEXT", &[("UNSPENT", 1, 1_000_000)]);
+        write_outputs_db(&new_db, "TEXT", &[("UNSPENT", 1, 10_000_000)]);
+        write_outputs_db(&pp_db, "TEXT", &[("UNSPENT", 1, 9_000_000)]);
+
+        let mut config = Config::default();
+        config.benchmark.a_fund = "10 T".to_string();
+
+        let error = check_live_funds(&config, Some(old_db), Some(new_db), Some(pp_db))
+            .expect_err("short spendable value must fail fund preflight");
+        assert!(
+            format!("{error:#}")
+                .contains("old_wallet: only 1000000 spendable µT, require at least 10000000 µT")
+        );
+        assert!(format!("{error:#}").contains(
+            "payment_processor: only 9000000 spendable µT, require at least 10000000 µT"
+        ));
     }
 
     #[test]

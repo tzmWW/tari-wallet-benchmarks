@@ -160,3 +160,44 @@ not-stored, or unknown outputs.
 The final submission rerun should use `concurrent_batches = [8, 16, 32, 64, 128]`,
 `repetitions = 1`, `scan_repetitions = 1`, `live_fresh_scan_cells = true`, and
 all live caps at `0` unless stateful live repetitions are implemented and funded.
+
+## 2026-07-01 Interrupted Final Rerun Findings
+
+Two final-run attempts were intentionally stopped during Mode 1 fresh scan
+coverage and must not be promoted as submission baselines:
+
+- `logs/final-live-clean-20260701T024039Z.log` proved the required Mode 1 S1
+  no-cap shape through the full doubling/fan-out path. The final fan-out
+  submitted all `64` `CoinSplit` transactions successfully and verified
+  `64/64`, then entered `old_wallet/S2` genesis recovery.
+- During that first attempt, the Mode 1 S2 recovery console wallet repeatedly
+  hit public Esmeralda base-node request failures, restarted from nearby scan
+  checkpoints, and eventually sat idle around block `364823` of roughly
+  `722484`. The harness was blocked waiting on an unbounded gRPC `get_state`
+  call and did not reach its own startup timeout.
+- The harness was hardened after this finding: Mode 1 fresh-scan state polling
+  now wraps `get_state` in a bounded `10s` timeout, and also fails a scan cell
+  after `timeouts.scan_batch_secs` with no scanned-height progress. The intended
+  result is an explicit failed S2 repetition rather than another hung run.
+- `logs/final-live-clean-rerun-20260701T105707Z.log` again submitted and
+  verified the full Mode 1 S1 fan-out (`64/64`), then entered `old_wallet/S2`.
+  The scan was manually interrupted instead of waiting hours for another
+  genesis recovery pass. It is useful operational evidence, not a final profile.
+
+The active `harness.toml` is still set up for the required full uncapped/ramped
+run: `concurrent_batches = [8, 16, 32, 64, 128]`, `repetitions = 1`,
+`scan_repetitions = 1`, `live_fresh_scan_cells = true`, and all live caps are
+`0`. As of the post-interruption check, no benchmark or minotari child processes
+were left running, and `preflight --check-funds` passed on the active final
+wallet paths:
+
+- Mode 1 final console wallet: `0(Unspent):759:10727996113`.
+- Mode 2 final wallet: `SPENT|764|30896757960`, `UNSPENT|778|10565612275`.
+- PP final receiver: `SPENT|138|9660000000`, `UNSPENT|151|10005737635`.
+
+This means the repository is operationally ready to start another full live
+uncapped attempt, but the active final DBs are no longer pristine starting-state
+evidence. For a strict submission-clean rerun, take fresh backups immediately
+before running, include the passing preflight output in the audit trail, and
+consider whether Mode 1 S2/S3 genesis scans should be run as a separate
+submission evidence pass if the public Esmeralda HTTP path remains unstable.
