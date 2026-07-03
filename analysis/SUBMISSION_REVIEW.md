@@ -56,8 +56,9 @@ This is the final status review for
   current-status run that surfaces wallet pain.
 - Live stateful send paths currently emit one repetition per scenario. Do not
   claim three-repetition statistics until those loops are implemented and funded.
-- Post-run wallet DBs are mutated. Another submission run must restore the
-  July 2 pre-run backup or fund fresh seeds and pass `preflight --check-funds`.
+- Post-run wallet DBs are mutated, and the July 2 pre-run backup is no longer a
+  safe restore source after recoup attempts touched it. Another submission run
+  must fund fresh seeds and pass `preflight --check-funds`.
 - Cleanup and recoup work must never delete useful proof artifacts or stage
   ignored secrets/DBs/logs.
 

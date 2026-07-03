@@ -140,3 +140,45 @@ Before starting the next full live uncapped test:
 
 Do not reuse `.bench-data/_backups/pre-nocaps-20260629T230200Z` as live state;
 it remains starting-state evidence for the older no-cap run only.
+
+## 2026-07-03 Final-submit Prep
+
+The July 2/3 local-node baseline remains the current committed evidence, but the
+active final-local wallets are not reusable for another submission run:
+
+- Active Mode 1 final console wallet:
+  `0(Unspent):2:9996997035`, which is two outputs and slightly below `A_fund`.
+- Active Mode 2 final wallet:
+  `LOCKED|1|10000000000`.
+- Active PP receiver:
+  `LOCKED|1|9989995275`, `SPENT|5|49979990550`.
+
+`preflight --check-funds` fails on those paths, as intended. The July 2 pre-run
+backup is also no longer a clean restore source for final-submit prep. The remote
+recoup pass submitted sweeps from the backup Mode 2 and PP DBs, and current
+base-node queries report those backup sweep txs as `NotStored`; the local backup
+rows should be treated as stale wallet-state evidence, not spendable run state.
+
+Current node health is good for a future run: local `http://127.0.0.1:18142`
+matched the public Esmeralda tip at height `729012`, `is_synced=true`,
+`pruning_horizon=0`, and local node status showed `Banned: 0`. The July 2
+funding block hash remained queryable locally and returned height `725415` with
+5 outputs.
+
+Current treasury evidence is still insufficient for a fresh final run. Current
+base-node queries confirm only these treasury-bound recoveries:
+`11702729777062395322`, `15314222783538071776`, `9289358583519146549`,
+`9752040590455831295`, and `15512637359623282638`, totaling
+`13195.039400 T`. The four small sweep attempts and the two backup sweep
+attempts are `NotStored` at tip `729013`. A fresh supported treasury scan still
+stopped below the sweep heights at `max_height=722300` and detected zero
+spendable outputs.
+
+Fresh final-submit seed material was generated in
+`.secrets/final-submit-20260703T224503Z.env`, with public addresses and exact
+post-funding steps recorded in
+`.bench-data/final-submit-20260703T224503Z/RUN_PREP.md`. The next final run must
+fund those fresh addresses with exactly one `10000 T` output each, record the
+new funding tx ids/heights in the ignored `harness.toml`, and pass strict
+`preflight --check-funds` before creating a new pre-run backup and starting the
+uncapped profile.

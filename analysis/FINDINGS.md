@@ -169,11 +169,11 @@ the required doubling/fan-out round shape. S4 and S5 remain single-recipient
 sends because that is their scenario shape.
 
 Post-run funds are not ready for another no-cap attempt. The current baseline
-mutated `.bench-data/final-local-20260702T151225Z`. Another final run must
-restore `.bench-data/_backups/pre-final-local-20260702T221606Z/final-local-20260702T151225Z`
-or fund fresh seeds, then require `preflight --check-funds` to pass with exactly
-one spendable `A_fund` output per mode and no locked, pending, invalid,
-cancelled, not-stored, or unknown outputs.
+mutated `.bench-data/final-local-20260702T151225Z`, and later recoup attempts
+touched the July 2 pre-run backup, so that backup is historical evidence only.
+Another final run must fund fresh seeds, then require `preflight --check-funds`
+to pass with exactly one spendable `A_fund` output per mode and no locked,
+pending, invalid, cancelled, not-stored, or unknown outputs.
 
 The final submission rerun shape remains `concurrent_batches = [8, 16, 32, 64, 128]`,
 `repetitions = 1`, `scan_repetitions = 1`, `live_fresh_scan_cells = true`, and

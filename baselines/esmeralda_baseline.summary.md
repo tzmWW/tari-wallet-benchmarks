@@ -111,8 +111,8 @@ Only mined transactions that reached `C_min` depth are emitted in
 
 ## Next Run Requirements
 
-Another final run must restore the clean pre-run backup at
-`.bench-data/_backups/pre-final-local-20260702T221606Z/final-local-20260702T151225Z`
-or fund fresh seeds, then pass `preflight --check-funds` with exactly one
-spendable `A_fund` output per mode and no locked, pending, invalid, cancelled,
-not-stored, or unknown outputs.
+Another final run must fund fresh seeds, then pass `preflight --check-funds`
+with exactly one spendable `A_fund` output per mode and no locked, pending,
+invalid, cancelled, not-stored, or unknown outputs. Do not use the July 2 pre-run
+backup as live restore state; later recoup attempts touched those backup DBs, so
+they are historical evidence only.

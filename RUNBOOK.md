@@ -261,6 +261,13 @@ mode3_live_max_s4_batch = 0
 mode3_live_max_s5_items = 0
 ```
 
+The July 2 pre-run backup
+`.bench-data/_backups/pre-final-local-20260702T221606Z/final-local-20260702T151225Z`
+is historical starting-state evidence only. Later recoup attempts touched the
+backup Mode 2 and PP DBs, so another final submission run must use freshly funded
+seed material rather than restoring that backup as live state. The current fresh
+prep artifact is `.bench-data/final-submit-20260703T224503Z/RUN_PREP.md`.
+
 Long live runs also write checkpoint profiles next to the requested profile path,
 for example `baselines/esmeralda_baseline.old_wallet.json`,
 `baselines/esmeralda_baseline.new_wallet.json`,
