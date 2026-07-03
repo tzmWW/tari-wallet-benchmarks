@@ -41,6 +41,13 @@ fn schema_command_writes_json() {
             .iter()
             .any(|key| key == "funding")
     );
+    assert!(
+        json["required_top_level_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key == "computed_deltas")
+    );
 }
 
 #[test]

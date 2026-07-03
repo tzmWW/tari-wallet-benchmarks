@@ -25,8 +25,9 @@ scripts/fetch-payment-processor.sh .bench-cache
 cargo build --release --all-features
 ```
 
-Build or copy the matching `minotari_console_wallet` and `minotari` binaries into
-`tools/`, or edit `[paths]` in `harness.toml` to point at your binaries.
+The Minotari fetch script builds matching `minotari`, `minotari_console_wallet`,
+and `minotari_node` binaries into `tools/`. If you supply your own binaries,
+edit `[paths]` in `harness.toml` to point at them.
 
 ## Generate wallet addresses
 
@@ -46,29 +47,30 @@ Git. Do not commit it.
 
 ## Fund wallets
 
-Fund each generated address with at least `A_fund` from `harness.toml`
-(`10000 T` by default). Funding is intentionally outside the measured benchmark.
-Wait until the funding output has at least `C_min` confirmations.
+For a submission-clean run, fund each generated address with exactly one
+spendable `A_fund` output from `harness.toml` (`10000 T` by default). Funding is
+intentionally outside the measured benchmark. Wait until the funding output has
+at least `C_min` confirmations.
 
 After funding, record each tx in `[funding.<mode>]` in `harness.toml` with the
 amount, transaction id, and block height. These fields are written to result
 profiles as public benchmark inputs.
 
 Before starting live spend cells, audit spendability rather than trusting a
-single balance display. Query output-status totals in the wallet DB and confirm
-there are enough `UNSPENT` outputs for the planned S1/S4/S5 cells:
+single balance display. `preflight --check-funds` and S0 are intentionally strict
+for final profiles: one spendable output and available balance exactly equal to
+`A_fund`. Extra spendable outputs, locked outputs, pending rows, invalid rows, or
+unknown statuses mean the starting state is not submission-clean.
+
+You can inspect raw output-status totals while debugging:
 
 ```sh
 sqlite3 .bench-data/new-wallet-fresh-proof/wallet.db \
   "select status, count(*), coalesce(sum(value), 0) from outputs group by status;"
 ```
 
-The original Mode 2 DB can be polluted by locked/spent proof state. For
-fresh-funded Mode 2 evidence, prefer an ignored fresh DB/seed, back it up before
-rescan/reset work, and fund several independent small UTXOs instead of one large
-input. In the promoted V5 proof, `.bench-data/new-wallet-fresh-proof/wallet.db`
-matched `HARNESS_SEED_NEW_FRESH` and six independent `0.09 T` funding outputs
-mined at height `711302` were enough to run capped S1, S4, and S5 in one profile.
+The original Mode 2 DB can be polluted by locked/spent proof state. For final
+evidence, prefer a fresh seed and fresh DB backed up immediately before the run.
 If the scanner stalls just before the funding height, advance the backed-up
 ignored DB with supported short rescan/scan steps rather than editing wallet DB
 state by hand.
@@ -86,8 +88,9 @@ wallets before starting the profile. Avoid copying old console-wallet DBs with
 historical unmined/rejected rows into a new run directory; fund a fresh Mode 1
 seed and confirm the recipient wallet sees the mined output instead.
 
-For recovered minotari signing wallets, the harness can create multi-output
-one-sided funding transactions without using the benchmark scenario path:
+For development proofs or recoup work, recovered minotari signing wallets can
+create multi-output one-sided funding transactions without using the benchmark
+scenario path:
 
 ```sh
 source .secrets/seeds.env
@@ -95,14 +98,37 @@ cargo run --features live-minotari -- fund-one-sided \
   --config harness.toml \
   --source-db .bench-data/recovered-source/wallet.db \
   --recipient f2... \
+  --recipient f2... \
   --amount "70 T" \
   --outputs 150 \
   --batch-size 50
 ```
 
-This is an operator funding tool, not a measured benchmark step. Wait for the
-submitted funding transactions to mine and reach `C_min`, scan the recipient DB,
-then run `preflight --check-funds` before starting a benchmark profile.
+This is an operator funding tool, not a measured benchmark step. Do not use it to
+pre-partition the final benchmark starting state; the final profile should begin
+from one `A_fund` UTXO per mode and let wallet lock contention show up naturally.
+Wait for submitted funding transactions to mine and reach `C_min`, scan the
+recipient DB, then run `preflight --check-funds` before starting a benchmark
+profile.
+
+`fund-one-sided` accepts repeated `--recipient` values for controlled recoup or
+setup sweeps. Keep those uses in ignored operator manifests; do not encode them
+as benchmark scenario behavior.
+
+Two live-only diagnostics are also available for recovery and audit work:
+
+```sh
+cargo run --features live-minotari -- recover-mode1-wallet --config harness.toml
+
+cargo run --features live-minotari -- query-tx \
+  --config harness.toml \
+  --db .bench-data/final-local-20260702T151225Z/new-wallet/wallet.db \
+  --tx-id 7094477815543133352
+```
+
+`recover-mode1-wallet` performs a supported console-wallet recovery path for the
+configured Mode 1 wallet. `query-tx` prints wallet DB status plus independent
+base-node transaction-query evidence for a Mode 2 transaction id.
 
 ## Preflight
 
@@ -116,11 +142,50 @@ cargo run -- preflight --config harness.toml --check-funds
 Preflight validates the Esmeralda-only guard, seed material, wallet password env,
 and local binary paths. It prints the PP build command if the PP binary is
 missing. With `--check-funds`, it also audits wallet DB output-status totals and
-fails if configured live wallets do not have enough spendable outputs or if
-pending, encumbered, invalid, cancelled, not-stored, or unknown outputs are
-present. Text minotari statuses and numeric console-wallet statuses are printed
-with labels. Use `--mode1-db`, `--mode2-db`, and `--payment-receiver-db` to audit
-recovered DBs before updating `harness.toml`.
+fails unless each configured live wallet has exactly one spendable output with
+value exactly equal to `A_fund`, and no pending, encumbered, invalid, cancelled,
+not-stored, or unknown outputs. Text minotari statuses and numeric console-wallet
+statuses are printed with labels. Use `--mode1-db`, `--mode2-db`, and
+`--payment-receiver-db` to audit recovered DBs before updating `harness.toml`.
+
+## Local Base Node
+
+Final evidence should prefer a local synced Esmeralda base node over the public
+RPC endpoint. `get_tip_info.is_synced=true` is not sufficient by itself: a local
+node can report synced while stale if seed peers are banned or marked offline.
+Compare the local height with a public tip and prove the funding block is
+queryable locally before starting the benchmark.
+
+The local node path that produced the July 2026 baseline used
+`.bench-data/local-base-node-54` and HTTP wallet-query service
+`http://127.0.0.1:18142`. If sync stalls with peer bans or `NetworkSilence`, run
+the maintenance commands with the same base path:
+
+```sh
+tools/minotari_node -b .bench-data/local-base-node-54 \
+  --network esmeralda --non-interactive-mode --disable-splash-screen \
+  --watch "unban-all-peers"
+
+tools/minotari_node -b .bench-data/local-base-node-54 \
+  --network esmeralda --non-interactive-mode --disable-splash-screen \
+  --watch "reset-offline-peers"
+```
+
+Then restart the node with explicit Esmeralda TCP seed peers, `base_node.use_libtor=false`,
+`base_node.http_wallet_query_service.port=18142`, long blockchain-sync RPC
+deadlines, short ban durations, and `base_node.storage.pruning_horizon=0`.
+Avoid `-b .bench-data/local-base-node-54/esmeralda`; that creates a nested
+`esmeralda/esmeralda` data directory.
+
+Local funding proof for the July 2026 baseline used funding tx
+`5740188747787224553` at height `725415`, header hash
+`84821095ce94cf98a88932bb287bcb09f0a641d48ab29f70663481fff4addbf2`. A local
+proof query should return the funding outputs:
+
+```sh
+curl -fsS \
+  "http://127.0.0.1:18142/get_utxos_by_block?header_hash=84821095ce94cf98a88932bb287bcb09f0a641d48ab29f70663481fff4addbf2"
+```
 
 ## Run
 
@@ -170,11 +235,11 @@ passwords. Public addresses may appear in the profile.
 
 Current caveat: `benchmark.repetitions` is recorded in the config metadata, but
 the live stateful send implementations still record one observed repetition per
-scenario. The checked profile generated at `2026-06-29T23:04:13.700658Z` is
-no-cap send evidence with a partial S4 ramp (`concurrent_batches = [1]`), not the
-final reference baseline. Treat it as wallet-behavior evidence unless/until a
-rerun uses the full S4 ramp and enough funded UTXOs for the configured stateful
-shape.
+scenario. The local-node profile generated at `2026-07-02T22:16:39.401016Z` uses
+the full S4 ramp and no live caps. It is intentionally strict: send cells that hit
+single-UTXO pending-funds/PP contention are failed observations, and scan cells
+whose scanner DB height did not reach the local tip within `C_min` blocks are
+failed observations rather than silently treated as successful scans.
 
 Before the final submission rerun, set the live config to the full reference S4
 ramp and one stateful repetition unless live repetition loops have been funded
@@ -210,11 +275,16 @@ addresses must be funded again before `preflight --check-funds` can pass.
 
 Implementation note: the committed harness currently writes the full result
 profile shape and can exercise Mode 2 plus PP companion fresh scan paths when
-`live_fresh_scan_cells` is enabled. The `[benchmark].scan_batch_size` setting
-controls how many blocks each HTTP scan request fetches; larger values make
-full-chain scan cells practical on Esmeralda. These fresh scan cells deliberately
-wipe their local databases per repetition, so they are long-running and print
-per-cell progress while they execute.
+`live_fresh_scan_cells` is enabled. Mode 2 and PP companion scan cells use the
+pinned minotari HTTP scanner, which can return from a full-chain scan with a DB
+height far below the base-node tip because of an upstream downloader/processor
+completion race. The harness therefore records `tip_lag_blocks`,
+`tip_lag_tolerance_blocks`, and `scan_reached_tip`, and marks the scan failed if
+`max_height + C_min < tip_end`. `scan_to_tip` uses bounded partial scan chunks to
+improve progress before recording the observation, but a below-tip scan remains a
+failed benchmark measurement. These fresh scan cells deliberately wipe their
+local databases per repetition, so they are long-running and print per-cell
+progress while they execute.
 
 Fresh scan cells are checkpointed against actual scenario progress. B0 uses an
 empty genesis seed before spends. S2/S3 run only after an S1 checkpoint exists;
@@ -255,14 +325,15 @@ the next benchmark send.
 Mode 1 S1 follows the spec round shape: six doubling rounds and one fan-out
 round, capped only by `mode1_live_max_s1_txs` for development runs. Between
 planned spend rounds the harness waits for chain/scanner height advancement;
-this is a settlement gate, not a retry. The one narrow transient retry is a
-console-wallet gRPC submit that returns `database is locked` before a tx id
-exists; those retries are capped and recorded as `db_lock_retries` in Mode 1
-metrics. S5 uses deterministic distinct Esmeralda recipients and records both
-batch-shaped and individual-shaped arms. If earlier S1/S4 sends have locked the
-single large funded UTXO or change output, S5 can fail with
-`Funds are still pending`; that is recorded as wallet behavior rather than
-retried or hidden.
+this is a settlement gate, not a retry. The one narrow transient retry remains
+only in S1 `CoinSplit` when the console-wallet gRPC submit returns `database is
+locked` before a tx id exists; those retries are capped and recorded as
+`db_lock_retries` in Mode 1 metrics. S4 and S5 `Transfer` submissions do not
+retry database-lock, pending-funds, or construction errors. S5 uses deterministic
+distinct Esmeralda recipients and records both batch-shaped and individual-shaped
+arms. If earlier S1/S4 sends have locked the single large funded UTXO or change
+output, S5 can fail with `Funds are still pending`; that is recorded as wallet
+behavior rather than retried or hidden.
 
 When `mode2_live_scenarios` is enabled, the harness records Mode 2 S1, S4, and
 S5 through the direct minotari crate path:
@@ -302,11 +373,10 @@ payment id/payref, fee, query location, mined height, tip height, and query
 errors remain in per-repetition metrics. Pending, mempool-only, timeout, and
 query-failed cases are observations, not confirmed chain evidence.
 
-For fresh-funded Mode 2 evidence, fund several independent small UTXOs when you
-need S1, S4, and S5 in the same run. A single fresh UTXO can prove S1 send-side
-construction/broadcast, but S1 may lock the only spendable input before S4/S5
-begin. If that happens, S4/S5 should remain funding-state failures in the
-profile rather than being retried against synthetic wallet state.
+For final Mode 2 evidence, start from the spec's single `A_fund` UTXO and let any
+locked-change behavior surface in S4/S5. Development runs can use additional
+funded UTXOs to prove plumbing, but those profiles should be labeled as
+non-final because they do not match the benchmark starting state.
 
 The V5 capped proof used `mode2_scenario_amount = "0.02 T"` and one live S1, S4,
 and S5 attempt against six small fresh UTXOs. That produced confirmed
@@ -334,9 +404,9 @@ status before recording the cell; `AWAITING_CONFIRMATION` and signed-but-not-yet
 confirmed batches are not counted as done. With a single large funded UTXO, the
 first signed/broadcast PP batch can lock the wallet change while it waits for
 confirmation, and later PP batches may remain `PENDING_BATCHING` with worker logs
-reporting insufficient available funds. For an uncapped PP run, fund many
-independent outputs rather than one large output. The 2026-06-25 prep funded the
-fresh PP seed with 150 confirmed `70 T` one-sided outputs for this reason.
+reporting insufficient available funds. That is valid benchmark signal for the
+spec's single-UTXO starting state. Multi-output PP funding is useful for capped
+development proofs, not for the final reference profile.
 
 PP has no direct scan API. When `live_fresh_scan_cells=false`, PP scan-shape
 cells are marked `not_applicable`; when enabled, those cells measure the
@@ -356,9 +426,13 @@ S4 serialization gaps, S5 recipient shape, observed-but-unconfirmed DB rows, and
 confirmed chain-verification rows with amount/fee/mined-height fields when the
 wallet surface exposes them. It also allows verification-source notes,
 base-node query observations, scan checkpoints, birthdays, tip start/end,
-blocks scanned per second, detected outputs, and available balance observations.
-Environment capture includes OS, CPU, memory, disk kind/name, base-node host,
-and whether the base-node path is local or remote.
+tip-lag validation, blocks scanned per second, detected outputs,
+spendable-output checks, scan peak RSS/CPU, strict S0 observations, per-tx timing
+observations, balance reconciliation deltas, and S5 per-arm metrics. The top-level
+`computed_deltas` section derives scan deltas and S5 throughput ratios from those
+scenario metrics.
+Environment capture includes OS, CPU, memory, disk kind/name, base-node host, and
+whether the base-node path is local or remote.
 
 ## Verification Gates
 

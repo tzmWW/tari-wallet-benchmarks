@@ -17,18 +17,22 @@ live runs, supports `preflight --check-funds` for wallet DB UTXO audits, and
 separates the configured send repetition count from long fresh-scan repetitions
 via `scan_repetitions`. Current live stateful send cells still emit one observed
 repetition per scenario. It also includes `fund-one-sided` for operator-controlled
-multi-output Esmeralda funding from a recovered minotari signing wallet. Mode 2
-submitted transactions are independently queried through the public base-node
+Esmeralda funding from a recovered minotari signing wallet; the final benchmark
+starting state should still be one clean `A_fund` UTXO per mode. Mode 2 submitted
+transactions are independently queried through the public base-node
 `/transactions` endpoint by extracting kernel signature data from the wallet DB's
 serialized transaction. Top-level chain verification rows are emitted only for
-mined transactions that are at least `C_min` deep. Fresh scan cells are
+mined transactions that are at least `C_min` deep. Result profiles include
+computed scan/S5 deltas, strict S0 checks, scan resource peaks, per-scenario
+balance reconciliation, and S5 per-arm metrics. Fresh scan cells are
 checkpointed: B0 uses an empty genesis seed, S2/S3 run after a valid S1
 checkpoint, and S6/S7 run after S5. Mode 1 scan cells use real
 `minotari_console_wallet --recovery`; Mode 2 and PP companion scans use fresh
-minotari scanner databases. The checked baseline is no-cap send evidence with a
-partial S4 ramp (`concurrent_batches = [1]`); it records real Mode 1 and Mode 2
-pending-funds failures rather than hiding them, but it is not the final reference
-baseline for the bounty.
+minotari scanner databases. The checked baseline is the July 2 local-node
+profile with the full S4 ramp (`concurrent_batches = [8, 16, 32, 64, 128]`),
+all live caps at `0`, and strict scan-tip validation. It records real
+pending-funds, locked-change, PP contention, and below-tip scanner failures
+rather than hiding them.
 
 Start by generating fundable addresses:
 
@@ -39,7 +43,11 @@ export HARNESS_WALLET_PW='replace-with-a-long-local-password'
 cargo run -- addresses --config harness.toml --out .secrets/seeds.env
 ```
 
-Then fund the printed addresses on Esmeralda, run `preflight`, and execute the baseline run:
+The fetch script installs `tools/minotari`, `tools/minotari_console_wallet`, and
+`tools/minotari_node` from the pinned source revisions.
+
+Then fund each printed address with one clean `A_fund` Esmeralda UTXO, run
+`preflight`, and execute the baseline run:
 
 ```sh
 source .secrets/seeds.env
@@ -53,10 +61,9 @@ Full operator detail is in [RUNBOOK.md](RUNBOOK.md).
 The committed baseline JSON is schema-valid harness output and deliberately
 contains no secrets. It includes final funding evidence, all live topology flags,
 no live caps, the fresh-scan matrix, independent Mode 2 base-node transaction
-queries, and confirmed PP chain evidence from the partial S4-ramp run. It is not
-an all-ok, complete S4-reference, or three-repetition statistical baseline:
-current live stateful send paths record one repetition, and the no-cap Mode 1/2
-runs expose wallet pending-funds behavior in the result profile. A final
-submission rerun still needs `concurrent_batches = [8, 16, 32, 64, 128]`,
-`repetitions = 1`, all live caps at `0`, and clean spendable Mode 1, Mode 2, and
-PP wallets.
+queries, confirmed chain evidence, and top-level `computed_deltas`. It is not an
+all-ok or three-repetition statistical baseline: current live stateful send paths
+record one repetition, and the no-cap run exposes wallet pending-funds behavior,
+PP contention, and below-tip scanner results in the profile. A rerun should
+restore the clean pre-run backup or fund fresh seeds, then pass
+`preflight --check-funds` before spending.

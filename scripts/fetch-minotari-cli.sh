@@ -5,6 +5,7 @@ CACHE_DIR="${1:-.bench-cache}"
 TOOLS_DIR="${2:-tools}"
 MINOTARI_REV="360c4848a54d65fd710266233cc9277b0f785e74"
 TARI_CONSOLE_WALLET_REV="9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
+TARI_NODE_REV="v5.4.0-pre.6"
 MINOTARI_DIR="${CACHE_DIR}/minotari-cli"
 TARI_DIR="${CACHE_DIR}/tari"
 
@@ -38,5 +39,14 @@ git -C "${TARI_DIR}" checkout "${TARI_CONSOLE_WALLET_REV}"
 
 cp "${TARI_DIR}/target/release/minotari_console_wallet" "${TOOLS_DIR}/minotari_console_wallet"
 
-printf 'installed minotari at %s and minotari_console_wallet at %s in %s\n' \
-  "${MINOTARI_REV}" "${TARI_CONSOLE_WALLET_REV}" "${TOOLS_DIR}"
+git -C "${TARI_DIR}" checkout "${TARI_NODE_REV}"
+
+(
+  cd "${TARI_DIR}"
+  cargo build --release --bin minotari_node
+)
+
+cp "${TARI_DIR}/target/release/minotari_node" "${TOOLS_DIR}/minotari_node"
+
+printf 'installed minotari at %s, minotari_console_wallet at %s, minotari_node at %s in %s\n' \
+  "${MINOTARI_REV}" "${TARI_CONSOLE_WALLET_REV}" "${TARI_NODE_REV}" "${TOOLS_DIR}"

@@ -142,6 +142,7 @@ pub async fn run_profile(
         }
     }
 
+    profile.refresh_computed_deltas();
     profile.write_atomic(profile_path)?;
     println!("wrote {}", profile_path.display());
     Ok(())
@@ -219,21 +220,21 @@ fn check_live_funds(
                     .data_dir
                     .join("old-wallet-console/esmeralda/data/wallet/db/console_wallet.db")
             }),
-            mode1_required_unspent_outputs(config),
-            Some(config.a_fund()?.0),
+            1,
+            config.a_fund()?.0,
         ),
         (
             "new_wallet",
             mode2_db.unwrap_or_else(|| config.modes.new_wallet_database.clone()),
-            mode2_required_unspent_outputs(config),
-            Some(config.a_fund()?.0),
+            1,
+            config.a_fund()?.0,
         ),
         (
             "payment_processor",
             payment_receiver_db
                 .unwrap_or_else(|| config.paths.data_dir.join("payment-receiver/wallet.db")),
-            mode3_required_unspent_outputs(config),
-            Some(config.a_fund()?.0),
+            1,
+            config.a_fund()?.0,
         ),
     ];
 
@@ -260,17 +261,15 @@ fn check_live_funds(
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        if totals.spendable_count < required_unspent {
+        if totals.spendable_count != required_unspent {
             errors.push(format!(
-                "{label}: only {} spendable outputs, require at least {required_unspent} for configured live shape",
+                "{label}: observed {} spendable outputs, require exactly {required_unspent} for the final benchmark starting state",
                 totals.spendable_count
             ));
         }
-        if let Some(required_value) = required_value
-            && totals.spendable_value < required_value
-        {
+        if totals.spendable_value != required_value {
             errors.push(format!(
-                "{label}: only {} spendable µT, require at least {required_value} µT for configured A_fund",
+                "{label}: observed {} spendable µT, require exactly {required_value} µT for configured A_fund",
                 totals.spendable_value
             ));
         }
@@ -394,56 +393,6 @@ fn output_status_label(status: &str) -> &'static str {
 
 fn normalized_output_status(status: &str) -> String {
     status.trim().to_ascii_uppercase()
-}
-
-fn mode1_required_unspent_outputs(_config: &Config) -> u64 {
-    1
-}
-
-fn mode2_required_unspent_outputs(config: &Config) -> u64 {
-    if !config.benchmark.mode2_live_scenarios {
-        return 1;
-    }
-    if config.benchmark.mode2_live_max_s1_txs == 0
-        && config.benchmark.mode2_live_max_s4_batch == 0
-        && config.benchmark.mode2_live_max_s5_txs == 0
-    {
-        return u64::from(
-            config
-                .benchmark
-                .volume_target
-                .saturating_div(config.benchmark.fanout_outputs_per_tx.max(1)),
-        )
-        .max(1);
-    }
-    u64::from(
-        config
-            .benchmark
-            .mode2_live_max_s1_txs
-            .max(config.benchmark.mode2_live_max_s4_batch)
-            .max(config.benchmark.mode2_live_max_s5_txs)
-            .max(1),
-    )
-}
-
-fn mode3_required_unspent_outputs(config: &Config) -> u64 {
-    if !config.benchmark.mode3_live_topology {
-        return 1;
-    }
-    if config.benchmark.mode3_live_max_s1_batches == 0
-        && config.benchmark.mode3_live_max_s4_batch == 0
-        && config.benchmark.mode3_live_max_s5_items == 0
-    {
-        return 150;
-    }
-    u64::from(
-        config
-            .benchmark
-            .mode3_live_max_s1_batches
-            .max(config.benchmark.mode3_live_max_s4_batch)
-            .max(config.benchmark.mode3_live_max_s5_items)
-            .max(1),
-    )
 }
 
 fn require_env(name: &str) -> anyhow::Result<String> {
@@ -586,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn fund_preflight_rejects_insufficient_spendable_value() {
+    fn fund_preflight_rejects_non_exact_final_starting_value() {
         let dir = tempfile::tempdir().unwrap();
         let old_db = dir.path().join("old-wallet.db");
         let new_db = dir.path().join("new-wallet.db");
@@ -599,13 +548,13 @@ mod tests {
         config.benchmark.a_fund = "10 T".to_string();
 
         let error = check_live_funds(&config, Some(old_db), Some(new_db), Some(pp_db))
-            .expect_err("short spendable value must fail fund preflight");
+            .expect_err("non-exact spendable value must fail fund preflight");
         assert!(
             format!("{error:#}")
-                .contains("old_wallet: only 1000000 spendable µT, require at least 10000000 µT")
+                .contains("old_wallet: observed 1000000 spendable µT, require exactly 10000000 µT")
         );
         assert!(format!("{error:#}").contains(
-            "payment_processor: only 9000000 spendable µT, require at least 10000000 µT"
+            "payment_processor: observed 9000000 spendable µT, require exactly 10000000 µT"
         ));
     }
 

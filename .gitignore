@@ -1,0 +1,22 @@
+.DS_Store
+target/
+
+# Local operator state and secrets
+.secrets/
+.bench-cache/
+.bench-data/
+harness.toml
+config/
+logs/
+tools/
+
+# Local planning and memory files
+KNOWLEDGE.md
+PLAN.md
+
+# Per-stage live-run checkpoint profiles. The final committed baseline remains
+# baselines/esmeralda_baseline.json plus its summary.
+baselines/esmeralda_baseline.old_wallet.json
+baselines/esmeralda_baseline.new_wallet.json
+baselines/esmeralda_baseline.fresh_scans.json
+baselines/esmeralda_baseline.payment_processor.json

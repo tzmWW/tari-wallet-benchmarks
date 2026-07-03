@@ -7,6 +7,10 @@
     "blocked_upstream",
     "not_applicable"
   ],
+  "computed_deltas_keys": [
+    "scan_deltas",
+    "s5_throughput"
+  ],
   "environment_fields": [
     "os",
     "cpu_brand",
@@ -31,7 +35,17 @@
       "blocks_scanned",
       "blocks_per_sec",
       "detected_outputs",
-      "available_microtari"
+      "spendable_outputs",
+      "available_microtari",
+      "peak_rss_bytes",
+      "peak_cpu_percent",
+      "expected_outputs",
+      "outputs_match_expected",
+      "expected_available_microtari",
+      "balance_matches_expected",
+      "tx_timings",
+      "balance_reconciliation",
+      "s5_arms"
     ],
     "description": "scenario-specific structured metrics; fields are optional and cells only emit values they observed",
     "verification_source_values": [
@@ -50,6 +64,7 @@
     "config",
     "funding",
     "modes",
+    "computed_deltas",
     "findings",
     "chain_verification"
   ],

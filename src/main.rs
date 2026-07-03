@@ -92,6 +92,33 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("scan-wallet requires --features live-minotari");
             }
         }
+        Command::RecoverMode1Wallet { config } => {
+            let config =
+                Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
+            enforce_esmeralda(&config)?;
+            #[cfg(feature = "live-minotari")]
+            {
+                wallet_bench::live_minotari::recover_mode1_console_wallet(&config).await?;
+            }
+            #[cfg(not(feature = "live-minotari"))]
+            {
+                anyhow::bail!("recover-mode1-wallet requires --features live-minotari");
+            }
+        }
+        Command::QueryTx { config, db, tx_id } => {
+            let config =
+                Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
+            enforce_esmeralda(&config)?;
+            #[cfg(feature = "live-minotari")]
+            {
+                wallet_bench::live_minotari::query_wallet_transaction(&config, &db, tx_id).await?;
+            }
+            #[cfg(not(feature = "live-minotari"))]
+            {
+                let _ = (db, tx_id);
+                anyhow::bail!("query-tx requires --features live-minotari");
+            }
+        }
         Command::Schema { out } => write_schema(&out)?,
     }
 

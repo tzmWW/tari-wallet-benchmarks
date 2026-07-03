@@ -45,8 +45,8 @@ pub enum Command {
         config: PathBuf,
         #[arg(long)]
         source_db: PathBuf,
-        #[arg(long)]
-        recipient: String,
+        #[arg(long, required = true)]
+        recipient: Vec<String>,
         #[arg(long)]
         amount: String,
         #[arg(long, default_value_t = 1)]
@@ -61,6 +61,18 @@ pub enum Command {
         db: PathBuf,
         #[arg(long)]
         seed_env: Option<String>,
+    },
+    RecoverMode1Wallet {
+        #[arg(long, default_value = "harness.toml")]
+        config: PathBuf,
+    },
+    QueryTx {
+        #[arg(long, default_value = "harness.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        tx_id: u64,
     },
     Schema {
         #[arg(long, default_value = "RESULT_PROFILE_SCHEMA.json")]

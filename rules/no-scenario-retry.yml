@@ -7,5 +7,11 @@ rule:
     - pattern: retry($$$ARGS)
     - pattern: RetryPolicy::$$$METHOD($$$ARGS)
     - pattern: $VALUE.retry($$$ARGS)
+    - pattern: |
+        loop {
+          match $CLIENT.transfer($$$ARGS).await {
+            $$$BODY
+          }
+        }
 files:
   - src/**/*.rs
