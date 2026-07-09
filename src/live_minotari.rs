@@ -78,19 +78,22 @@ pub async fn scan_wallet_db(
             db_path.display()
         );
     }
-    let wall_ms = scan_to_tip(
+    let scan_report = scan_to_tip(
         db_path,
         &wallet_password(&config.seeds.wallet_password_env)?,
         &config.network.base_node_http_url,
         config.benchmark.scan_batch_size,
         config.benchmark.c_min,
+        config.timeout(config.timeouts.scan_batch_secs),
     )
     .await?;
     let balance = account_balance(db_path)?;
     println!(
-        "scan-wallet db={} wall_ms={} balance={}",
+        "scan-wallet db={} wall_ms={} no_progress_attempts={} stopped_without_progress={} balance={}",
         db_path.display(),
-        wall_ms,
+        scan_report.wall_ms,
+        scan_report.no_progress_attempts,
+        scan_report.stopped_without_progress,
         balance
     );
     Ok(())
@@ -178,18 +181,22 @@ pub async fn annotate_profile_with_library_smoke(
         &config.network.base_node_http_url,
         config.benchmark.scan_batch_size,
         config.benchmark.c_min,
+        config.timeout(config.timeouts.scan_batch_secs),
     )
     .await
-    .and_then(|wall_ms| {
+    .and_then(|scan_report| {
         let balance = account_balance(db_path)?;
         let available = amount_field_as_microtari(&balance, "available")
             .with_context(|| format!("available balance missing from {balance}"))?;
         let expected = config.a_fund()?.0;
         let spendable_count = spendable_output_count(db_path).ok();
-        let (status, success_count, failure_count, error, metrics) =
+        let (status, success_count, failure_count, error, mut metrics) =
             strict_s0_status(expected, available, spendable_count);
+        if let serde_json::Value::Object(map) = &mut metrics {
+            scan_report.insert_metrics(map);
+        }
         Ok((
-            wall_ms,
+            scan_report.wall_ms,
             available,
             balance,
             status,
@@ -350,13 +357,18 @@ pub async fn scan_to_tip(
     base_url: &str,
     batch_size: u64,
     required_confirmations: u64,
-) -> anyhow::Result<u128> {
+    no_progress_timeout: Duration,
+) -> anyhow::Result<ScanToTipReport> {
     let start = std::time::Instant::now();
     let target_tip = base_node_tip_height(base_url).await?;
     let chunk_size = batch_size.clamp(1, 100);
     let mut last_height = account_snapshot(db_path)
         .map(|snapshot| snapshot.max_height)
         .unwrap_or_default();
+    let mut no_progress_since = None;
+    let mut no_progress_attempts = 0u64;
+    let mut stopped_without_progress = false;
+    let mut last_more_blocks = None;
 
     // Full scans can report completion before all downloaded batches are processed;
     // bounded partial scans force progress to be committed before each continuation.
@@ -379,17 +391,39 @@ pub async fn scan_to_tip(
         .run()
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+        last_more_blocks = Some(more_blocks);
 
         let current_height = account_snapshot(db_path)?.max_height;
         if current_height <= last_height {
+            no_progress_attempts = no_progress_attempts.saturating_add(1);
+            let first_no_progress = no_progress_since.get_or_insert_with(Instant::now);
+            let elapsed_without_progress = first_no_progress.elapsed();
             println!(
-                "wallet scan stopped without progress below tip: max_height={current_height} target_tip={target_tip} more_blocks={more_blocks}"
+                "wallet scan made no progress below tip: max_height={current_height} target_tip={target_tip} more_blocks={more_blocks} no_progress_attempts={no_progress_attempts} elapsed_without_progress_ms={}",
+                elapsed_without_progress.as_millis()
             );
-            break;
+            if elapsed_without_progress >= no_progress_timeout {
+                stopped_without_progress = true;
+                break;
+            }
+            let remaining = no_progress_timeout.saturating_sub(elapsed_without_progress);
+            let sleep_for = Duration::from_secs(10).min(remaining);
+            if !sleep_for.is_zero() {
+                settle_gate_pause(sleep_for).await;
+            }
+            continue;
         }
+        no_progress_since = None;
         last_height = current_height;
     }
-    Ok(start.elapsed().as_millis())
+    Ok(ScanToTipReport {
+        wall_ms: start.elapsed().as_millis(),
+        target_tip,
+        max_height: last_height,
+        no_progress_attempts,
+        stopped_without_progress,
+        last_more_blocks,
+    })
 }
 
 async fn annotate_fresh_scan_b0_cells(
@@ -973,6 +1007,22 @@ async fn run_mode1_send_cells(
             config.benchmark.mode1_live_max_s1_txs
         )],
     );
+    if !mode1_s1_complete(&s1) {
+        record_blocked_prerequisite_cells(
+            profile,
+            "old_wallet",
+            &[
+                ScenarioName::S2,
+                ScenarioName::S3,
+                ScenarioName::S4,
+                ScenarioName::S5,
+                ScenarioName::S6,
+                ScenarioName::S7,
+            ],
+            "S1",
+        );
+        return Ok(());
+    }
     if config.benchmark.live_fresh_scan_cells {
         let checkpoint = checkpoint_from_mode1_summary(&s1, ScanCheckpoint::PostS1);
         run_mode1_checkpoint_scan_cells(
@@ -1022,6 +1072,15 @@ async fn run_mode1_send_cells(
             config.benchmark.concurrent_batches, config.benchmark.mode1_live_max_s4_batch
         )],
     );
+    if !mode1_send_complete(&s4) {
+        record_blocked_prerequisite_cells(
+            profile,
+            "old_wallet",
+            &[ScenarioName::S5, ScenarioName::S6, ScenarioName::S7],
+            "S4",
+        );
+        return Ok(());
+    }
 
     let s5_recipients = derive_distinct_recipient_pool(config.benchmark.s5_m)?;
     let s5_balance_before = mode1_available_balance(&mut context.client).await.ok();
@@ -1137,8 +1196,18 @@ async fn run_mode1_s1(
                 "wall_ms": round_summary.wall_ms
             }),
         );
+        let round_complete = mode1_s1_complete(&round_summary);
+        if !round_complete {
+            if round_summary.failure_count == 0 {
+                round_summary.failure_count = round_summary.failure_count.saturating_add(1);
+            }
+            round_summary.errors.push(format!(
+                "mode1 S1 round {} did not reach confirmed status for all tx_ids; stopping subsequent S1 rounds",
+                round.round_index
+            ));
+        }
         total.add_batch(round.round_index, round_summary);
-        if total.failure_count > 0 {
+        if !round_complete || total.failure_count > 0 {
             break;
         }
     }
@@ -1570,8 +1639,7 @@ async fn verify_mode1_transactions(
                 fee_microtari: Some(info.fee),
                 mined_height: (info.mined_in_block_height > 0)
                     .then_some(info.mined_in_block_height),
-                confirmed: status_value == TX_MINED_CONFIRMED_STATUS
-                    || terminal_ok_status(status_value),
+                confirmed: terminal_ok_status(status_value),
             }
         })
         .collect())
@@ -1925,14 +1993,15 @@ fn record_mode1_transfer_summary(
     profile
         .chain_verification
         .verified_transactions
-        .extend(summary.tx_infos.clone());
+        .extend(summary.tx_infos.iter().filter(|tx| tx.confirmed).cloned());
     let Some(mode) = profile.modes.get_mut("old_wallet") else {
         return;
     };
     let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
         return;
     };
-    let verification_complete = summary.tx_ids.is_empty() || !summary.tx_infos.is_empty();
+    let verification_complete =
+        summary.tx_ids.is_empty() || summary.tx_infos.len() >= summary.tx_ids.len();
     let all_verified_ok = summary.tx_infos.iter().all(|tx| tx.confirmed);
     let status = if summary.failure_count == 0 && verification_complete && all_verified_ok {
         CellStatus::Ok
@@ -2102,6 +2171,22 @@ async fn annotate_mode2_live_scenarios(
                 .to_string(),
         ],
     );
+    if !mode2_summary_complete(&s1) {
+        record_blocked_prerequisite_cells(
+            profile,
+            "new_wallet",
+            &[
+                ScenarioName::S2,
+                ScenarioName::S3,
+                ScenarioName::S4,
+                ScenarioName::S5,
+                ScenarioName::S6,
+                ScenarioName::S7,
+            ],
+            "S1",
+        );
+        return Ok(());
+    }
     if config.benchmark.live_fresh_scan_cells {
         let checkpoint = checkpoint_from_mode2_summary(&s1, ScanCheckpoint::PostS1);
         run_library_checkpoint_scan_cells(
@@ -2161,6 +2246,15 @@ async fn annotate_mode2_live_scenarios(
                 .to_string(),
         ],
     );
+    if !mode2_summary_complete(&s4) {
+        record_blocked_prerequisite_cells(
+            profile,
+            "new_wallet",
+            &[ScenarioName::S5, ScenarioName::S6, ScenarioName::S7],
+            "S4",
+        );
+        return Ok(());
+    }
     if !s4.tx_ids.is_empty() {
         let note = wait_for_mode2_scan_advance(
             config,
@@ -2337,19 +2431,25 @@ async fn wait_for_mode2_scan_advance(
     let start = Instant::now();
     let mut attempts = 0u32;
     let mut total_scan_wall_ms = 0u128;
+    let mut total_scan_no_progress_attempts = 0u64;
+    let mut stopped_without_progress = false;
 
     loop {
         attempts = attempts.saturating_add(1);
-        let scan_wall_ms = scan_to_tip(
+        let scan_report = scan_to_tip(
             db_path,
             password,
             &config.network.base_node_http_url,
             config.benchmark.scan_batch_size,
             config.benchmark.c_min,
+            config.timeout(config.timeouts.scan_batch_secs),
         )
         .await
         .with_context(|| format!("mode2 settle gate {label} scan failed"))?;
-        total_scan_wall_ms = total_scan_wall_ms.saturating_add(scan_wall_ms);
+        total_scan_wall_ms = total_scan_wall_ms.saturating_add(scan_report.wall_ms);
+        total_scan_no_progress_attempts =
+            total_scan_no_progress_attempts.saturating_add(scan_report.no_progress_attempts);
+        stopped_without_progress |= scan_report.stopped_without_progress;
         let last_height = account_snapshot(db_path)
             .with_context(|| {
                 format!("mode2 settle gate {label} could not read wallet scan height")
@@ -2362,18 +2462,22 @@ async fn wait_for_mode2_scan_advance(
                     format!("mode2 settle gate {label} could not read base-node tip")
                 })?;
         println!(
-            "mode2 settle gate {label}: scanned_height={last_height} tip_height={tip_height} target_tip={target_tip_height}"
+            "mode2 settle gate {label}: scanned_height={last_height} tip_height={tip_height} target_tip={target_tip_height} scan_no_progress_attempts={} scan_stopped_without_progress={}",
+            total_scan_no_progress_attempts, stopped_without_progress
         );
 
-        if tip_height >= target_tip_height {
+        if mode2_settle_gate_ready(last_height, tip_height, target_tip_height) {
             return Ok(format!(
-                "Mode 2 settle gate {label}: scanned_height {initial_scan_height}->{last_height} tip_height {initial_tip_height}->{tip_height} target_tip={target_tip_height} attempts={attempts} scan_wall_ms={total_scan_wall_ms}"
+                "Mode 2 settle gate {label}: scanned_height {initial_scan_height}->{last_height} tip_height {initial_tip_height}->{tip_height} target_tip={target_tip_height} attempts={attempts} scan_wall_ms={total_scan_wall_ms} scan_no_progress_attempts={} scan_stopped_without_progress={}",
+                total_scan_no_progress_attempts, stopped_without_progress
             ));
         }
         if start.elapsed() >= timeout {
             bail!(
-                "mode2 settle gate {label} timed out after {}s waiting for tip_height {tip_height} to reach target {target_tip_height}; scanned_height={last_height}",
-                timeout.as_secs()
+                "mode2 settle gate {label} timed out after {}s waiting for both wallet scan and base-node tip to reach target {target_tip_height}; scanned_height={last_height} tip_height={tip_height} scan_no_progress_attempts={} scan_stopped_without_progress={}",
+                timeout.as_secs(),
+                total_scan_no_progress_attempts,
+                stopped_without_progress
             );
         }
 
@@ -2383,6 +2487,10 @@ async fn wait_for_mode2_scan_advance(
             settle_gate_pause(sleep_for).await;
         }
     }
+}
+
+fn mode2_settle_gate_ready(scanned_height: u64, tip_height: u64, target_tip_height: u64) -> bool {
+    scanned_height >= target_tip_height && tip_height >= target_tip_height
 }
 
 async fn settle_gate_pause(duration: Duration) {
@@ -2954,6 +3062,22 @@ async fn run_mode3_send_cells(
             config.benchmark.mode3_live_max_s1_batches
         )],
     );
+    if !pp_summary_complete(&s1) {
+        record_blocked_prerequisite_cells(
+            profile,
+            "payment_processor",
+            &[
+                ScenarioName::S2,
+                ScenarioName::S3,
+                ScenarioName::S4,
+                ScenarioName::S5,
+                ScenarioName::S6,
+                ScenarioName::S7,
+            ],
+            "S1",
+        );
+        return Ok(());
+    }
     if config.benchmark.live_fresh_scan_cells {
         let checkpoint = checkpoint_from_pp_summary(&s1, ScanCheckpoint::PostS1);
         run_library_checkpoint_scan_cells(
@@ -2994,6 +3118,15 @@ async fn run_mode3_send_cells(
             config.benchmark.concurrent_batches, config.benchmark.mode3_live_max_s4_batch
         )],
     );
+    if !pp_summary_complete(&s4) {
+        record_blocked_prerequisite_cells(
+            profile,
+            "payment_processor",
+            &[ScenarioName::S5, ScenarioName::S6, ScenarioName::S7],
+            "S4",
+        );
+        return Ok(());
+    }
 
     let s5_items = capped_attempts(
         config.benchmark.s5_m,
@@ -3081,7 +3214,6 @@ async fn run_pp_s4_batches(
         total.add_batch(*configured_batch, batch);
     }
     total.wall_ms = start.elapsed().as_millis();
-    total.observe_db(config).await;
     total
 }
 
@@ -3121,7 +3253,9 @@ async fn run_pp_recipient_batches_sequential(
         summary.record_batch(batch_index, result);
     }
     summary.wall_ms = start.elapsed().as_millis();
-    summary.observe_db(config).await;
+    summary
+        .observe_db(config, pp_observation_timeout(config, scenario))
+        .await;
     summary
 }
 
@@ -3171,8 +3305,18 @@ async fn run_pp_batches_concurrent(
         }
     }
     summary.wall_ms = start.elapsed().as_millis();
-    summary.observe_db(config).await;
     summary
+        .observe_db(config, pp_observation_timeout(config, scenario))
+        .await;
+    summary
+}
+
+fn pp_observation_timeout(config: &Config, scenario: ScenarioName) -> Duration {
+    if scenario == ScenarioName::S4 {
+        config.timeout(config.benchmark.s4_t_budget_secs)
+    } else {
+        Duration::from_secs(config.timeouts.confirmation_secs.max(30))
+    }
 }
 
 async fn submit_pp_batch(
@@ -3451,6 +3595,50 @@ fn record_blocked_checkpoint_scan(cell: &mut ScenarioCell, spec: FreshScanSpec) 
     });
 }
 
+fn record_blocked_prerequisite_cells(
+    profile: &mut ResultProfile,
+    mode: &str,
+    scenarios: &[ScenarioName],
+    prerequisite: &str,
+) {
+    for scenario in scenarios {
+        let Some(cell) = profile
+            .modes
+            .get_mut(mode)
+            .and_then(|mode_profile| mode_profile.scenarios.get_mut(scenario.as_str()))
+        else {
+            continue;
+        };
+        record_blocked_prerequisite_cell(cell, *scenario, prerequisite);
+    }
+}
+
+fn record_blocked_prerequisite_cell(
+    cell: &mut ScenarioCell,
+    scenario: ScenarioName,
+    prerequisite: &str,
+) {
+    let note = format!(
+        "{} not run: prerequisite {prerequisite} did not complete",
+        scenario.as_str()
+    );
+    cell.notes.push(note.clone());
+    cell.record_repetition(Repetition {
+        run: 1,
+        status: CellStatus::Failed,
+        wall_ms: None,
+        success_count: 0,
+        failure_count: 1,
+        fee_microtari: None,
+        error: Some(note),
+        metrics: Some(serde_json::json!({
+            "blocked_prerequisite": true,
+            "prerequisite": prerequisite,
+            "blocked_scenario": scenario.as_str()
+        })),
+    });
+}
+
 async fn run_library_fresh_scan_cell(
     config: &Config,
     mode: &str,
@@ -3606,10 +3794,11 @@ async fn run_library_fresh_scan(
             &config.network.base_node_http_url,
             config.benchmark.scan_batch_size,
             config.benchmark.c_min,
+            config.timeout(config.timeouts.scan_batch_secs),
         ),
     )
     .await;
-    let wall_ms = scan_result?;
+    let scan_report = scan_result?;
     let tip_end = base_node_tip_height(&config.network.base_node_http_url)
         .await
         .ok();
@@ -3618,7 +3807,7 @@ async fn run_library_fresh_scan(
     let spendable_outputs = spendable_output_count(&db_path).unwrap_or_default();
 
     Ok(ScanMeasurement {
-        wall_ms,
+        wall_ms: scan_report.wall_ms,
         birthday: spec.birthday(),
         max_height: account.max_height,
         available_microtari: account.available_microtari,
@@ -3629,6 +3818,9 @@ async fn run_library_fresh_scan(
         resource_peaks,
         expectations,
         tip_lag_tolerance_blocks: config.benchmark.c_min,
+        scan_no_progress_attempts: scan_report.no_progress_attempts,
+        scan_stopped_without_progress: scan_report.stopped_without_progress,
+        scan_last_more_blocks: scan_report.last_more_blocks,
     })
 }
 
@@ -3738,6 +3930,9 @@ async fn run_mode1_fresh_scan(
         resource_peaks,
         expectations,
         tip_lag_tolerance_blocks: config.benchmark.c_min,
+        scan_no_progress_attempts: 0,
+        scan_stopped_without_progress: false,
+        scan_last_more_blocks: None,
     })
 }
 
@@ -4285,7 +4480,52 @@ fn double_selection_rejections(errors: &[String]) -> u32 {
 }
 
 fn terminal_ok_status(status_value: u32) -> bool {
-    matches!(status_value, 2 | 6 | 9 | 13)
+    matches!(status_value, TX_MINED_CONFIRMED_STATUS | 9 | 13)
+}
+
+fn mode1_summary_verification_complete(summary: &Mode1TransferSummary) -> bool {
+    !summary.tx_ids.is_empty()
+        && summary.tx_infos.len() >= summary.tx_ids.len()
+        && summary.tx_infos.iter().all(|tx| tx.confirmed)
+}
+
+fn mode1_s1_complete(summary: &Mode1TransferSummary) -> bool {
+    summary.attempted_batches > 0
+        && summary.failure_count == 0
+        && summary.success_count == summary.attempted_batches
+        && mode1_summary_verification_complete(summary)
+}
+
+fn mode1_send_complete(summary: &Mode1TransferSummary) -> bool {
+    summary.attempted_payments > 0
+        && summary.failure_count == 0
+        && summary.success_count == summary.attempted_payments
+        && mode1_summary_verification_complete(summary)
+}
+
+fn mode2_summary_complete(summary: &ScenarioSendSummary) -> bool {
+    summary.attempted > 0
+        && summary.failure_count == 0
+        && summary.success_count == summary.attempted
+        && !summary.tx_ids.is_empty()
+        && summary.tx_infos.len() >= summary.tx_ids.len()
+        && summary.tx_infos.iter().all(|tx| tx.confirmed)
+}
+
+fn pp_summary_complete(summary: &PpScenarioSummary) -> bool {
+    let accepted_batch_count = usize::try_from(summary.accepted_batches).unwrap_or(usize::MAX);
+    summary.attempted_batches > 0
+        && summary.failed_batches == 0
+        && summary.accepted_batches == summary.attempted_batches
+        && !summary.blocked_upstream
+        && summary.db_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .batches
+                .iter()
+                .filter(|batch| batch.status == "CONFIRMED")
+                .count()
+                >= accepted_batch_count
+        })
 }
 
 impl PpScenarioSummary {
@@ -4329,6 +4569,7 @@ impl PpScenarioSummary {
     }
 
     fn add_batch(&mut self, configured_batch: u32, batch: Self) {
+        let batch_extra_metrics = batch.extra_metrics.clone();
         self.attempted_batches = self
             .attempted_batches
             .saturating_add(batch.attempted_batches);
@@ -4348,7 +4589,14 @@ impl PpScenarioSummary {
         self.construction_complete_ms
             .extend(batch.construction_complete_ms);
         self.extra_metrics.extend(batch.extra_metrics);
+        self.extra_metrics.insert(
+            format!("configured_batch_{configured_batch}_observation"),
+            serde_json::Value::Object(batch_extra_metrics),
+        );
         self.blocked_upstream |= batch.blocked_upstream;
+        if let Some(snapshot) = batch.db_snapshot {
+            merge_pp_snapshot(&mut self.db_snapshot, snapshot);
+        }
         self.batch_summaries.push(PpBatchSummary {
             configured_batch,
             attempted_batches: batch.attempted_batches,
@@ -4359,11 +4607,10 @@ impl PpScenarioSummary {
         });
     }
 
-    async fn observe_db(&mut self, config: &Config) {
+    async fn observe_db(&mut self, config: &Config, timeout: Duration) {
         if self.batch_ids.is_empty() && self.payment_ids.is_empty() {
             return;
         }
-        let timeout = Duration::from_secs(config.timeouts.confirmation_secs.max(30));
         let start = Instant::now();
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         let mut latest = None;
@@ -4402,9 +4649,18 @@ impl PpScenarioSummary {
             self.blocked_upstream = snapshot.has_upstream_signing_or_broadcast_error();
             self.db_snapshot = Some(snapshot);
         }
+        let pending_no_progress = timed_out
+            && self
+                .db_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| !pp_snapshot_has_progress_or_error(snapshot));
         self.extra_metrics.insert(
             "db_observation_attempts".to_string(),
             serde_json::json!(attempts),
+        );
+        self.extra_metrics.insert(
+            "db_observation_timeout_secs".to_string(),
+            serde_json::json!(timeout.as_secs()),
         );
         self.extra_metrics.insert(
             "db_observation_wall_ms".to_string(),
@@ -4413,6 +4669,20 @@ impl PpScenarioSummary {
         self.extra_metrics.insert(
             "db_observation_timed_out".to_string(),
             serde_json::json!(timed_out),
+        );
+        self.extra_metrics.insert(
+            "db_observation_pending_no_progress".to_string(),
+            serde_json::json!(pending_no_progress),
+        );
+        self.extra_metrics.insert(
+            "db_observation_stop_reason".to_string(),
+            serde_json::json!(if pending_no_progress {
+                Some("pending_no_progress")
+            } else if timed_out {
+                Some("timeout")
+            } else {
+                Some("terminal_snapshot")
+            }),
         );
     }
 
@@ -4567,14 +4837,36 @@ impl PpScenarioSummary {
     }
 }
 
-#[cfg(test)]
+fn merge_pp_snapshot(
+    target: &mut Option<PaymentProcessorDbSnapshot>,
+    mut source: PaymentProcessorDbSnapshot,
+) {
+    match target {
+        Some(existing) => {
+            existing.batches.append(&mut source.batches);
+            existing.payments.append(&mut source.payments);
+        }
+        None => *target = Some(source),
+    }
+}
+
 fn pp_snapshot_has_progress_or_error(snapshot: &PaymentProcessorDbSnapshot) -> bool {
     snapshot.has_upstream_signing_or_broadcast_error()
-        || snapshot.batches.iter().all(|batch| {
+        || snapshot.batches.iter().any(|batch| {
             matches!(
                 batch.status.as_str(),
-                "AWAITING_CONFIRMATION" | "CONFIRMED" | "FAILED" | "CANCELLED"
-            ) || batch.has_signed_tx
+                "AWAITING_SIGNATURE"
+                    | "SIGNING_IN_PROGRESS"
+                    | "AWAITING_BROADCAST"
+                    | "BROADCASTING"
+                    | "AWAITING_CONFIRMATION"
+                    | "CONFIRMED"
+                    | "FAILED"
+                    | "CANCELLED"
+            ) || batch.has_unsigned_tx
+                || batch.has_signed_tx
+                || batch.mined_height.is_some()
+                || batch.error_message.is_some()
         })
 }
 
@@ -5605,57 +5897,61 @@ fn checkpoint_from_mode1_summary(
     summary: &Mode1TransferSummary,
     complete_checkpoint: ScanCheckpoint,
 ) -> ScanCheckpoint {
+    let complete = match complete_checkpoint {
+        ScanCheckpoint::PostS1 => mode1_s1_complete(summary),
+        _ => mode1_send_complete(summary),
+    };
+    if complete {
+        return complete_checkpoint;
+    }
     if summary.success_count == 0 {
         return match complete_checkpoint {
             ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Blocked,
             _ => ScanCheckpoint::PostS5Blocked,
         };
     }
-    if summary.failure_count > 0 {
-        return match complete_checkpoint {
-            ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Partial,
-            _ => ScanCheckpoint::PostS5Partial,
-        };
+    match complete_checkpoint {
+        ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Partial,
+        _ => ScanCheckpoint::PostS5Partial,
     }
-    complete_checkpoint
 }
 
 fn checkpoint_from_mode2_summary(
     summary: &ScenarioSendSummary,
     complete_checkpoint: ScanCheckpoint,
 ) -> ScanCheckpoint {
+    if mode2_summary_complete(summary) {
+        return complete_checkpoint;
+    }
     if summary.success_count == 0 {
         return match complete_checkpoint {
             ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Blocked,
             _ => ScanCheckpoint::PostS5Blocked,
         };
     }
-    if summary.failure_count > 0 {
-        return match complete_checkpoint {
-            ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Partial,
-            _ => ScanCheckpoint::PostS5Partial,
-        };
+    match complete_checkpoint {
+        ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Partial,
+        _ => ScanCheckpoint::PostS5Partial,
     }
-    complete_checkpoint
 }
 
 fn checkpoint_from_pp_summary(
     summary: &PpScenarioSummary,
     complete_checkpoint: ScanCheckpoint,
 ) -> ScanCheckpoint {
+    if pp_summary_complete(summary) {
+        return complete_checkpoint;
+    }
     if summary.accepted_batches == 0 {
         return match complete_checkpoint {
             ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Blocked,
             _ => ScanCheckpoint::PostS5Blocked,
         };
     }
-    if summary.failed_batches > 0 || summary.blocked_upstream {
-        return match complete_checkpoint {
-            ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Partial,
-            _ => ScanCheckpoint::PostS5Partial,
-        };
+    match complete_checkpoint {
+        ScanCheckpoint::PostS1 => ScanCheckpoint::PostS1Partial,
+        _ => ScanCheckpoint::PostS5Partial,
     }
-    complete_checkpoint
 }
 
 fn scan_expectations_from_profile(
@@ -5730,6 +6026,49 @@ struct AccountSnapshot {
     available_microtari: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ScanToTipReport {
+    pub wall_ms: u128,
+    pub target_tip: u64,
+    pub max_height: u64,
+    pub no_progress_attempts: u64,
+    pub stopped_without_progress: bool,
+    pub last_more_blocks: Option<bool>,
+}
+
+impl ScanToTipReport {
+    fn insert_metrics(&self, metrics: &mut serde_json::Map<String, serde_json::Value>) {
+        metrics.insert(
+            "scan_target_tip".to_string(),
+            serde_json::json!(self.target_tip),
+        );
+        metrics.insert(
+            "scan_max_height".to_string(),
+            serde_json::json!(self.max_height),
+        );
+        metrics.insert(
+            "scan_no_progress_attempts".to_string(),
+            serde_json::json!(self.no_progress_attempts),
+        );
+        metrics.insert(
+            "scan_stopped_without_progress".to_string(),
+            serde_json::json!(self.stopped_without_progress),
+        );
+        metrics.insert(
+            "scan_last_more_blocks".to_string(),
+            serde_json::json!(self.last_more_blocks),
+        );
+        metrics.insert(
+            "scan_stop_reason".to_string(),
+            serde_json::json!(if self.stopped_without_progress {
+                Some("no_progress_timeout")
+            } else {
+                None
+            }),
+        );
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct ScanExpectations {
     expected_outputs: Option<u64>,
@@ -5748,6 +6087,9 @@ struct ScanMeasurement {
     resource_peaks: ResourcePeaks,
     expectations: ScanExpectations,
     tip_lag_tolerance_blocks: u64,
+    scan_no_progress_attempts: u64,
+    scan_stopped_without_progress: bool,
+    scan_last_more_blocks: Option<bool>,
 }
 
 impl ScanMeasurement {
@@ -5799,6 +6141,10 @@ impl ScanMeasurement {
             "spendable_outputs": self.spendable_outputs,
             "available_microtari": self.available_microtari,
             "max_height": self.max_height,
+            "scan_no_progress_attempts": self.scan_no_progress_attempts,
+            "scan_stopped_without_progress": self.scan_stopped_without_progress,
+            "scan_last_more_blocks": self.scan_last_more_blocks,
+            "scan_stop_reason": if self.scan_stopped_without_progress { Some("no_progress_timeout") } else { None },
             "peak_rss_bytes": self.resource_peaks.peak_rss_bytes,
             "peak_cpu_percent": self.resource_peaks.peak_cpu_percent
         })
@@ -5970,12 +6316,86 @@ mod tests {
 
     #[test]
     fn terminal_ok_status_matches_bounty_status_set() {
-        for status in [2, 6, 9, 13] {
+        for status in [6, 9, 13] {
             assert!(terminal_ok_status(status));
         }
-        for status in [1, 7, 11, 14] {
+        for status in [1, 2, 7, 11, 14] {
             assert!(!terminal_ok_status(status));
         }
+    }
+
+    #[test]
+    fn mode1_s1_does_not_complete_on_mined_unconfirmed_status() {
+        let pending = Mode1TransferSummary {
+            attempted_batches: 1,
+            attempted_payments: 2,
+            success_count: 1,
+            tx_ids: vec!["42".to_string()],
+            tx_infos: vec![VerifiedTransaction {
+                tx_id: "42".to_string(),
+                status_value: 2,
+                mode: "old_wallet".to_string(),
+                scenario: ScenarioName::S1.as_str().to_string(),
+                amount_microtari: Some(2_000_000),
+                fee_microtari: Some(945),
+                mined_height: Some(710_357),
+                confirmed: terminal_ok_status(2),
+            }],
+            ..Mode1TransferSummary::default()
+        };
+        assert!(!mode1_s1_complete(&pending));
+
+        let confirmed = Mode1TransferSummary {
+            tx_infos: vec![VerifiedTransaction {
+                tx_id: "42".to_string(),
+                status_value: TX_MINED_CONFIRMED_STATUS,
+                mode: "old_wallet".to_string(),
+                scenario: ScenarioName::S1.as_str().to_string(),
+                amount_microtari: Some(2_000_000),
+                fee_microtari: Some(945),
+                mined_height: Some(710_357),
+                confirmed: terminal_ok_status(TX_MINED_CONFIRMED_STATUS),
+            }],
+            ..pending
+        };
+        assert!(mode1_s1_complete(&confirmed));
+    }
+
+    #[test]
+    fn mode1_summary_keeps_mined_unconfirmed_out_of_chain_rows() {
+        let config = Config::default();
+        let mut profile = ResultProfile::new(&config, crate::env_capture::capture());
+        profile.modes.insert(
+            ModeName::OldWallet.as_str().to_string(),
+            empty_mode_profile(ModeName::OldWallet, None),
+        );
+        let summary = Mode1TransferSummary {
+            attempted_batches: 1,
+            attempted_payments: 2,
+            success_count: 1,
+            tx_ids: vec!["42".to_string()],
+            tx_infos: vec![VerifiedTransaction {
+                tx_id: "42".to_string(),
+                status_value: 2,
+                mode: "old_wallet".to_string(),
+                scenario: ScenarioName::S1.as_str().to_string(),
+                amount_microtari: Some(2_000_000),
+                fee_microtari: Some(945),
+                mined_height: Some(710_357),
+                confirmed: false,
+            }],
+            ..Mode1TransferSummary::default()
+        };
+
+        record_mode1_transfer_summary(&mut profile, ScenarioName::S1, &summary, Vec::new());
+
+        let cell = &profile
+            .modes
+            .get(ModeName::OldWallet.as_str())
+            .unwrap()
+            .scenarios[ScenarioName::S1.as_str()];
+        assert_eq!(cell.status, CellStatus::Failed);
+        assert!(profile.chain_verification.verified_transactions.is_empty());
     }
 
     #[test]
@@ -6100,6 +6520,13 @@ mod tests {
         assert!(mode2_verification_confirmed(&all_confirmed, &tx_ids));
     }
 
+    #[test]
+    fn mode2_settle_gate_requires_scan_and_tip_to_reach_target() {
+        assert!(!mode2_settle_gate_ready(99, 101, 100));
+        assert!(!mode2_settle_gate_ready(101, 99, 100));
+        assert!(mode2_settle_gate_ready(100, 100, 100));
+    }
+
     #[tokio::test]
     async fn mode2_verification_returns_immediately_without_tx_ids() {
         let config = Config::default();
@@ -6170,6 +6597,37 @@ mod tests {
             metrics["scan_checkpoint"],
             serde_json::json!("post_s5_blocked")
         );
+    }
+
+    #[test]
+    fn blocked_prerequisite_records_failed_repetition() {
+        let mut cell = ScenarioCell {
+            scenario: ScenarioName::S5,
+            surface: "minotari_library".to_string(),
+            status: CellStatus::ReadyForLiveRun,
+            repetitions: Vec::new(),
+            median_wall_ms: None,
+            spread_wall_ms: None,
+            notes: Vec::new(),
+        };
+
+        record_blocked_prerequisite_cell(&mut cell, ScenarioName::S5, "S4");
+
+        assert_eq!(cell.status, CellStatus::Failed);
+        assert_eq!(cell.repetitions.len(), 1);
+        assert_eq!(cell.repetitions[0].status, CellStatus::Failed);
+        assert_eq!(cell.repetitions[0].success_count, 0);
+        assert_eq!(cell.repetitions[0].failure_count, 1);
+        assert!(
+            cell.repetitions[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("prerequisite S4 did not complete")
+        );
+        let metrics = cell.repetitions[0].metrics.as_ref().unwrap();
+        assert_eq!(metrics["blocked_prerequisite"], serde_json::json!(true));
+        assert_eq!(metrics["prerequisite"], serde_json::json!("S4"));
     }
 
     #[test]
@@ -6274,6 +6732,9 @@ mod tests {
             resource_peaks: ResourcePeaks::default(),
             expectations: ScanExpectations::default(),
             tip_lag_tolerance_blocks: 3,
+            scan_no_progress_attempts: 0,
+            scan_stopped_without_progress: false,
+            scan_last_more_blocks: None,
         };
         let spec = FreshScanSpec {
             scenario: ScenarioName::S3,
@@ -6303,6 +6764,9 @@ mod tests {
                 expected_available_microtari: Some(0),
             },
             tip_lag_tolerance_blocks: 3,
+            scan_no_progress_attempts: 2,
+            scan_stopped_without_progress: true,
+            scan_last_more_blocks: Some(true),
         };
 
         assert!(!measurement.scan_verification_ok());
@@ -6331,6 +6795,9 @@ mod tests {
                 expected_available_microtari: Some(0),
             },
             tip_lag_tolerance_blocks: 3,
+            scan_no_progress_attempts: 0,
+            scan_stopped_without_progress: false,
+            scan_last_more_blocks: None,
         };
 
         assert!(measurement.scan_verification_ok());
@@ -6345,6 +6812,22 @@ mod tests {
         );
         assert_eq!(metrics["scan_reached_tip"], serde_json::json!(true));
         assert_eq!(metrics["tip_lag_blocks"], serde_json::json!(3));
+    }
+
+    #[test]
+    fn pp_s4_observation_uses_s4_budget() {
+        let mut config = Config::default();
+        config.benchmark.s4_t_budget_secs = 17;
+        config.timeouts.confirmation_secs = 999;
+
+        assert_eq!(
+            pp_observation_timeout(&config, ScenarioName::S4),
+            Duration::from_secs(17)
+        );
+        assert_eq!(
+            pp_observation_timeout(&config, ScenarioName::S1),
+            Duration::from_secs(999)
+        );
     }
 
     #[test]

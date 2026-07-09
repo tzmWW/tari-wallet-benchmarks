@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use rusqlite::{Connection, OpenFlags, params, params_from_iter};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{process::Command, time};
 
 use crate::{config::Config, seeds::SeedMaterial};
@@ -704,68 +704,88 @@ impl PaymentProcessorClient {
     }
 
     pub async fn health_version(&self) -> anyhow::Result<ServiceVersion> {
-        Ok(self
-            .client
-            .get(format!("{}/health/version", self.base_url))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        response_json(
+            self.client
+                .get(format!("{}/health/version", self.base_url))
+                .send()
+                .await?,
+        )
+        .await
     }
 
     pub async fn create_payment(
         &self,
         request: &PaymentRequest,
     ) -> anyhow::Result<serde_json::Value> {
-        Ok(self
-            .client
-            .post(format!("{}/v1/payments", self.base_url))
-            .json(request)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        response_json(
+            self.client
+                .post(format!("{}/v1/payments", self.base_url))
+                .json(request)
+                .send()
+                .await?,
+        )
+        .await
     }
 
     pub async fn create_payment_batch(
         &self,
         request: &BulkPaymentRequest,
     ) -> anyhow::Result<serde_json::Value> {
-        Ok(self
-            .client
-            .post(format!("{}/v1/payment-batches", self.base_url))
-            .json(request)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        response_json(
+            self.client
+                .post(format!("{}/v1/payment-batches", self.base_url))
+                .json(request)
+                .send()
+                .await?,
+        )
+        .await
     }
 
     pub async fn get_payment(&self, payment_id: &str) -> anyhow::Result<serde_json::Value> {
-        Ok(self
-            .client
-            .get(format!("{}/v1/payments/{}", self.base_url, payment_id))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        response_json(
+            self.client
+                .get(format!("{}/v1/payments/{}", self.base_url, payment_id))
+                .send()
+                .await?,
+        )
+        .await
     }
 
     pub async fn events(&self, limit: u32) -> anyhow::Result<serde_json::Value> {
-        Ok(self
-            .client
-            .get(format!("{}/v1/events", self.base_url))
-            .query(&[("limit", limit)])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        response_json(
+            self.client
+                .get(format!("{}/v1/events", self.base_url))
+                .query(&[("limit", limit)])
+                .send()
+                .await?,
+        )
+        .await
     }
+}
+
+async fn response_json<T: DeserializeOwned>(response: reqwest::Response) -> anyhow::Result<T> {
+    let status = response.status();
+    let url = response.url().to_string();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
+    if !status.is_success() {
+        bail!(
+            "{}",
+            payment_processor_http_error_message(status, &url, &body)
+        );
+    }
+    serde_json::from_str(&body)
+        .with_context(|| format!("decoding payment processor JSON response from {url}: {body}"))
+}
+
+fn payment_processor_http_error_message(
+    status: reqwest::StatusCode,
+    url: &str,
+    body: &str,
+) -> String {
+    format!("payment processor HTTP {status} for {url}: {body}")
 }
 
 pub fn build_fetch_command(cache_dir: &Path) -> String {
@@ -783,7 +803,10 @@ mod tests {
     use rusqlite::{Connection, params};
     use tari_common_types::seeds::cipher_seed::CipherSeed;
 
-    use super::{build_env, inspect_payment_processor_db, payment_processor_db_path};
+    use super::{
+        build_env, inspect_payment_processor_db, payment_processor_db_path,
+        payment_processor_http_error_message,
+    };
 
     #[test]
     fn pp_env_uses_private_view_key() {
@@ -800,6 +823,19 @@ mod tests {
             Some(&seed.private_view_key_hex)
         );
         assert!(env.vars.contains_key("CONSOLE_WALLET_PASSWORD"));
+    }
+
+    #[test]
+    fn pp_http_error_message_includes_response_body() {
+        let error = payment_processor_http_error_message(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "http://127.0.0.1:9000/v1/payment-batches",
+            "{\"error\":\"funds pending\"}",
+        );
+
+        assert!(error.contains("500 Internal Server Error"));
+        assert!(error.contains("/v1/payment-batches"));
+        assert!(error.contains("funds pending"));
     }
 
     #[test]
