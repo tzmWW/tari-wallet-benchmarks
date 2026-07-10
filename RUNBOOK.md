@@ -314,8 +314,8 @@ exclusive.
 
 When `mode1_live_topology` is enabled, the harness starts a real
 `minotari_console_wallet` process with gRPC enabled, waits for recovery to find
-the funded balance, drives S1 through gRPC `CoinSplit`, and drives S4/S5 through
-`Transfer` requests. The console
+the funded balance, and drives S1/S4/S5 through one-shot gRPC `Transfer`
+requests. S1 uses an exact no-change self-directed multi-recipient shape. The console
 wallet seed-recovery path reads the birthday embedded in the mnemonic; it does
 not apply the separate `--birthday` flag to seed words. The harness therefore
 rewrites only the mnemonic birthday before launch. This preserves the address and
@@ -431,6 +431,11 @@ every cell. Per-repetition metrics include common transaction observations,
 strict S0 checks, scan resource/expectation evidence, balance reconciliation,
 and S5 arms. The top-level `computed_deltas` section derives scan deltas and
 S5 throughput ratios only from complete source arms.
+Each transaction observation carries the submitted transaction or PP batch
+identity when the surface returned one. Its `confirmation_ms` is the enclosing
+scenario/arm wall time from first dispatch through terminal `C_min` observation
+or timeout; mempool timestamps remain explicitly unavailable where the wallet
+surface does not expose them.
 Environment capture includes OS, CPU, memory, disk kind/name, base-node host, and
 whether the base-node path is local or remote.
 

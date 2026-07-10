@@ -172,11 +172,12 @@ pub fn schema_document() -> Value {
             "transaction_observation": {
                 "type": "object", "additionalProperties": false,
                 "required": [
-                    "construction_ms", "submission_ms", "mempool_available", "mempool_reason",
+                    "transaction_id", "construction_ms", "submission_ms", "mempool_available", "mempool_reason",
                     "confirmation_ms", "fee_microtari", "terminal_outcome", "error",
                     "mined_height", "tip_start_height", "tip_end_height"
                 ],
                 "properties": {
+                    "transaction_id": {"$ref": "#/$defs/nullable_string"},
                     "construction_ms": {"$ref": "#/$defs/nullable_integer"},
                     "submission_ms": {"$ref": "#/$defs/nullable_integer"},
                     "mempool_available": {"type": ["boolean", "null"]},

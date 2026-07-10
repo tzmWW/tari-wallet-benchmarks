@@ -1,4 +1,1091 @@
+use super::*;
 use anyhow::{Context, bail};
+
+pub(super) async fn annotate_mode1_console_wallet(
+    config: &Config,
+    book: &AddressBook,
+    profile: &mut ResultProfile,
+) -> anyhow::Result<()> {
+    let Some(old_seed) = book.addresses.get(WalletRole::OldWallet.label()) else {
+        return Ok(());
+    };
+    let start = Instant::now();
+    let topology = start_mode1_console_wallet(config, old_seed).await;
+    match topology {
+        Ok(mut context) => {
+            let spendable_count = mode1_unspent_count(&mut context.client).await.ok();
+            record_mode1_s0(
+                config,
+                profile,
+                &context,
+                start.elapsed().as_millis(),
+                spendable_count,
+            );
+            run_mode1_send_cells(config, profile, old_seed, &mut context).await?;
+        }
+        Err(error) => {
+            record_mode1_startup_failure(profile, start.elapsed().as_millis(), error);
+        }
+    }
+    Ok(())
+}
+
+async fn start_mode1_console_wallet(
+    config: &Config,
+    old_seed: &crate::seeds::SeedMaterial,
+) -> anyhow::Result<Mode1ConsoleContext> {
+    start_mode1_console_wallet_with_recovery(config, old_seed, false).await
+}
+
+pub(super) async fn start_mode1_console_wallet_with_recovery(
+    config: &Config,
+    old_seed: &crate::seeds::SeedMaterial,
+    recovery: bool,
+) -> anyhow::Result<Mode1ConsoleContext> {
+    let password = wallet_password(&config.seeds.wallet_password_env)?;
+    let base_path = old_wallet_base_path(config);
+    let config_path = base_path.join("config/config.toml");
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::create_dir_all("logs")?;
+    let stdout_path = PathBuf::from("logs/mode1-console-wallet.stdout.log");
+    let stderr_path = PathBuf::from("logs/mode1-console-wallet.stderr.log");
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stdout_path)?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_path)?;
+    let grpc_bind = grpc_bind_multiaddr(&config.modes.old_wallet_grpc_address)?;
+    let birthday = mode1_wallet_birthday(old_seed);
+    // Console-wallet seed recovery reads the birthday embedded in the mnemonic.
+    let recovery_seed_words = seed_words_with_birthday(&old_seed.seed_words, birthday)
+        .context("encoding Mode 1 console-wallet recovery seed birthday")?;
+
+    let mut command = Command::new(&config.paths.minotari_console_wallet);
+    command
+        .env("MINOTARI_WALLET_SEED_WORDS", recovery_seed_words)
+        .env("MINOTARI_WALLET_PASSWORD", &password)
+        .arg("--base-path")
+        .arg(&base_path)
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--network")
+        .arg("Esmeralda")
+        .arg("--non-interactive-mode")
+        .arg("--grpc-enabled")
+        .arg("--grpc-address")
+        .arg(&grpc_bind);
+    if recovery {
+        command.arg("--recovery");
+    }
+    command
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+
+    let mut process = Mode1ConsoleProcess {
+        child: command
+            .spawn()
+            .context("spawning minotari_console_wallet")?,
+        stdout_path,
+        stderr_path,
+    };
+    let client = wait_for_mode1_grpc(config, &mut process).await?;
+    let mut context = Mode1ConsoleContext {
+        process,
+        client,
+        balance: None,
+        birthday,
+        grpc_bind,
+        version: None,
+    };
+    let version = context
+        .client
+        .get_version(grpc::GetVersionRequest {})
+        .await?
+        .into_inner()
+        .version;
+    context.version = Some(version);
+    let required_balance = config.a_fund()?.0;
+    let balance = wait_for_mode1_balance(config, &mut context, required_balance).await?;
+    context.balance = Some(balance);
+    Ok(context)
+}
+
+pub(super) fn old_wallet_base_path(config: &Config) -> PathBuf {
+    config.paths.data_dir.join("old-wallet-console")
+}
+
+pub(super) fn mode1_wallet_birthday(seed: &crate::seeds::SeedMaterial) -> u16 {
+    if seed.birthday == 0 {
+        current_birthday()
+    } else {
+        seed.birthday
+    }
+}
+
+pub(super) fn grpc_bind_multiaddr(address: &str) -> anyhow::Result<String> {
+    if address.starts_with('/') {
+        return Ok(address.to_string());
+    }
+    let trimmed = address
+        .strip_prefix("http://")
+        .or_else(|| address.strip_prefix("https://"))
+        .unwrap_or(address);
+    let (host, port) = trimmed
+        .rsplit_once(':')
+        .with_context(|| format!("invalid gRPC address {address}"))?;
+    Ok(format!("/ip4/{host}/tcp/{port}"))
+}
+
+pub(super) fn mode1_scan_grpc_address(
+    base_address: &str,
+    spec: FreshScanSpec,
+    run: u32,
+) -> anyhow::Result<String> {
+    let trimmed = base_address
+        .strip_prefix("http://")
+        .or_else(|| base_address.strip_prefix("https://"))
+        .unwrap_or(base_address);
+    let (host, port) = trimmed
+        .rsplit_once(':')
+        .with_context(|| format!("invalid gRPC address {base_address}"))?;
+    let port = port.parse::<u16>()?;
+    let offset = spec.port_offset(run);
+    let scheme = if base_address.starts_with("https://") {
+        "https"
+    } else {
+        "http"
+    };
+    Ok(format!(
+        "{scheme}://{host}:{}",
+        port.checked_add(offset)
+            .with_context(|| format!("scan gRPC port overflow for {base_address}"))?
+    ))
+}
+
+async fn wait_for_mode1_grpc(
+    config: &Config,
+    process: &mut Mode1ConsoleProcess,
+) -> anyhow::Result<WalletGrpcClient<tonic::transport::Channel>> {
+    wait_for_mode1_grpc_address(config, process, &config.modes.old_wallet_grpc_address).await
+}
+
+pub(super) async fn wait_for_mode1_grpc_address(
+    config: &Config,
+    process: &mut Mode1ConsoleProcess,
+    grpc_address: &str,
+) -> anyhow::Result<WalletGrpcClient<tonic::transport::Channel>> {
+    let start = Instant::now();
+    let timeout = config.timeout(config.timeouts.startup_secs);
+    let mut interval = time::interval(Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        if let Some(status) = process.try_wait()? {
+            bail!(
+                "minotari_console_wallet exited during gRPC startup with status {status}; stdout_log={} stderr_log={}",
+                process.stdout_path.display(),
+                process.stderr_path.display()
+            );
+        }
+        match time::timeout(
+            Duration::from_secs(5),
+            WalletGrpcClient::connect(grpc_address),
+        )
+        .await
+        {
+            Ok(Ok(client)) => return Ok(client),
+            Ok(Err(error)) => {
+                if start.elapsed() > timeout {
+                    bail!("console wallet gRPC did not become ready within {timeout:?}: {error}");
+                }
+            }
+            Err(_) => {
+                if start.elapsed() > timeout {
+                    bail!("console wallet gRPC connect timed out for {timeout:?}");
+                }
+            }
+        }
+    }
+}
+
+pub(super) async fn wait_for_mode1_scan_to_tip(
+    process: &mut Mode1ConsoleProcess,
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    target_tip: Option<u64>,
+    timeout: Duration,
+    no_progress_timeout: Duration,
+) -> anyhow::Result<u64> {
+    let start = Instant::now();
+    let mut last_progress = Instant::now();
+    let mut interval = time::interval(Duration::from_secs(5));
+    let mut last_scanned_height = None;
+    loop {
+        interval.tick().await;
+        if let Some(status) = process.try_wait()? {
+            bail!(
+                "minotari_console_wallet exited during fresh scan with status {status}; stdout_log={} stderr_log={}",
+                process.stdout_path.display(),
+                process.stderr_path.display()
+            );
+        }
+        if start.elapsed() > timeout {
+            bail!(
+                "console wallet fresh scan did not reach target tip {:?} within {:?}; scanned_height={:?}; stdout_log={} stderr_log={}",
+                target_tip,
+                timeout,
+                last_scanned_height,
+                process.stdout_path.display(),
+                process.stderr_path.display()
+            );
+        }
+        let state = match time::timeout(
+            Duration::from_secs(10),
+            client.get_state(grpc::GetStateRequest {}),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response.into_inner(),
+            Ok(Err(error)) => {
+                if start.elapsed() > timeout {
+                    bail!(
+                        "console wallet fresh scan state query failed after {:?}: {error}; scanned_height={:?}; stdout_log={} stderr_log={}",
+                        timeout,
+                        last_scanned_height,
+                        process.stdout_path.display(),
+                        process.stderr_path.display()
+                    );
+                }
+                println!("mode1 fresh scan state query failed: {error}");
+                continue;
+            }
+            Err(_) => {
+                if start.elapsed() > timeout {
+                    bail!(
+                        "console wallet fresh scan state query timed out after {:?}; scanned_height={:?}; stdout_log={} stderr_log={}",
+                        timeout,
+                        last_scanned_height,
+                        process.stdout_path.display(),
+                        process.stderr_path.display()
+                    );
+                }
+                println!("mode1 fresh scan state query timed out after 10s");
+                continue;
+            }
+        };
+        let scanned_height = state.scanned_height;
+        if last_scanned_height.is_none_or(|previous| scanned_height > previous) {
+            last_progress = Instant::now();
+        }
+        last_scanned_height = Some(scanned_height);
+        let target = target_tip.unwrap_or_else(|| scanned_height.saturating_add(1));
+        if scanned_height >= target {
+            return Ok(scanned_height);
+        }
+        if last_progress.elapsed() > no_progress_timeout {
+            bail!(
+                "console wallet fresh scan made no height progress for {:?}; target_tip={:?}; scanned_height={scanned_height}; stdout_log={} stderr_log={}",
+                no_progress_timeout,
+                target_tip,
+                process.stdout_path.display(),
+                process.stderr_path.display()
+            );
+        }
+        if start.elapsed() > timeout {
+            bail!(
+                "console wallet fresh scan did not reach target tip {target} within {:?}; scanned_height={scanned_height}",
+                timeout
+            );
+        }
+        println!("mode1 fresh scan wait: scanned_height={scanned_height} target={target}");
+    }
+}
+
+async fn wait_for_mode1_balance(
+    config: &Config,
+    context: &mut Mode1ConsoleContext,
+    min_available: u64,
+) -> anyhow::Result<grpc::GetBalanceResponse> {
+    let start = Instant::now();
+    let timeout = config.timeout(config.timeouts.startup_secs);
+    let mut last_report = Instant::now();
+    let mut interval = time::interval(Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        if let Some(status) = context.process.try_wait()? {
+            bail!(
+                "minotari_console_wallet exited during startup with status {status}; stdout_log={} stderr_log={}",
+                context.process.stdout_path.display(),
+                context.process.stderr_path.display()
+            );
+        }
+        let balance = context
+            .client
+            .get_balance(grpc::GetBalanceRequest { payment_id: None })
+            .await?
+            .into_inner();
+        if balance.available_balance >= min_available {
+            return Ok(balance);
+        }
+        if last_report.elapsed() >= Duration::from_secs(30) {
+            println!(
+                "mode1 console wallet balance wait: available={} pending_in={} pending_out={} required={}",
+                balance.available_balance,
+                balance.pending_incoming_balance,
+                balance.pending_outgoing_balance,
+                min_available
+            );
+            last_report = Instant::now();
+        }
+        if start.elapsed() > timeout {
+            bail!(
+                "console wallet did not reach required available balance {} within {:?}; available={} pending_in={} pending_out={}",
+                min_available,
+                timeout,
+                balance.available_balance,
+                balance.pending_incoming_balance,
+                balance.pending_outgoing_balance
+            );
+        }
+    }
+}
+
+fn record_mode1_s0(
+    config: &Config,
+    profile: &mut ResultProfile,
+    context: &Mode1ConsoleContext,
+    wall_ms: u128,
+    spendable_count: Option<u64>,
+) {
+    let Some(mode) = profile.modes.get_mut("old_wallet") else {
+        return;
+    };
+    let Some(cell) = mode.scenarios.get_mut("S0") else {
+        return;
+    };
+    let balance = context.balance.as_ref();
+    let available = balance.map(|b| b.available_balance).unwrap_or_default();
+    let expected = config.a_fund().map(|amount| amount.0).unwrap_or_default();
+    let (status, success_count, failure_count, error, metrics) =
+        strict_s0_status(expected, available, spendable_count);
+    cell.record_repetition(Repetition {
+        run: 1,
+        status,
+        wall_ms: Some(wall_ms),
+        success_count,
+        failure_count,
+        fee_microtari: None,
+        error,
+        metrics: Some(metrics),
+    });
+    cell.notes.push(format!(
+        "Mode 1 topology started real minotari_console_wallet gRPC version {}; grpc_address={} grpc_bind={} base_path={} birthday={} balance_available={} pending_in={} pending_out={}",
+        context.version.as_deref().unwrap_or("unknown"),
+        config.modes.old_wallet_grpc_address,
+        context.grpc_bind,
+        old_wallet_base_path(config).display(),
+        context.birthday,
+        balance.map(|b| b.available_balance).unwrap_or_default(),
+        balance.map(|b| b.pending_incoming_balance).unwrap_or_default(),
+        balance.map(|b| b.pending_outgoing_balance).unwrap_or_default()
+    ));
+    if let Some(funding) = &config.funding.old_wallet {
+        cell.notes.push(format!(
+            "funding tx_id={} height={} amount={}",
+            funding.tx_id, funding.height, funding.amount
+        ));
+    }
+}
+
+fn record_mode1_startup_failure(profile: &mut ResultProfile, wall_ms: u128, error: anyhow::Error) {
+    let Some(mode) = profile.modes.get_mut("old_wallet") else {
+        return;
+    };
+    for scenario in [
+        ScenarioName::S0,
+        ScenarioName::S1,
+        ScenarioName::S4,
+        ScenarioName::S5,
+    ] {
+        let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
+            continue;
+        };
+        cell.record_repetition(Repetition {
+            run: 1,
+            status: CellStatus::Failed,
+            wall_ms: Some(wall_ms),
+            success_count: 0,
+            failure_count: 1,
+            fee_microtari: None,
+            error: Some(format!("{error:#}")),
+            metrics: None,
+        });
+        cell.notes
+            .push("Mode 1 console-wallet startup failed before scenario dispatch".to_string());
+    }
+}
+
+async fn run_mode1_send_cells(
+    config: &Config,
+    profile: &mut ResultProfile,
+    old_seed: &crate::seeds::SeedMaterial,
+    context: &mut Mode1ConsoleContext,
+) -> anyhow::Result<()> {
+    let amount = parse_amount(&config.benchmark.mode1_payment_amount)?;
+    let fee_rate = config.fee_rate()?.0;
+    let s1 = run_mode1_s1(config, &mut context.client, &old_seed.address, fee_rate).await;
+    record_mode1_transfer_summary(
+        profile,
+        ScenarioName::S1,
+        &s1,
+        vec![format!(
+            "Mode 1 S1 drove exact no-change self-directed gRPC Transfer rounds; attempted_batches={} cap={}",
+            s1.attempted_batches, config.benchmark.mode1_live_max_s1_txs
+        )],
+    );
+    if !mode1_s1_complete(&s1) {
+        record_blocked_prerequisite_cells(
+            profile,
+            "old_wallet",
+            &[
+                ScenarioName::S2,
+                ScenarioName::S3,
+                ScenarioName::S4,
+                ScenarioName::S5,
+                ScenarioName::S6,
+                ScenarioName::S7,
+            ],
+            "S1",
+        );
+        return Ok(());
+    }
+    if config.benchmark.live_fresh_scan_cells {
+        let checkpoint = checkpoint_from_mode1_summary(&s1, ScanCheckpoint::PostS1);
+        run_mode1_checkpoint_scan_cells(
+            config,
+            profile,
+            old_seed,
+            &[ScenarioName::S2, ScenarioName::S3],
+            checkpoint,
+        )
+        .await?;
+    }
+
+    let s4_recipients = derive_distinct_recipient_pool(128)?;
+    let s4_balance_before = mode1_available_balance(&mut context.client).await.ok();
+    let mut s4 = run_mode1_s4_batches(
+        config,
+        &mut context.client,
+        &s4_recipients,
+        amount,
+        fee_rate,
+    )
+    .await;
+    let s4_balance_after = mode1_available_balance(&mut context.client).await.ok();
+    let s4_success_payments = s4.attempted_payments.saturating_sub(s4.failure_count);
+    add_balance_reconciliation_metrics(
+        &mut s4.extra_metrics,
+        s4_balance_before,
+        s4_balance_after,
+        u64::from(s4_success_payments).saturating_mul(amount.0),
+        s4.fee_microtari,
+    );
+    s4.extra_metrics.insert(
+        "unspent_after".to_string(),
+        serde_json::json!(mode1_unspent_count(&mut context.client).await.ok()),
+    );
+    record_mode1_transfer_summary(
+        profile,
+        ScenarioName::S4,
+        &s4,
+        vec![format!(
+            "Mode 1 S4 dispatched configured concurrent_batches={:?} through console-wallet gRPC Transfer; per-batch cap={}",
+            config.benchmark.concurrent_batches, config.benchmark.mode1_live_max_s4_batch
+        )],
+    );
+    let s5_recipients = derive_distinct_recipient_pool(config.benchmark.s5_m)?;
+    let s5_balance_before = mode1_available_balance(&mut context.client).await.ok();
+    let mut s5 = run_mode1_s5(
+        config,
+        &mut context.client,
+        &s5_recipients,
+        amount,
+        fee_rate,
+    )
+    .await;
+    let s5_balance_after = mode1_available_balance(&mut context.client).await.ok();
+    let s5_success_payments = s5.attempted_payments.saturating_sub(s5.failure_count);
+    add_balance_reconciliation_metrics(
+        &mut s5.extra_metrics,
+        s5_balance_before,
+        s5_balance_after,
+        u64::from(s5_success_payments).saturating_mul(amount.0),
+        s5.fee_microtari,
+    );
+    s5.extra_metrics.insert(
+        "unspent_after".to_string(),
+        serde_json::json!(mode1_unspent_count(&mut context.client).await.ok()),
+    );
+    record_mode1_transfer_summary(
+        profile,
+        ScenarioName::S5,
+        &s5,
+        vec![format!(
+            "Mode 1 S5 used deterministic distinct recipients; attempted_payments={} of configured S5_M={} and S5_K={}; cap={}",
+            s5.attempted_payments,
+            config.benchmark.s5_m,
+            config.benchmark.s5_k,
+            config.benchmark.mode1_live_max_s5_items
+        )],
+    );
+    if config.benchmark.live_fresh_scan_cells {
+        let checkpoint = checkpoint_from_mode1_summary(&s5, ScanCheckpoint::PostS5Complete);
+        run_mode1_checkpoint_scan_cells(
+            config,
+            profile,
+            old_seed,
+            &[ScenarioName::S6, ScenarioName::S7],
+            checkpoint,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn run_mode1_s1(
+    config: &Config,
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    self_address: &str,
+    fee_rate: u64,
+) -> Mode1TransferSummary {
+    let mut total = Mode1TransferSummary::default();
+    let start = Instant::now();
+    let rounds = s1_round_plan(config, config.benchmark.mode1_live_max_s1_txs);
+    let balance_before = mode1_available_balance(client).await.ok();
+    for round in rounds {
+        let round_start = Instant::now();
+        let round_balance_before = mode1_available_balance(client).await.ok();
+        let mut spendable_amounts = match mode1_unspent_amounts(client).await {
+            Ok(amounts) => amounts,
+            Err(error) => {
+                total.failure_count = total.failure_count.saturating_add(1);
+                total.errors.push(format!(
+                    "mode1 S1 round {} could not read spendable amounts: {error:#}",
+                    round.round_index
+                ));
+                break;
+            }
+        };
+        spendable_amounts.sort_unstable_by(|a, b| b.cmp(a));
+        if spendable_amounts.len() != round.tx_count as usize {
+            total.failure_count = total.failure_count.saturating_add(1);
+            total.errors.push(format!(
+                "mode1 S1 round {} expected {} spendable inputs before dispatch, observed {}; refusing noncanonical state",
+                round.round_index,
+                round.tx_count,
+                spendable_amounts.len()
+            ));
+            break;
+        }
+        let mut round_summary = Mode1TransferSummary {
+            attempted_batches: round.tx_count,
+            attempted_payments: round.tx_count.saturating_mul(round.outputs_per_tx),
+            ..Mode1TransferSummary::default()
+        };
+        for tx_index in 1..=round.tx_count {
+            let input = spendable_amounts[(tx_index - 1) as usize];
+            let plan = match exact_no_change_split(
+                input,
+                round.outputs_per_tx,
+                fee_rate,
+                CONSOLE_SELF_OUTPUT_GRAMS,
+            ) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    round_summary.failure_count = round_summary.failure_count.saturating_add(1);
+                    round_summary.errors.push(format!(
+                        "mode1 S1 round {} tx {tx_index} exact planner failed: {error:#}",
+                        round.round_index
+                    ));
+                    break;
+                }
+            };
+            println!(
+                "old_wallet/S1 round {} tx {}/{} exact self-transfer outputs={} input={} planned_fee={}",
+                round.round_index,
+                tx_index,
+                round.tx_count,
+                round.outputs_per_tx,
+                input,
+                plan.fee_microtari
+            );
+            let result =
+                submit_mode1_exact_self_split(client, self_address, plan.child_amounts, fee_rate)
+                    .await;
+            round_summary.record_batch(tx_index, round.outputs_per_tx, result);
+            round_summary
+                .construction_complete_ms
+                .push(round_start.elapsed().as_millis());
+        }
+        wait_for_mode1_scan_advance(
+            client,
+            config.settle_wait_blocks(),
+            config.timeout(config.timeouts.confirmation_secs),
+        )
+        .await;
+        wait_for_mode1_summary_verification(
+            client,
+            &mut round_summary,
+            ScenarioName::S1,
+            config.timeout(config.timeouts.confirmation_secs),
+            config.benchmark.c_min,
+        )
+        .await;
+        round_summary.wall_ms = round_start.elapsed().as_millis();
+        let observed_utxos = mode1_unspent_count(client).await.ok();
+        let balance_after = mode1_available_balance(client).await.ok();
+        let balance_delta_matches_fees =
+            round_balance_before
+                .zip(balance_after)
+                .is_some_and(|(before, after)| {
+                    before.saturating_sub(after) == round_summary.fee_microtari
+                });
+        round_summary.extra_metrics.insert(
+            format!("round_{}", round.round_index),
+            serde_json::json!({
+                "round_index": round.round_index,
+                "fanout": round.fanout,
+                "tx_count": round.tx_count,
+                "outputs_per_tx": round.outputs_per_tx,
+                "target_utxos_after": round.target_utxos_after,
+                "observed_unspent_count": observed_utxos,
+                "balance_after_microtari": balance_after,
+                "verified_count": round_summary.tx_infos.iter().filter(|tx| tx.confirmed).count(),
+                "fee_only_balance_delta_ok": balance_delta_matches_fees,
+                "wall_ms": round_summary.wall_ms
+            }),
+        );
+        let round_complete = mode1_s1_complete(&round_summary)
+            && observed_utxos == Some(u64::from(round.target_utxos_after))
+            && balance_delta_matches_fees;
+        if !round_complete {
+            if round_summary.failure_count == 0 {
+                round_summary.failure_count = round_summary.failure_count.saturating_add(1);
+            }
+            round_summary.errors.push(format!(
+                "mode1 S1 round {} failed exact UTXO/fee/C_min invariants; stopping subsequent S1 rounds",
+                round.round_index
+            ));
+        }
+        total.add_batch(round.round_index, round_summary);
+        if !round_complete || total.failure_count > 0 {
+            break;
+        }
+    }
+    total.wall_ms = start.elapsed().as_millis();
+    let balance_after = mode1_available_balance(client).await.ok();
+    add_balance_reconciliation_metrics(
+        &mut total.extra_metrics,
+        balance_before,
+        balance_after,
+        0,
+        total.fee_microtari,
+    );
+    total.extra_metrics.insert(
+        "unspent_after".to_string(),
+        serde_json::json!(mode1_unspent_count(client).await.ok()),
+    );
+    total
+}
+
+async fn run_mode1_s5(
+    config: &Config,
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    recipients: &[String],
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> Mode1TransferSummary {
+    let s5_items = capped_attempts(
+        config.benchmark.s5_m,
+        config.benchmark.mode1_live_max_s5_items,
+    );
+    let selected = recipients
+        .iter()
+        .take(s5_items as usize)
+        .cloned()
+        .collect::<Vec<_>>();
+    let start = Instant::now();
+    let individual_recipients = selected
+        .into_iter()
+        .map(|recipient| vec![recipient])
+        .collect::<Vec<_>>();
+    let mut total = run_mode1_recipient_batches_sequential(
+        "old_wallet/S5 individual",
+        client,
+        ScenarioName::S5,
+        individual_recipients,
+        false,
+        amount,
+        fee_rate,
+    )
+    .await;
+    wait_for_mode1_scan_advance(
+        client,
+        config.settle_wait_blocks(),
+        config.timeout(config.timeouts.confirmation_secs),
+    )
+    .await;
+    wait_for_mode1_summary_verification(
+        client,
+        &mut total,
+        ScenarioName::S5,
+        config.timeout(config.timeouts.confirmation_secs),
+        config.benchmark.c_min,
+    )
+    .await;
+    total.wall_ms = start.elapsed().as_millis();
+    total.batch_summaries.push(Mode1BatchSummary {
+        configured_batch: 1,
+        attempted_batches: total.attempted_batches,
+        attempted_payments: total.attempted_payments,
+        success_count: total.success_count,
+        failure_count: total.failure_count,
+        wall_ms: total.wall_ms,
+        fee_microtari: total.fee_microtari,
+        tx_ids: total.tx_ids.clone(),
+    });
+    total.extra_metrics.insert(
+        "s5_protocol".to_string(),
+        serde_json::json!({
+            "recipient_count": s5_items,
+            "batch_size": 1,
+            "complete": mode1_send_complete(&total),
+            "unavailable_reason": if mode1_send_complete(&total) { None } else { Some("one or more individual transactions did not reach C_min before timeout") }
+        }),
+    );
+    total
+}
+
+async fn run_mode1_s4_batches(
+    config: &Config,
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    recipients: &[String],
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> Mode1TransferSummary {
+    let mut total = Mode1TransferSummary::default();
+    let start = Instant::now();
+    for configured_batch in &config.benchmark.concurrent_batches {
+        let attempts = capped_attempts(*configured_batch, config.benchmark.mode1_live_max_s4_batch);
+        let selected = recipients.iter().take(attempts as usize).cloned().collect();
+        let batch = run_mode1_transfers_concurrent(
+            &format!("old_wallet/S4 batch {configured_batch}"),
+            client,
+            ScenarioName::S4,
+            selected,
+            amount,
+            fee_rate,
+            config.timeout(config.benchmark.s4_t_budget_secs),
+            config.benchmark.c_min,
+        )
+        .await;
+        total.add_batch(*configured_batch, batch);
+    }
+    total.wall_ms = start.elapsed().as_millis();
+    total
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_mode1_transfers_concurrent(
+    label: &str,
+    client: &WalletGrpcClient<tonic::transport::Channel>,
+    scenario: ScenarioName,
+    recipients: Vec<String>,
+    amount: MicroMinotari,
+    fee_rate: u64,
+    budget: Duration,
+    required_depth: u64,
+) -> Mode1TransferSummary {
+    let batch_count = u32::try_from(recipients.len()).unwrap_or(u32::MAX);
+    let mut summary = Mode1TransferSummary {
+        attempted_batches: batch_count,
+        attempted_payments: batch_count,
+        ..Mode1TransferSummary::default()
+    };
+    let start = Instant::now();
+    let deadline = time::Instant::now() + budget;
+    let mut join_set = JoinSet::new();
+    for (index, recipient) in recipients.into_iter().enumerate() {
+        let batch_index = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        println!("{label} batch {batch_index}/{batch_count} dispatching");
+        let mut client = client.clone();
+        let batch_start = Instant::now();
+        join_set.spawn(async move {
+            let transfer = submit_mode1_transfer(
+                &mut client,
+                scenario,
+                batch_index,
+                1,
+                false,
+                &recipient,
+                amount,
+                fee_rate,
+            )
+            .await;
+            (batch_index, batch_start.elapsed().as_millis(), transfer)
+        });
+    }
+    while !join_set.is_empty() {
+        let Ok(Some(result)) = time::timeout_at(deadline, join_set.join_next()).await else {
+            let unobserved = u32::try_from(join_set.len()).unwrap_or(u32::MAX);
+            join_set.abort_all();
+            summary.failure_count = summary.failure_count.saturating_add(unobserved);
+            summary.errors.push(format!(
+                "{label} absolute deadline expired with {unobserved} dispatch task(s) unfinished"
+            ));
+            break;
+        };
+        match result {
+            Ok((batch_index, completed_ms, transfer)) => {
+                summary.construction_complete_ms.push(completed_ms);
+                summary.record_batch(batch_index, 1, transfer)
+            }
+            Err(error) => summary.record_join_error(error.to_string()),
+        }
+    }
+    let remaining = deadline.saturating_duration_since(time::Instant::now());
+    if !remaining.is_zero() && !summary.tx_ids.is_empty() {
+        let mut verifier = client.clone();
+        wait_for_mode1_summary_verification(
+            &mut verifier,
+            &mut summary,
+            ScenarioName::S4,
+            remaining,
+            required_depth,
+        )
+        .await;
+    }
+    if !summary.tx_ids.is_empty() && !mode1_summary_verification_complete(&summary) {
+        summary.errors.push(format!(
+            "{label} reached its absolute deadline before every submitted transaction was C_min-deep"
+        ));
+    }
+    summary.wall_ms = start.elapsed().as_millis();
+    summary
+}
+
+async fn run_mode1_recipient_batches_sequential(
+    label: &str,
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    scenario: ScenarioName,
+    recipient_batches: Vec<Vec<String>>,
+    single_tx: bool,
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> Mode1TransferSummary {
+    let mut summary = Mode1TransferSummary {
+        attempted_batches: recipient_batches.len().try_into().unwrap_or(u32::MAX),
+        attempted_payments: recipient_batches
+            .iter()
+            .map(|batch| u32::try_from(batch.len()).unwrap_or(u32::MAX))
+            .fold(0u32, u32::saturating_add),
+        ..Mode1TransferSummary::default()
+    };
+    let start = Instant::now();
+    for (index, recipients) in recipient_batches.into_iter().enumerate() {
+        let batch_index = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        let items_per_batch = u32::try_from(recipients.len()).unwrap_or(u32::MAX);
+        println!(
+            "{label} batch {}/{} dispatching recipients={}",
+            batch_index,
+            summary.attempted_batches,
+            recipients.len()
+        );
+        let result = submit_mode1_transfer_to_recipients(
+            client,
+            scenario,
+            batch_index,
+            recipients,
+            single_tx,
+            amount,
+            fee_rate,
+        )
+        .await;
+        summary
+            .construction_complete_ms
+            .push(start.elapsed().as_millis());
+        summary.record_batch(batch_index, items_per_batch, result);
+    }
+    summary.wall_ms = start.elapsed().as_millis();
+    summary
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submit_mode1_transfer(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    scenario: ScenarioName,
+    batch_index: u32,
+    items_per_batch: u32,
+    single_tx: bool,
+    recipient: &str,
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> anyhow::Result<Mode1TransferOutcome> {
+    let recipients = (1..=items_per_batch)
+        .map(|_| recipient.to_string())
+        .collect::<Vec<_>>();
+    submit_mode1_transfer_to_recipients(
+        client,
+        scenario,
+        batch_index,
+        recipients,
+        single_tx,
+        amount,
+        fee_rate,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submit_mode1_transfer_to_recipients(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    scenario: ScenarioName,
+    batch_index: u32,
+    recipients: Vec<String>,
+    single_tx: bool,
+    amount: MicroMinotari,
+    fee_rate: u64,
+) -> anyhow::Result<Mode1TransferOutcome> {
+    let recipients = recipients
+        .into_iter()
+        .enumerate()
+        .map(|(index, address)| grpc::PaymentRecipient {
+            address,
+            amount: amount.0,
+            fee_per_gram: fee_rate,
+            payment_type: 1,
+            raw_payment_id: format!(
+                "wallet-bench-{}-{batch_index}-{}",
+                scenario.as_str(),
+                index + 1
+            )
+            .into_bytes(),
+            user_payment_id: None,
+        })
+        .collect::<Vec<_>>();
+    let submit_start = Instant::now();
+    let response = client
+        .transfer(grpc::TransferRequest {
+            recipients,
+            single_tx,
+        })
+        .await?;
+    Ok(Mode1TransferOutcome::from_response(response.into_inner())
+        .with_rpc_timing(batch_index, submit_start.elapsed().as_millis()))
+}
+
+async fn submit_mode1_exact_self_split(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    self_address: &str,
+    child_amounts: Vec<u64>,
+    fee_rate: u64,
+) -> anyhow::Result<Mode1TransferOutcome> {
+    let recipients = child_amounts
+        .into_iter()
+        .map(|amount| grpc::PaymentRecipient {
+            address: self_address.to_string(),
+            amount,
+            fee_per_gram: fee_rate,
+            payment_type: 1,
+            raw_payment_id: Vec::new(),
+            user_payment_id: None,
+        })
+        .collect();
+    let submit_start = Instant::now();
+    let response = client
+        .transfer(grpc::TransferRequest {
+            recipients,
+            single_tx: true,
+        })
+        .await?
+        .into_inner();
+    let mut outcome = Mode1TransferOutcome::from_response(response);
+    if outcome.failure_count == 0 && !outcome.tx_ids.is_empty() {
+        outcome.success_count = 1;
+        outcome.tx_ids.truncate(1);
+    } else {
+        outcome.success_count = 0;
+        outcome.failure_count = 1;
+    }
+    Ok(outcome.with_rpc_timing(1, submit_start.elapsed().as_millis()))
+}
+
+pub(super) async fn mode1_unspent_count(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+) -> anyhow::Result<u64> {
+    let response = client
+        .get_unspent_amounts(grpc::Empty {})
+        .await?
+        .into_inner();
+    Ok(response.amount.len().try_into().unwrap_or(u64::MAX))
+}
+
+async fn mode1_unspent_amounts(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+) -> anyhow::Result<Vec<u64>> {
+    Ok(client
+        .get_unspent_amounts(grpc::Empty {})
+        .await?
+        .into_inner()
+        .amount)
+}
+
+async fn mode1_available_balance(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+) -> anyhow::Result<u64> {
+    let response = client
+        .get_balance(grpc::GetBalanceRequest { payment_id: None })
+        .await?
+        .into_inner();
+    Ok(response.available_balance)
+}
+
+async fn wait_for_mode1_scan_advance(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    blocks: u64,
+    timeout: Duration,
+) {
+    let Ok(start_state) = client
+        .get_state(grpc::GetStateRequest {})
+        .await
+        .map(|r| r.into_inner())
+    else {
+        return;
+    };
+    let target = start_state.scanned_height.saturating_add(blocks);
+    let start = Instant::now();
+    let mut interval = time::interval(Duration::from_secs(10));
+    while start.elapsed() < timeout {
+        interval.tick().await;
+        let Ok(state) = client
+            .get_state(grpc::GetStateRequest {})
+            .await
+            .map(|r| r.into_inner())
+        else {
+            continue;
+        };
+        if state.scanned_height >= target {
+            return;
+        }
+        println!(
+            "mode1 settle wait: scanned_height={} target={}",
+            state.scanned_height, target
+        );
+    }
+}
 
 /// Pinned transaction weights: one kernel (10), one input (8), and 53 per output.
 /// A stealth output with default features/script/covenant and an empty memo rounds to

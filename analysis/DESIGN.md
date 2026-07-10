@@ -1,10 +1,9 @@
 # Design Notes
 
 - Mode 1 uses a real `minotari_console_wallet` process with gRPC. The harness
-  manages lifecycle, drives S1 through `CoinSplit`, and drives S4/S5 through
-  `Transfer`. The only retry is a capped S1 `CoinSplit` retry for a transient
-  submit-time SQLite `database is locked` before a tx id exists; S4/S5 transfer
-  errors are recorded without retry.
+  manages lifecycle and drives S1, S4, and S5 through one-shot `Transfer`
+  requests. S1 uses exact no-change self-directed multi-recipient transfers;
+  all scenario failures are recorded without retry.
 - Mode 2 uses the pinned `minotari` library path for signing and direct base-node
   HTTP submission. It verifies submitted transactions by extracting kernel
   signatures from the wallet DB and querying the public Esmeralda base node.
@@ -34,6 +33,7 @@
   seeds from recovered minotari signing wallets. It must not be used to
   pre-partition the final benchmark starting state, which should be one clean
   `A_fund` UTXO per mode.
-- `src/live_minotari.rs` still owns orchestration, but isolated helper modules now
-  live under `src/live_minotari/` for Mode 1 retry detection, Mode 2 status
-  mapping, Mode 3 terminal PP observations, and scan resource sampling.
+- `src/live_minotari.rs` is the shared orchestration and transaction-core layer.
+  Substantive `mode1`, `mode2`, `mode3`, `scan`, and `verification`
+  modules own their respective scenario paths; `profile_validation` owns the
+  schema-v4 and submission-validation contract.

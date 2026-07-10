@@ -592,9 +592,13 @@
         },
         "tip_start_height": {
           "$ref": "#/$defs/nullable_integer"
+        },
+        "transaction_id": {
+          "$ref": "#/$defs/nullable_string"
         }
       },
       "required": [
+        "transaction_id",
         "construction_ms",
         "submission_ms",
         "mempool_available",

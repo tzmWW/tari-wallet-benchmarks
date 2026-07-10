@@ -23,10 +23,10 @@ not hide.
   checks, scan expected-vs-found checks, scan RSS/CPU peaks, per-tx timing rows,
   balance reconciliation, S5 per-arm metrics, and top-level `computed_deltas` for
   scan and S5 comparisons.
-- The live runner has a light helper-module split under `src/live_minotari/` for
-  Mode 1 retry detection, Mode 2 status mapping, Mode 3 PP terminal-state logic,
-  and scan resource sampling. The large orchestration file remains behaviorally
-  central to avoid a risky final-stage rewrite.
+- The live runner uses substantive `src/live_minotari/{mode1,mode2,mode3,scan,
+  verification}.rs` modules for mode paths, fresh scans, and independent chain
+  evidence. The root module retains only shared orchestration, data models,
+  transaction construction, and tests.
 
 ## Upstream Risks To Preserve In Results
 
@@ -54,10 +54,9 @@ not hide.
 - Wallet construction stalls, UTXO lock contention, and failed concurrent sends
   are benchmark signal. Scenario code must not add retries, backoff, throttling,
   sleeps between S4 dispatches, or hidden UTXO pre-partitioning.
-- Mode 1 S4/S5 `Transfer` submissions do not retry `database is locked`,
-  pending-funds, or construction errors. The only remaining Mode 1 retry is the
-  capped S1 `CoinSplit` submit-time SQLite `database is locked` case before a tx
-  id exists; retry count is emitted as `db_lock_retries` so it remains visible.
+- Mode 1 S1/S4/S5 `Transfer` submissions are one-shot. SQLite lock,
+  pending-funds, and construction errors are measured outcomes; the harness has
+  no scenario retry or backoff path.
 - `WalletHttpClient::new` uses retry middleware by default. The Mode 2 send
   smoke persists the signed transaction to the minotari wallet DB, then submits
   it with a direct `submit_transaction` JSON-RPC request so the harness does not
