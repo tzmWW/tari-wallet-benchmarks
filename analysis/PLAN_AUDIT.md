@@ -26,7 +26,7 @@ present. A live-run or publication status is not claimed without a new artifact.
 | S5 same 100 recipients; individual old/new and PP 10×10 | Implemented | Mode 1/2 derive the same pool; Mode 3 batches it by S5_K. |
 | S5 confirmation/timeout timing, PP chain data, null incomplete comparisons | Implemented | Arm walls include terminal observation; confirmation duration is emitted; PP extracts kernel data and queries the base node; semantic validation rejects fabricated ratios. |
 | Checkpoints gate scans; no startup DB surgery | Implemented | S1 gates S2–S7; fresh scans record blocked prerequisites; preflight and AST rules reject direct unlock/expiry repair. |
-| Substantive module split | Implemented | Root live module is 4,131 lines of shared core/tests; Mode 1 is 1,286, Mode 2 935, Mode 3 799, scan 649, verification 405, and profile validation 860 lines. |
+| Substantive module split | Implemented | Root live module is 4,186 lines of shared core/tests; Mode 1 is 1,286, Mode 2 942, Mode 3 799, scan 649, verification 405, and profile validation 861 lines. |
 
 ## Public Interfaces and Result Schema
 
@@ -67,7 +67,7 @@ present. A live-run or publication status is not claimed without a new artifact.
 
 | Plan item | Status | Evidence |
 | --- | --- | --- |
-| Fetch/rebase, scoped commits, push owned harness repo | In progress | Performed before edits; final scoped commit/push follows verification. |
+| Fetch/rebase, scoped commits, push owned harness repo | Implemented | Rebased before work; commit f4733ce is pushed to the owned benchmark branch. |
 | Fast-forward default branch and push true submission fork | Pending valid candidate | Must not happen before live acceptance. |
 | Open upstream PR, wait for CI, review threads | Pending valid candidate | Issue #1 is open; no PR is represented as ready. |
 
