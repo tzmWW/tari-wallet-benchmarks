@@ -135,15 +135,17 @@ base-node transaction-query evidence for a Mode 2 transaction id.
 ```sh
 source .secrets/seeds.env
 export HARNESS_WALLET_PW='replace-with-a-long-local-password'
-cargo run -- preflight --config harness.toml
-cargo run -- preflight --config harness.toml --check-funds
+cargo run --features live-minotari -- preflight --config harness.toml
+cargo run --features live-minotari -- preflight --config harness.toml --check-funds
 ```
 
 Preflight validates the Esmeralda-only guard, seed material, wallet password env,
 and local binary paths. It prints the PP build command if the PP binary is
-missing. With `--check-funds`, it also audits wallet DB output-status totals and
-fails unless each configured live wallet has exactly one spendable output with
-value exactly equal to `A_fund`, and no pending, encumbered, invalid, cancelled,
+missing. With `--check-funds`, it also audits wallet DB output-status totals,
+proves the configured console-wallet address over Mode 1 gRPC, proves the
+minotari account fingerprints, checks scanner/selected-chain state, and fails
+unless each configured live wallet has exactly one spendable output with value
+exactly equal to `A_fund`, and no pending, encumbered, invalid, cancelled,
 not-stored, or unknown outputs. Text minotari statuses and numeric console-wallet
 statuses are printed with labels. Use `--mode1-db`, `--mode2-db`, and
 `--payment-receiver-db` to audit recovered DBs before updating `harness.toml`.
@@ -200,7 +202,7 @@ live_fresh_scan_cells = true    # long-running B0/S2/S3 fresh database scans
 scan_repetitions = 1            # scan cells; live send cells currently emit one repetition
 
 mode1_live_topology = true      # runs real minotari_console_wallet with gRPC
-mode1_scenario_amount = "1 T"
+mode1_payment_amount = "1 T"
 mode1_live_max_s1_txs = 1       # 0 means full doubling/fanout target
 mode1_live_max_s4_batch = 1     # 0 means use each concurrent_batches value
 mode1_live_max_s5_items = 2     # 0 means use S5_M
@@ -211,13 +213,13 @@ mode2_send_smoke = true         # spends mode2_send_smoke_amount once
 mode2_send_smoke_amount = "1 T"
 
 mode2_live_scenarios = true     # spends via Mode 2 S1/S4/S5 cells
-mode2_scenario_amount = "1 T"
+mode2_payment_amount = "1 T"
 mode2_live_max_s1_txs = 2       # 0 means full doubling/fanout target
 mode2_live_max_s4_batch = 2     # 0 means use each concurrent_batches value
 mode2_live_max_s5_txs = 2       # 0 means use S5_M
 
 mode3_live_topology = true      # runs real PP plus minotari payment receiver
-mode3_scenario_amount = "1 T"
+mode3_payment_amount = "1 T"
 mode3_live_max_s1_batches = 1   # 0 means full doubling/fanout target
 mode3_live_max_s4_batch = 1     # 0 means use each concurrent_batches value
 mode3_live_max_s5_items = 2     # 0 means use S5_M
@@ -225,9 +227,10 @@ mode3_worker_sleep_secs = 10    # PP worker cadence during live runs
 ```
 
 ```sh
+PROFILE="candidates/esmeralda-$(date -u +%Y%m%dT%H%M%SZ).json"
 cargo run --features live-minotari -- run \
   --config harness.toml \
-  --profile baselines/esmeralda_baseline.json
+  --profile "$PROFILE"
 ```
 
 The result profile is written atomically and does not contain seed phrases or
@@ -330,17 +333,14 @@ restart once from the same DB so validation can mark the stale output spent befo
 the next benchmark send.
 
 Mode 1 S1 follows the spec round shape: six doubling rounds and one fan-out
-round, capped only by `mode1_live_max_s1_txs` for development runs. Between
-planned spend rounds the harness waits for chain/scanner height advancement;
-this is a settlement gate, not a retry. The one narrow transient retry remains
-only in S1 `CoinSplit` when the console-wallet gRPC submit returns `database is
-locked` before a tx id exists; those retries are capped and recorded as
-`db_lock_retries` in Mode 1 metrics. S4 and S5 `Transfer` submissions do not
-retry database-lock, pending-funds, or construction errors. S5 uses deterministic
-distinct Esmeralda recipients and records both batch-shaped and individual-shaped
-arms. If earlier S1/S4 sends have locked the single large funded UTXO or change
-output, S5 can fail with `Funds are still pending`; that is recorded as wallet
-behavior rather than retried or hidden.
+round, capped only by `mode1_live_max_s1_txs` for development runs. Every round
+reads live spendable values, derives equal no-change children from the pinned
+weight/fee shape, settles to `C_min`, and verifies the exact UTXO-count and
+fee-only balance delta before advancing. S1, S4, and S5 submit each attempt once:
+there is no retry, backoff, or direct wallet-state repair. S5 uses deterministic
+distinct Esmeralda recipients. If earlier S1/S4 sends have locked the single
+large funded UTXO or change output, S5 can fail with `Funds are still pending`;
+that is recorded as wallet behavior rather than retried or hidden.
 
 When `mode2_live_scenarios` is enabled, the harness records Mode 2 S1, S4, and
 S5 through the direct minotari crate path:
@@ -356,11 +356,10 @@ S5 through the direct minotari crate path:
   but the base-node tip is the chain-advance clock because wallet scan-tip
   metadata can update in coarse buckets. This is a settlement gate for the known
   `FundsPending` lock behavior, not a retry.
-- After S5, any Mode 2 tx ids produced by S1/S4/S5 are re-queried until every
-  observed tx reaches `C_min` or the confirmation timeout expires. The harness
-  replaces the original single repetition in place and removes any stale
-  top-level rows for that Mode 2 scenario before adding newly confirmed rows, so
-  the refresh does not create fake repetitions or duplicate chain evidence.
+- Each Mode 2 S1 round independently re-queries every submitted transaction
+  until it reaches `C_min` or the confirmation timeout expires. A failed round
+  blocks later S1 rounds and all dependent cells. S4/S5 preserve the same
+  confirmed-only top-level evidence rule without retrying rejected sends.
 - S4 dispatches each configured concurrent batch against the same wallet
   database, capped by `mode2_live_max_s4_batch` when non-zero. Wallet lock
   contention and failed sends are counted as benchmark signal.
@@ -395,17 +394,17 @@ When `mode3_live_topology` is enabled, the harness starts a real
 `minotari_payment_processor` process plus a parallel `minotari daemon` payment
 receiver. The PP companion view wallet is initialized with a current birthday
 when the generated PP seed is genesis-dated, so fresh benchmark funding does not
-force an accidental genesis scan. Before the daemon starts, the harness expires
-and unlocks stale payment-receiver locks left by previously interrupted local
-runs; it does not unlock between scenarios inside a run.
+force an accidental genesis scan. Dirty or locked receiver state is a preflight
+failure: the harness never expires or unlocks it directly.
 
 Mode 3 S1/S4/S5 drive `/v1/payment-batches` with the configured caps. S1 is a
 PP batch-shape analogue to the doubling/fan-out plan: each planned S1 tx becomes
 one PP batch, and `outputs_per_tx` becomes payments per batch. S5 uses the same
 deterministic distinct-recipient pool shape as the other modes, grouped by
 `S5_K`. PP DB observations are labeled `payment_processor_db_observed`; only
-confirmed PP batches are emitted as top-level chain-verification rows. Pending
-PP batches remain in metrics/notes. The harness waits up to
+confirmed PP batches with a real signed-transaction kernel, fee, mined height,
+and independent base-node `C_min` proof are emitted as top-level
+chain-verification rows. Pending PP batches remain in metrics/notes. The harness waits up to
 `[timeouts].confirmation_secs` for accepted PP batches to reach terminal DB
 status before recording the cell; `AWAITING_CONFIRMATION` and signed-but-not-yet
 confirmed batches are not counted as done. With a single large funded UTXO, the
@@ -425,19 +424,13 @@ companion minotari wallet scan surface.
 cargo run -- schema --out RESULT_PROFILE_SCHEMA.json
 ```
 
-The JSON profile is designed for automated comparison. Every profile records the
-network, hardware environment, pinned versions, benchmark parameters, per-mode
-scenario cells, findings, and chain-verification status value. Schema v3 adds
-per-repetition `metrics` for scenario-specific values such as S1 round details,
-S4 serialization gaps, S5 recipient shape, observed-but-unconfirmed DB rows, and
-confirmed chain-verification rows with amount/fee/mined-height fields when the
-wallet surface exposes them. It also allows verification-source notes,
-base-node query observations, scan checkpoints, birthdays, tip start/end,
-tip-lag validation, blocks scanned per second, detected outputs,
-spendable-output checks, scan peak RSS/CPU, strict S0 observations, per-tx timing
-observations, balance reconciliation deltas, and S5 per-arm metrics. The top-level
-`computed_deltas` section derives scan deltas and S5 throughput ratios from those
-scenario metrics.
+The JSON profile is a real Draft 2020-12 schema-v4 document. It records a stable
+run identity, checkpoint/final state, harness commit, base-node endpoint and
+anchors, resolved funding birthdays, and separate execution/outcome statuses for
+every cell. Per-repetition metrics include common transaction observations,
+strict S0 checks, scan resource/expectation evidence, balance reconciliation,
+and S5 arms. The top-level `computed_deltas` section derives scan deltas and
+S5 throughput ratios only from complete source arms.
 Environment capture includes OS, CPU, memory, disk kind/name, base-node host, and
 whether the base-node path is local or remote.
 
@@ -452,8 +445,16 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo test
 ast-grep scan
+git diff -- RESULT_PROFILE_SCHEMA.json # empty after `schema`
 git diff --check
 ```
 
 The AST rules intentionally block harness-level retry, backoff, throttling,
-scenario dispatch sleeps, and hidden UTXO pre-partitioning in source code.
+scenario dispatch sleeps, direct wallet-state repair, and hidden UTXO
+pre-partitioning in source code. Validate the candidate and derive its Markdown
+summary only after the run is complete:
+
+```sh
+cargo run -- validate-profile --profile candidate.json --submission
+cargo run -- summarize-profile --profile candidate.json --out candidate.md
+```

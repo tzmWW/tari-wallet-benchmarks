@@ -47,6 +47,7 @@ pub struct BenchmarkConfig {
     pub s5_m: u32,
     pub s5_k: u32,
     pub fee_rate: String,
+    #[serde(default = "default_repetitions")]
     pub repetitions: u32,
     #[serde(default = "default_scan_repetitions")]
     pub scan_repetitions: u32,
@@ -54,8 +55,11 @@ pub struct BenchmarkConfig {
     pub scan_batch_size: u64,
     #[serde(default)]
     pub mode1_live_topology: bool,
-    #[serde(default = "default_mode1_scenario_amount")]
-    pub mode1_scenario_amount: String,
+    #[serde(
+        default = "default_mode1_payment_amount",
+        alias = "mode1_scenario_amount"
+    )]
+    pub mode1_payment_amount: String,
     #[serde(default)]
     pub mode1_live_max_s1_txs: u32,
     #[serde(default)]
@@ -70,8 +74,11 @@ pub struct BenchmarkConfig {
     pub mode2_send_smoke_amount: String,
     #[serde(default)]
     pub mode2_live_scenarios: bool,
-    #[serde(default = "default_mode2_scenario_amount")]
-    pub mode2_scenario_amount: String,
+    #[serde(
+        default = "default_mode2_payment_amount",
+        alias = "mode2_scenario_amount"
+    )]
+    pub mode2_payment_amount: String,
     #[serde(default)]
     pub mode2_live_max_s1_txs: u32,
     #[serde(default)]
@@ -80,8 +87,11 @@ pub struct BenchmarkConfig {
     pub mode2_live_max_s5_txs: u32,
     #[serde(default)]
     pub mode3_live_topology: bool,
-    #[serde(default = "default_mode3_scenario_amount")]
-    pub mode3_scenario_amount: String,
+    #[serde(
+        default = "default_mode3_payment_amount",
+        alias = "mode3_scenario_amount"
+    )]
+    pub mode3_payment_amount: String,
     #[serde(default)]
     pub mode3_live_max_s1_batches: u32,
     #[serde(default)]
@@ -90,6 +100,20 @@ pub struct BenchmarkConfig {
     pub mode3_live_max_s5_items: u32,
     #[serde(default = "default_mode3_worker_sleep_secs")]
     pub mode3_worker_sleep_secs: u64,
+}
+
+impl BenchmarkConfig {
+    pub fn mode1_scenario_amount(&self) -> &str {
+        &self.mode1_payment_amount
+    }
+
+    pub fn mode2_scenario_amount(&self) -> &str {
+        &self.mode2_payment_amount
+    }
+
+    pub fn mode3_scenario_amount(&self) -> &str {
+        &self.mode3_payment_amount
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +146,8 @@ pub struct VersionConfig {
     pub minotari_cli_rev: String,
     pub tari_console_wallet_rev: String,
     pub payment_processor_rev: String,
+    #[serde(default = "default_base_node_rev")]
+    pub base_node_rev: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -139,6 +165,10 @@ pub struct FundingRecord {
     pub amount: String,
     pub tx_id: String,
     pub height: u64,
+    #[serde(default)]
+    pub birthday: Option<u16>,
+    #[serde(default)]
+    pub birthday_start_height: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,7 +193,8 @@ impl Default for TimeoutConfig {
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&text)?;
+        let mut config: Self = toml::from_str(&text)?;
+        config.resolve_runtime_paths(&std::env::current_dir()?)?;
         config.validate()?;
         Ok(config)
     }
@@ -175,8 +206,10 @@ impl Config {
         if self.benchmark.c_min == 0 {
             bail!("benchmark.c_min must be greater than 0");
         }
-        if self.benchmark.repetitions == 0 {
-            bail!("benchmark.repetitions must be greater than 0");
+        if self.benchmark.repetitions != 1 {
+            bail!(
+                "benchmark.repetitions must equal 1 until stateful live repetitions use isolated funded wallets"
+            );
         }
         if self.benchmark.scan_repetitions == 0 {
             bail!("benchmark.scan_repetitions must be greater than 0");
@@ -189,14 +222,14 @@ impl Config {
                 "benchmark.mode2_send_smoke and benchmark.mode2_live_scenarios are mutually exclusive"
             );
         }
-        parse_amount(&self.benchmark.mode1_scenario_amount)
-            .context("benchmark.mode1_scenario_amount")?;
+        parse_amount(&self.benchmark.mode1_payment_amount)
+            .context("benchmark.mode1_payment_amount")?;
         parse_amount(&self.benchmark.mode2_send_smoke_amount)
             .context("benchmark.mode2_send_smoke_amount")?;
-        parse_amount(&self.benchmark.mode2_scenario_amount)
-            .context("benchmark.mode2_scenario_amount")?;
-        parse_amount(&self.benchmark.mode3_scenario_amount)
-            .context("benchmark.mode3_scenario_amount")?;
+        parse_amount(&self.benchmark.mode2_payment_amount)
+            .context("benchmark.mode2_payment_amount")?;
+        parse_amount(&self.benchmark.mode3_payment_amount)
+            .context("benchmark.mode3_payment_amount")?;
         if self.benchmark.mode3_worker_sleep_secs == 0 {
             bail!("benchmark.mode3_worker_sleep_secs must be greater than 0");
         }
@@ -232,6 +265,23 @@ impl Config {
         self.a_fund()?;
         self.fee_rate()?;
         self.funding.validate()?;
+        self.funding.validate_live_birthdays(&self.benchmark)?;
+        Ok(())
+    }
+
+    /// Resolves runtime filesystem inputs once, without changing the persisted
+    /// TOML representation. Existing paths are canonicalized; missing paths are
+    /// still made absolute so subprocesses never inherit cwd-dependent values.
+    pub fn resolve_runtime_paths(&mut self, base: &Path) -> anyhow::Result<()> {
+        self.paths.data_dir = resolve_runtime_path(base, &self.paths.data_dir)?;
+        self.paths.cache_dir = resolve_runtime_path(base, &self.paths.cache_dir)?;
+        self.paths.minotari_console_wallet =
+            resolve_runtime_path(base, &self.paths.minotari_console_wallet)?;
+        self.paths.minotari_binary = resolve_runtime_path(base, &self.paths.minotari_binary)?;
+        self.paths.payment_processor_binary =
+            resolve_runtime_path(base, &self.paths.payment_processor_binary)?;
+        self.modes.new_wallet_database =
+            resolve_runtime_path(base, &self.modes.new_wallet_database)?;
         Ok(())
     }
 
@@ -301,8 +351,16 @@ impl Config {
                 serde_json::json!(self.benchmark.mode1_live_topology),
             ),
             (
-                "mode1_scenario_amount".to_string(),
-                serde_json::json!(self.benchmark.mode1_scenario_amount),
+                "base_node_http_url".to_string(),
+                serde_json::json!(self.network.base_node_http_url),
+            ),
+            (
+                "base_node_rev".to_string(),
+                serde_json::json!(self.versions.base_node_rev),
+            ),
+            (
+                "mode1_payment_amount".to_string(),
+                serde_json::json!(self.benchmark.mode1_payment_amount),
             ),
             (
                 "mode1_live_max_s1_txs".to_string(),
@@ -333,8 +391,8 @@ impl Config {
                 serde_json::json!(self.benchmark.mode2_live_scenarios),
             ),
             (
-                "mode2_scenario_amount".to_string(),
-                serde_json::json!(self.benchmark.mode2_scenario_amount),
+                "mode2_payment_amount".to_string(),
+                serde_json::json!(self.benchmark.mode2_payment_amount),
             ),
             (
                 "mode2_live_max_s1_txs".to_string(),
@@ -353,8 +411,8 @@ impl Config {
                 serde_json::json!(self.benchmark.mode3_live_topology),
             ),
             (
-                "mode3_scenario_amount".to_string(),
-                serde_json::json!(self.benchmark.mode3_scenario_amount),
+                "mode3_payment_amount".to_string(),
+                serde_json::json!(self.benchmark.mode3_payment_amount),
             ),
             (
                 "mode3_live_max_s1_batches".to_string(),
@@ -372,6 +430,11 @@ impl Config {
                 "mode3_worker_sleep_secs".to_string(),
                 serde_json::json!(self.benchmark.mode3_worker_sleep_secs),
             ),
+            (
+                "funding".to_string(),
+                serde_json::json!(self.funding.as_map()),
+            ),
+            ("timeouts".to_string(), serde_json::json!(self.timeouts)),
         ])
     }
 
@@ -406,11 +469,11 @@ impl Default for Config {
                 s5_m: 100,
                 s5_k: 10,
                 fee_rate: "5 uT".to_string(),
-                repetitions: 3,
+                repetitions: default_repetitions(),
                 scan_repetitions: default_scan_repetitions(),
                 scan_batch_size: default_scan_batch_size(),
                 mode1_live_topology: false,
-                mode1_scenario_amount: default_mode1_scenario_amount(),
+                mode1_payment_amount: default_mode1_payment_amount(),
                 mode1_live_max_s1_txs: 0,
                 mode1_live_max_s4_batch: 0,
                 mode1_live_max_s5_items: 0,
@@ -418,12 +481,12 @@ impl Default for Config {
                 mode2_send_smoke: false,
                 mode2_send_smoke_amount: default_mode2_send_smoke_amount(),
                 mode2_live_scenarios: false,
-                mode2_scenario_amount: default_mode2_scenario_amount(),
+                mode2_payment_amount: default_mode2_payment_amount(),
                 mode2_live_max_s1_txs: 0,
                 mode2_live_max_s4_batch: 0,
                 mode2_live_max_s5_txs: 0,
                 mode3_live_topology: false,
-                mode3_scenario_amount: default_mode3_scenario_amount(),
+                mode3_payment_amount: default_mode3_payment_amount(),
                 mode3_live_max_s1_batches: 0,
                 mode3_live_max_s4_batch: 0,
                 mode3_live_max_s5_items: 0,
@@ -454,6 +517,7 @@ impl Default for Config {
                 minotari_cli_rev: MINOTARI_CLI_REV.to_string(),
                 tari_console_wallet_rev: TARI_CONSOLE_WALLET_REV.to_string(),
                 payment_processor_rev: PAYMENT_PROCESSOR_REV.to_string(),
+                base_node_rev: default_base_node_rev(),
             },
             funding: FundingConfig::default(),
             timeouts: TimeoutConfig::default(),
@@ -469,11 +533,15 @@ fn default_scan_repetitions() -> u32 {
     1
 }
 
+fn default_repetitions() -> u32 {
+    1
+}
+
 fn default_settle_cooldown_secs() -> u64 {
     60
 }
 
-fn default_mode1_scenario_amount() -> String {
+fn default_mode1_payment_amount() -> String {
     "1 T".to_string()
 }
 
@@ -481,16 +549,34 @@ fn default_mode2_send_smoke_amount() -> String {
     "1 T".to_string()
 }
 
-fn default_mode2_scenario_amount() -> String {
+fn default_mode2_payment_amount() -> String {
     "1 T".to_string()
 }
 
-fn default_mode3_scenario_amount() -> String {
+fn default_mode3_payment_amount() -> String {
     "1 T".to_string()
 }
 
 fn default_mode3_worker_sleep_secs() -> u64 {
     10
+}
+
+fn default_base_node_rev() -> String {
+    "v5.4.0".to_string()
+}
+
+fn resolve_runtime_path(base: &Path, path: &Path) -> anyhow::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    if absolute.exists() {
+        return absolute
+            .canonicalize()
+            .with_context(|| format!("canonicalizing runtime path {}", absolute.display()));
+    }
+    Ok(std::path::absolute(&absolute)?)
 }
 
 impl FundingConfig {
@@ -505,6 +591,47 @@ impl FundingConfig {
             }
             if record.height == 0 {
                 bail!("funding.{role}.height must be greater than 0");
+            }
+            if let Some(start_height) = record.birthday_start_height
+                && start_height > record.height
+            {
+                bail!("funding.{role}.birthday_start_height must not exceed the funding height");
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_live_birthdays(&self, benchmark: &BenchmarkConfig) -> anyhow::Result<()> {
+        let requirements = [
+            (
+                "old_wallet",
+                benchmark.mode1_live_topology,
+                self.old_wallet.as_ref(),
+            ),
+            (
+                "new_wallet",
+                benchmark.mode2_live_scenarios || benchmark.mode2_send_smoke,
+                self.new_wallet.as_ref(),
+            ),
+            (
+                "payment_processor",
+                benchmark.mode3_live_topology,
+                self.payment_processor.as_ref(),
+            ),
+        ];
+        for (role, live, record) in requirements {
+            if !live {
+                continue;
+            }
+            let record = record.with_context(|| format!("funding.{role} must be set"))?;
+            if parse_amount(&record.amount)? != parse_amount(&benchmark.a_fund)? {
+                bail!("funding.{role}.amount must equal benchmark.a_fund for a pristine live run");
+            }
+            if record.birthday.is_none() {
+                bail!("funding.{role}.birthday must be set for live runs");
+            }
+            if record.birthday_start_height.is_none() {
+                bail!("funding.{role}.birthday_start_height must be set for live runs");
             }
         }
         Ok(())
@@ -571,6 +698,8 @@ mod tests {
             amount: "50000 T".to_string(),
             tx_id: "7676530785144502866".to_string(),
             height: 707741,
+            birthday: None,
+            birthday_start_height: None,
         });
         cfg.validate().unwrap();
         assert_eq!(cfg.funding.as_map()["new_wallet"].height, 707741);
@@ -599,25 +728,25 @@ mod tests {
     #[test]
     fn mode1_live_scenario_amount_must_parse() {
         let mut cfg = Config::default();
-        cfg.benchmark.mode1_scenario_amount = "not money".to_string();
+        cfg.benchmark.mode1_payment_amount = "not money".to_string();
         let error = cfg.validate().unwrap_err().to_string();
-        assert!(error.contains("mode1_scenario_amount"));
+        assert!(error.contains("mode1_payment_amount"));
     }
 
     #[test]
     fn mode2_live_scenario_amount_must_parse() {
         let mut cfg = Config::default();
-        cfg.benchmark.mode2_scenario_amount = "not money".to_string();
+        cfg.benchmark.mode2_payment_amount = "not money".to_string();
         let error = cfg.validate().unwrap_err().to_string();
-        assert!(error.contains("mode2_scenario_amount"));
+        assert!(error.contains("mode2_payment_amount"));
     }
 
     #[test]
     fn mode3_live_scenario_amount_must_parse() {
         let mut cfg = Config::default();
-        cfg.benchmark.mode3_scenario_amount = "not money".to_string();
+        cfg.benchmark.mode3_payment_amount = "not money".to_string();
         let error = cfg.validate().unwrap_err().to_string();
-        assert!(error.contains("mode3_scenario_amount"));
+        assert!(error.contains("mode3_payment_amount"));
     }
 
     #[test]
@@ -643,5 +772,57 @@ mod tests {
         cfg.benchmark.concurrent_batches = vec![8, 0, 16];
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("concurrent_batches"));
+    }
+
+    #[test]
+    fn repetitions_are_one_until_live_state_is_isolated() {
+        let mut cfg = Config::default();
+        cfg.benchmark.repetitions = 2;
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("repetitions must equal 1"));
+    }
+
+    #[test]
+    fn legacy_scenario_amount_names_deserialize_as_payment_amounts() {
+        let legacy = toml::to_string(&Config::default())
+            .unwrap()
+            .replace("mode1_payment_amount", "mode1_scenario_amount")
+            .replace("mode2_payment_amount", "mode2_scenario_amount")
+            .replace("mode3_payment_amount", "mode3_scenario_amount");
+        let parsed: Config = toml::from_str(&legacy).unwrap();
+        assert_eq!(parsed.benchmark.mode1_payment_amount, "1 T");
+        assert_eq!(parsed.benchmark.mode2_payment_amount, "1 T");
+        assert_eq!(parsed.benchmark.mode3_payment_amount, "1 T");
+    }
+
+    #[test]
+    fn live_funding_requires_birthday_and_resolved_start_height() {
+        let mut cfg = Config::default();
+        cfg.benchmark.mode2_live_scenarios = true;
+        cfg.funding.new_wallet = Some(FundingRecord {
+            amount: "10000 T".to_string(),
+            tx_id: "123".to_string(),
+            height: 700_000,
+            birthday: None,
+            birthday_start_height: None,
+        });
+
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("funding.new_wallet.birthday"));
+
+        let record = cfg.funding.new_wallet.as_mut().unwrap();
+        record.birthday = Some(1_600);
+        record.birthday_start_height = Some(690_000);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn runtime_paths_are_absolute_without_persisting_changes() {
+        let base = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.resolve_runtime_paths(base.path()).unwrap();
+        assert!(cfg.paths.data_dir.is_absolute());
+        assert!(cfg.paths.minotari_binary.is_absolute());
+        assert!(cfg.modes.new_wallet_database.is_absolute());
     }
 }

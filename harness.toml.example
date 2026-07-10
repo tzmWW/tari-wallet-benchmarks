@@ -16,11 +16,11 @@ settle_cooldown_secs = 60
 s5_m = 100
 s5_k = 10
 fee_rate = "5 uT"
-repetitions = 3
+repetitions = 1
 scan_repetitions = 1
 scan_batch_size = 1000
 mode1_live_topology = false
-mode1_scenario_amount = "1 T"
+mode1_payment_amount = "1 T"
 mode1_live_max_s1_txs = 0
 mode1_live_max_s4_batch = 0
 mode1_live_max_s5_items = 0
@@ -28,12 +28,12 @@ live_fresh_scan_cells = false
 mode2_send_smoke = false
 mode2_send_smoke_amount = "1 T"
 mode2_live_scenarios = false
-mode2_scenario_amount = "1 T"
+mode2_payment_amount = "1 T"
 mode2_live_max_s1_txs = 0
 mode2_live_max_s4_batch = 0
 mode2_live_max_s5_txs = 0
 mode3_live_topology = false
-mode3_scenario_amount = "1 T"
+mode3_payment_amount = "1 T"
 mode3_live_max_s1_batches = 0
 mode3_live_max_s4_batch = 0
 mode3_live_max_s5_items = 0
@@ -62,24 +62,33 @@ payment_receiver_listen = "127.0.0.1:9146"
 minotari_cli_rev = "360c4848a54d65fd710266233cc9277b0f785e74"
 tari_console_wallet_rev = "9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
 payment_processor_rev = "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c"
+# Public Esmeralda does not expose its exact server build; this is the
+# compatibility reference used by the harness.
+base_node_rev = "v5.4.0"
 
 # Optional: record funding evidence after sending Esmeralda funds to the
 # generated addresses. These are benchmark inputs, not secrets.
 #
 # [funding.old_wallet]
-# amount = "50000 T"
+# amount = "10000 T"
 # tx_id = "11463237927696771510"
 # height = 707731
+# birthday = 0
+# birthday_start_height = 0
 #
 # [funding.new_wallet]
-# amount = "50000 T"
+# amount = "10000 T"
 # tx_id = "7676530785144502866"
 # height = 707741
+# birthday = 1635
+# birthday_start_height = 700000
 #
 # [funding.payment_processor]
-# amount = "50000 T"
+# amount = "10000 T"
 # tx_id = "4002233626181090692"
 # height = 707747
+# birthday = 0
+# birthday_start_height = 0
 
 [timeouts]
 startup_secs = 1800

@@ -1,0 +1,10 @@
+id: no-wallet-state-repair
+language: Rust
+severity: error
+message: Preserve wallet failure state; benchmark paths must not expire or unlock outputs directly.
+rule:
+  any:
+    - pattern: db::unlock_outputs_for_pending_transaction($$$ARGS)
+    - pattern: db::update_pending_transaction_status($$$ARGS, PendingTransactionStatus::Expired)
+files:
+  - src/**/*.rs

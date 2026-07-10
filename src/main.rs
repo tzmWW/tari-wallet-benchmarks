@@ -1,10 +1,12 @@
+#![recursion_limit = "256"]
+
 use anyhow::Context;
 use clap::Parser;
 use wallet_bench::{
     cli::{Cli, Command},
     config::Config,
     guards::enforce_esmeralda,
-    result_profile::write_schema,
+    result_profile::{profile_validation, write_schema},
     runner::{generate_addresses, preflight, run_profile},
 };
 
@@ -120,6 +122,17 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Schema { out } => write_schema(&out)?,
+        Command::ValidateProfile {
+            profile,
+            submission,
+        } => {
+            profile_validation::validate_path(&profile, submission)?;
+            println!("profile PASS: {}", profile.display());
+        }
+        Command::SummarizeProfile { profile, out } => {
+            profile_validation::write_summary(&profile, &out)?;
+            println!("wrote {}", out.display());
+        }
     }
 
     Ok(())

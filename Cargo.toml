@@ -11,10 +11,12 @@ live-minotari = ["dep:minotari", "dep:minotari_wallet_grpc_client", "dep:tonic"]
 
 [dependencies]
 anyhow = "1.0.100"
+base64 = "0.22.1"
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5.48", features = ["derive", "env"] }
 curve25519-dalek = "=5.0.0-pre.6"
 hex = "0.4.3"
+jsonschema = { version = "0.47.0", default-features = false }
 reqwest = { version = "0.12.24", features = ["json", "rustls-tls"], default-features = false }
 rusqlite = "0.37.0"
 serde = { version = "1.0.228", features = ["derive"] }

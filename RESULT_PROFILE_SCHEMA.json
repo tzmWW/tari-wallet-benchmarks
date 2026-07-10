@@ -1,64 +1,764 @@
 {
-  "cell_status_values": [
-    "pending_funding",
-    "ready_for_live_run",
-    "ok",
-    "failed",
-    "blocked_upstream",
-    "not_applicable"
-  ],
-  "computed_deltas_keys": [
-    "scan_deltas",
-    "s5_throughput"
-  ],
-  "environment_fields": [
-    "os",
-    "cpu_brand",
-    "physical_cores",
-    "total_memory_bytes",
-    "disk_kind",
-    "disk_name",
-    "base_node_host",
-    "base_node_network_path"
-  ],
-  "repetition_optional_metrics": {
-    "common_keys": [
-      "verification_source",
-      "verification_observations",
-      "observed_transactions",
-      "verification_loop",
-      "blocked_prerequisite",
-      "scan_checkpoint",
-      "birthday",
-      "tip_start",
-      "tip_end",
-      "blocks_scanned",
-      "blocks_per_sec",
-      "detected_outputs",
-      "spendable_outputs",
-      "available_microtari",
-      "peak_rss_bytes",
-      "peak_cpu_percent",
-      "expected_outputs",
-      "outputs_match_expected",
-      "expected_available_microtari",
-      "balance_matches_expected",
-      "tx_timings",
-      "balance_reconciliation",
-      "s5_arms"
-    ],
-    "description": "scenario-specific structured metrics; fields are optional and cells only emit values they observed",
-    "verification_source_values": [
-      "base_node_transaction_query",
-      "wallet_db_observed",
-      "payment_processor_db_observed",
-      "wallet_scan_observed"
-    ]
+  "$defs": {
+    "base_node": {
+      "additionalProperties": false,
+      "properties": {
+        "configured_revision": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "endpoint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "is_synced": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "observed_version": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "pruning_horizon": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "tip_end_hash": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "tip_end_height": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "tip_start_hash": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "tip_start_height": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "version_observable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "endpoint",
+        "configured_revision",
+        "observed_version",
+        "version_observable",
+        "tip_start_height",
+        "tip_start_hash",
+        "tip_end_height",
+        "tip_end_hash",
+        "pruning_horizon",
+        "is_synced"
+      ],
+      "type": "object"
+    },
+    "chain_verification": {
+      "additionalProperties": false,
+      "properties": {
+        "tx_mined_confirmed_status_value": {
+          "const": 6
+        },
+        "verified_transactions": {
+          "items": {
+            "$ref": "#/$defs/verified_transaction"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tx_mined_confirmed_status_value",
+        "verified_transactions"
+      ],
+      "type": "object"
+    },
+    "computed_deltas": {
+      "additionalProperties": false,
+      "properties": {
+        "s5_throughput": {
+          "additionalProperties": false,
+          "properties": {
+            "arms": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "comparison_unavailable_reasons": {
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": "object"
+            },
+            "comparisons": {
+              "additionalProperties": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "type": "object"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "arms",
+            "comparisons",
+            "comparison_unavailable_reasons",
+            "source"
+          ],
+          "type": "object"
+        },
+        "scan_deltas": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "scan_deltas",
+        "s5_throughput"
+      ],
+      "type": "object"
+    },
+    "config": {
+      "additionalProperties": true,
+      "properties": {
+        "A_fund": {
+          "type": "string"
+        },
+        "C_min": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "S4_T_budget_secs": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "S5_K": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "S5_M": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "concurrent_batches": {
+          "items": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "doubling_rounds": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "fanout_outputs_per_tx": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "fee_rate": {
+          "type": "string"
+        },
+        "repetitions": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "scan_repetitions": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "volume_target": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "A_fund",
+        "C_min",
+        "volume_target",
+        "doubling_rounds",
+        "fanout_outputs_per_tx",
+        "concurrent_batches",
+        "S4_T_budget_secs",
+        "S5_M",
+        "S5_K",
+        "fee_rate",
+        "repetitions",
+        "scan_repetitions"
+      ],
+      "type": "object"
+    },
+    "environment": {
+      "additionalProperties": false,
+      "properties": {
+        "base_node_host": {
+          "type": "string"
+        },
+        "base_node_network_path": {
+          "enum": [
+            "local",
+            "remote",
+            "unknown"
+          ]
+        },
+        "cpu_brand": {
+          "type": "string"
+        },
+        "disk_kind": {
+          "type": "string"
+        },
+        "disk_name": {
+          "type": "string"
+        },
+        "os": {
+          "type": "string"
+        },
+        "physical_cores": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "total_memory_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "os",
+        "cpu_brand",
+        "physical_cores",
+        "total_memory_bytes",
+        "base_node_network_path"
+      ],
+      "type": "object"
+    },
+    "execution_status": {
+      "enum": [
+        "completed",
+        "blocked_prerequisite",
+        "harness_error",
+        "not_applicable"
+      ]
+    },
+    "finding": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "recommendation": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "status",
+        "recommendation"
+      ],
+      "type": "object"
+    },
+    "funding": {
+      "additionalProperties": false,
+      "properties": {
+        "new_wallet": {
+          "$ref": "#/$defs/funding_record"
+        },
+        "old_wallet": {
+          "$ref": "#/$defs/funding_record"
+        },
+        "payment_processor": {
+          "$ref": "#/$defs/funding_record"
+        }
+      },
+      "type": "object"
+    },
+    "funding_record": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "type": "string"
+        },
+        "birthday": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "birthday_start_height": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "height": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tx_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount",
+        "tx_id",
+        "height"
+      ],
+      "type": "object"
+    },
+    "mode": {
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "mode": {
+          "enum": [
+            "old_wallet",
+            "new_wallet",
+            "payment_processor"
+          ]
+        },
+        "scenarios": {
+          "$ref": "#/$defs/scenario_map"
+        }
+      },
+      "required": [
+        "mode",
+        "address",
+        "scenarios"
+      ],
+      "type": "object"
+    },
+    "modes": {
+      "additionalProperties": false,
+      "properties": {
+        "new_wallet": {
+          "$ref": "#/$defs/mode"
+        },
+        "old_wallet": {
+          "$ref": "#/$defs/mode"
+        },
+        "payment_processor": {
+          "$ref": "#/$defs/mode"
+        }
+      },
+      "required": [
+        "old_wallet",
+        "new_wallet",
+        "payment_processor"
+      ],
+      "type": "object"
+    },
+    "nullable_integer": {
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "nullable_string": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outcome_status": {
+      "enum": [
+        "success",
+        "partial",
+        "failure",
+        "unavailable"
+      ]
+    },
+    "repetition": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "execution_status": {
+          "$ref": "#/$defs/execution_status"
+        },
+        "failure_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fee_microtari": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "metrics": {
+          "additionalProperties": true,
+          "properties": {
+            "blocked_prerequisite": {
+              "type": "boolean"
+            },
+            "s5_arms": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "transaction_observations": {
+              "items": {
+                "$ref": "#/$defs/transaction_observation"
+              },
+              "type": "array"
+            },
+            "tx_timings": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "unspent_after": {
+              "$ref": "#/$defs/nullable_integer"
+            }
+          },
+          "type": "object"
+        },
+        "outcome_status": {
+          "$ref": "#/$defs/outcome_status"
+        },
+        "run": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "success_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wall_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        }
+      },
+      "required": [
+        "run",
+        "execution_status",
+        "outcome_status",
+        "wall_ms",
+        "success_count",
+        "failure_count",
+        "fee_microtari",
+        "error"
+      ],
+      "type": "object"
+    },
+    "scenario": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_status": {
+          "$ref": "#/$defs/execution_status"
+        },
+        "median_wall_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "outcome_status": {
+          "$ref": "#/$defs/outcome_status"
+        },
+        "repetitions": {
+          "items": {
+            "$ref": "#/$defs/repetition"
+          },
+          "type": "array"
+        },
+        "scenario": {
+          "enum": [
+            "b0",
+            "s0",
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5",
+            "s6",
+            "s7"
+          ]
+        },
+        "spread_wall_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "surface": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "surface",
+        "execution_status",
+        "outcome_status",
+        "repetitions",
+        "median_wall_ms",
+        "spread_wall_ms",
+        "notes"
+      ],
+      "type": "object"
+    },
+    "scenario_map": {
+      "additionalProperties": false,
+      "properties": {
+        "B0": {
+          "$ref": "#/$defs/scenario"
+        },
+        "S0": {
+          "$ref": "#/$defs/scenario"
+        },
+        "S1": {
+          "$ref": "#/$defs/scenario"
+        },
+        "S2": {
+          "$ref": "#/$defs/scenario"
+        },
+        "S3": {
+          "$ref": "#/$defs/scenario"
+        },
+        "S4": {
+          "$ref": "#/$defs/scenario"
+        },
+        "S5": {
+          "$ref": "#/$defs/scenario"
+        },
+        "S6": {
+          "$ref": "#/$defs/scenario"
+        },
+        "S7": {
+          "$ref": "#/$defs/scenario"
+        }
+      },
+      "required": [
+        "B0",
+        "S0",
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5",
+        "S6",
+        "S7"
+      ],
+      "type": "object"
+    },
+    "transaction_observation": {
+      "additionalProperties": false,
+      "properties": {
+        "confirmation_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "construction_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "error": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "fee_microtari": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "mempool_available": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mempool_reason": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "mined_height": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "submission_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "terminal_outcome": {
+          "enum": [
+            "confirmed",
+            "rejected",
+            "timed_out",
+            "unavailable"
+          ]
+        },
+        "tip_end_height": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "tip_start_height": {
+          "$ref": "#/$defs/nullable_integer"
+        }
+      },
+      "required": [
+        "construction_ms",
+        "submission_ms",
+        "mempool_available",
+        "mempool_reason",
+        "confirmation_ms",
+        "fee_microtari",
+        "terminal_outcome",
+        "error",
+        "mined_height",
+        "tip_start_height",
+        "tip_end_height"
+      ],
+      "type": "object"
+    },
+    "verified_transaction": {
+      "additionalProperties": false,
+      "properties": {
+        "amount_microtari": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmations": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "confirmed": {
+          "const": true
+        },
+        "fee_microtari": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_confirmations": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "mined_height": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "mode": {
+          "enum": [
+            "old_wallet",
+            "new_wallet",
+            "payment_processor"
+          ]
+        },
+        "scenario": {
+          "enum": [
+            "S1",
+            "S4",
+            "S5"
+          ]
+        },
+        "status_value": {
+          "const": 6
+        },
+        "tip_height": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "tx_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "tx_id",
+        "status_value",
+        "mode",
+        "scenario",
+        "mined_height",
+        "confirmations",
+        "min_confirmations",
+        "tip_height",
+        "confirmed"
+      ],
+      "type": "object"
+    }
   },
-  "required_top_level_keys": [
+  "$id": "https://github.com/tzmWW/tari-wallet-benchmarks/blob/main/RESULT_PROFILE_SCHEMA.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "base_node": {
+      "$ref": "#/$defs/base_node"
+    },
+    "chain_verification": {
+      "$ref": "#/$defs/chain_verification"
+    },
+    "completed_stages": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "computed_deltas": {
+      "$ref": "#/$defs/computed_deltas"
+    },
+    "config": {
+      "$ref": "#/$defs/config"
+    },
+    "environment": {
+      "$ref": "#/$defs/environment"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/finding"
+      },
+      "type": "array"
+    },
+    "funding": {
+      "$ref": "#/$defs/funding"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "harness_git_commit": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "modes": {
+      "$ref": "#/$defs/modes"
+    },
+    "network": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "profile_kind": {
+      "enum": [
+        "checkpoint",
+        "final"
+      ]
+    },
+    "run_complete": {
+      "type": "boolean"
+    },
+    "run_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 4
+    },
+    "versions": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
+    }
+  },
+  "required": [
     "schema_version",
+    "run_id",
+    "profile_kind",
+    "run_complete",
+    "harness_git_commit",
+    "completed_stages",
     "generated_at",
     "network",
+    "base_node",
     "environment",
     "versions",
     "config",
@@ -68,12 +768,6 @@
     "findings",
     "chain_verification"
   ],
-  "schema_version": 3,
-  "tx_mined_confirmed_status_value": 6,
-  "verified_transaction_optional_keys": [
-    "amount_microtari",
-    "fee_microtari",
-    "mined_height",
-    "confirmed"
-  ]
+  "title": "Tari wallet benchmark result profile",
+  "type": "object"
 }

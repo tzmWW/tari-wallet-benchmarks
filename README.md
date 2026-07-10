@@ -9,7 +9,7 @@ The harness targets Esmeralda only and models the three required wallet surfaces
 - new wallet: `minotari` crate APIs for scan, selection, signing, and broadcast
 - payment processor: real `minotari_payment_processor` plus a parallel `minotari` payment-receiver wallet
 
-Current implementation status: CLI/config/schema/seed handling, Esmeralda
+Current implementation status: CLI/config/schema-v4/seed handling, Esmeralda
 guarding, result-profile generation, PP environment/API contract, static
 "no hidden wallet pain" rules, and live evidence paths for all three wallet
 surfaces are in place. The harness writes per-stage checkpoint profiles during
@@ -22,17 +22,17 @@ starting state should still be one clean `A_fund` UTXO per mode. Mode 2 submitte
 transactions are independently queried through the public base-node
 `/transactions` endpoint by extracting kernel signature data from the wallet DB's
 serialized transaction. Top-level chain verification rows are emitted only for
-mined transactions that are at least `C_min` deep. Result profiles include
+mined transactions that are at least `C_min` deep; PP rows additionally require
+the real signed-transaction kernel and independent base-node proof. Result profiles include
 computed scan/S5 deltas, strict S0 checks, scan resource peaks, per-scenario
 balance reconciliation, and S5 per-arm metrics. Fresh scan cells are
 checkpointed: B0 uses an empty genesis seed, S2/S3 run after a valid S1
 checkpoint, and S6/S7 run after S5. Mode 1 scan cells use real
 `minotari_console_wallet --recovery`; Mode 2 and PP companion scans use fresh
-minotari scanner databases. The checked baseline is the July 2 local-node
-profile with the full S4 ramp (`concurrent_batches = [8, 16, 32, 64, 128]`),
-all live caps at `0`, and strict scan-tip validation. It records real
-pending-funds, locked-change, PP contention, and below-tip scanner failures
-rather than hiding them.
+minotari scanner databases. The July 2 profile is historical, non-promotable
+evidence: schema-v4 submission validation is required before a candidate can be
+accepted. The harness preserves real pending-funds, locked-change, PP contention,
+and below-tip scanner failures rather than hiding them.
 
 Start by generating fundable addresses:
 
@@ -51,19 +51,19 @@ Then fund each printed address with one clean `A_fund` Esmeralda UTXO, run
 
 ```sh
 source .secrets/seeds.env
-cargo run -- preflight --config harness.toml
-cargo run -- preflight --config harness.toml --check-funds
-cargo run --features live-minotari -- run --config harness.toml --profile baselines/esmeralda_baseline.json
+cargo run --features live-minotari -- preflight --config harness.toml
+cargo run --features live-minotari -- preflight --config harness.toml --check-funds
+PROFILE="candidates/esmeralda-$(date -u +%Y%m%dT%H%M%SZ).json"
+cargo run --features live-minotari -- run --config harness.toml --profile "$PROFILE"
+cargo run -- validate-profile --profile "$PROFILE" --submission
+cargo run -- summarize-profile --profile "$PROFILE" --out "${PROFILE%.json}.md"
 ```
 
 Full operator detail is in [RUNBOOK.md](RUNBOOK.md).
 
-The committed baseline JSON is schema-valid harness output and deliberately
-contains no secrets. It includes final funding evidence, all live topology flags,
-no live caps, the fresh-scan matrix, independent Mode 2 base-node transaction
-queries, confirmed chain evidence, and top-level `computed_deltas`. It is not an
-all-ok or three-repetition statistical baseline: current live stateful send paths
-record one repetition, and the no-cap run exposes wallet pending-funds behavior,
-PP contention, and below-tip scanner results in the profile. A rerun should
-restore the clean pre-run backup or fund fresh seeds, then pass
+Result profiles contain no seeds or passwords. A candidate is promotable only
+after `validate-profile --submission` passes; this requires all 27 cells,
+canonical 512-output S1 evidence, zero live caps, independent `C_min` chain
+proofs, and no fabricated incomplete-arm S5 comparison. Fund fresh seeds rather
+than restoring or repairing spent benchmark DBs, then pass
 `preflight --check-funds` before spending.

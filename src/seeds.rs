@@ -21,14 +21,20 @@ use tari_common_types::{
     tari_address::{TariAddress, TariAddressFeatures},
     types::CompressedPublicKey,
 };
-use tari_crypto::{keys::SecretKey, ristretto::RistrettoSecretKey};
+use tari_crypto::{
+    hash_domain, hashing::DomainSeparatedHasher, keys::SecretKey, ristretto::RistrettoSecretKey,
+};
 use tari_transaction_components::key_manager::{
     KeyManager, TransactionKeyManagerInterface,
-    wallet_types::{SeedWordsWallet, WalletType},
+    wallet_types::{KeyDigest, SeedWordsWallet, WalletType},
 };
 use tari_utilities::{ByteArray, hex::Hex};
 
 use crate::config::{Config, SeedConfig};
+
+hash_domain!(KeyManagerDomain, "com.tari.base_layer.key_manager", 1);
+
+const WALLET_FINGERPRINT_LABEL: &str = "wallet_identity_fingerprint";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,7 +54,7 @@ impl WalletRole {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SeedMaterial {
     pub role: WalletRole,
     pub env_var: String,
@@ -56,8 +62,24 @@ pub struct SeedMaterial {
     pub birthday: u16,
     #[serde(skip_serializing)]
     pub seed_words: String,
+    #[serde(skip_serializing)]
     pub private_view_key_hex: String,
     pub public_spend_key_hex: String,
+    pub wallet_fingerprint_hex: String,
+}
+
+impl std::fmt::Debug for SeedMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SeedMaterial")
+            .field("role", &self.role)
+            .field("env_var", &self.env_var)
+            .field("address", &self.address)
+            .field("birthday", &self.birthday)
+            .field("public_spend_key_hex", &self.public_spend_key_hex)
+            .field("wallet_fingerprint_hex", &self.wallet_fingerprint_hex)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,21 +89,37 @@ pub struct AddressBook {
 }
 
 impl AddressBook {
-    pub fn from_config_or_generate(config: &Config) -> anyhow::Result<Self> {
+    /// Generates a completely new set of benchmark identities.
+    ///
+    /// This deliberately ignores configured seed environment variables so that
+    /// an exported seed from an earlier run cannot contaminate a fresh namespace.
+    pub fn generate_fresh(config: &Config) -> anyhow::Result<Self> {
         let mut addresses = BTreeMap::new();
         for (role, env_var) in seed_envs(&config.seeds) {
-            let seed = match env::var(&env_var) {
-                Ok(words) => {
-                    seed_from_words(&words).with_context(|| format!("parsing ${env_var}"))?
-                }
-                Err(_) => {
-                    let mut seed = CipherSeed::random();
-                    if matches!(role, WalletRole::OldWallet | WalletRole::PaymentProcessor) {
-                        seed.change_birthday(0);
-                    }
-                    seed
-                }
-            };
+            let mut seed = CipherSeed::random();
+            if matches!(role, WalletRole::OldWallet | WalletRole::PaymentProcessor) {
+                seed.change_birthday(0);
+            }
+            let material = material_from_seed(role, env_var, seed)?;
+            addresses.insert(role.label().to_string(), material);
+        }
+        Ok(Self {
+            generated_at: chrono::Utc::now(),
+            addresses,
+        })
+    }
+
+    /// Loads all configured benchmark identities and fails closed when any seed
+    /// environment variable is absent or invalid.
+    pub fn load_required(config: &Config) -> anyhow::Result<Self> {
+        let mut addresses = BTreeMap::new();
+        for (role, env_var) in seed_envs(&config.seeds) {
+            let words = env::var(&env_var).with_context(|| {
+                format!(
+                    "${env_var} must be set; run addresses and source the generated seed env file"
+                )
+            })?;
+            let seed = seed_from_words(&words).with_context(|| format!("parsing ${env_var}"))?;
             let material = material_from_seed(role, env_var, seed)?;
             addresses.insert(role.label().to_string(), material);
         }
@@ -120,8 +158,8 @@ impl AddressBook {
                         "env_var": material.env_var,
                         "address": material.address,
                         "birthday": material.birthday,
-                        "private_view_key_hex": redact_middle(&material.private_view_key_hex),
                         "public_spend_key_hex": material.public_spend_key_hex,
+                        "wallet_fingerprint_hex": material.wallet_fingerprint_hex,
                     }),
                 )
             })
@@ -188,6 +226,7 @@ pub fn material_from_seed(
     );
     let key_manager = KeyManager::new(wallet.clone()).map_err(|e| anyhow::anyhow!("{e}"))?;
     let private_view_key = key_manager.get_private_view_key();
+    let wallet_fingerprint_hex = wallet_fingerprint_hex(&wallet);
     let address = TariAddress::new_dual_address(
         wallet.get_public_view_key(),
         wallet.get_public_spend_key(),
@@ -204,14 +243,21 @@ pub fn material_from_seed(
         seed_words,
         private_view_key_hex: hex::encode(private_view_key.as_bytes()),
         public_spend_key_hex: wallet.get_public_spend_key().to_hex(),
+        wallet_fingerprint_hex,
     })
 }
 
-pub fn redact_middle(value: &str) -> String {
-    if value.len() <= 12 {
-        return "***".to_string();
-    }
-    format!("{}...{}", &value[..6], &value[value.len() - 6..])
+fn wallet_fingerprint_hex(wallet: &WalletType) -> String {
+    let public_spend = wallet.get_public_spend_key();
+    let public_view = wallet.get_public_view_key();
+    let fingerprint = DomainSeparatedHasher::<KeyDigest, KeyManagerDomain>::new_with_label(
+        WALLET_FINGERPRINT_LABEL,
+    )
+    .chain(public_spend.as_bytes())
+    .chain(public_view.as_bytes())
+    .chain(0_u64.to_le_bytes())
+    .finalize();
+    hex::encode(fingerprint.as_ref())
 }
 
 pub fn derive_distinct_recipient_pool(count: u32) -> anyhow::Result<Vec<String>> {
@@ -249,6 +295,49 @@ fn deterministic_public_key(label: &str, index: u32) -> anyhow::Result<Compresse
 mod tests {
     use super::*;
 
+    fn unique_seed_config(prefix: &str) -> Config {
+        let mut config = Config::default();
+        config.seeds.old_wallet_env = format!("{prefix}_OLD");
+        config.seeds.new_wallet_env = format!("{prefix}_NEW");
+        config.seeds.payment_processor_env = format!("{prefix}_PP");
+        config
+    }
+
+    #[test]
+    fn generate_fresh_ignores_exported_seed_words() {
+        let config = unique_seed_config("WALLET_BENCH_TEST_GENERATE_FRESH");
+        let exported = seed_words_from_seed(&CipherSeed::random()).unwrap();
+        for (_, env_var) in seed_envs(&config.seeds) {
+            // SAFETY: these test-specific names are not read by other code.
+            unsafe { env::set_var(&env_var, &exported) };
+        }
+
+        let book = AddressBook::generate_fresh(&config).unwrap();
+
+        for (_, env_var) in seed_envs(&config.seeds) {
+            // SAFETY: restore the test-specific process environment immediately.
+            unsafe { env::remove_var(env_var) };
+        }
+        assert!(
+            book.addresses
+                .values()
+                .all(|material| material.seed_words != exported)
+        );
+    }
+
+    #[test]
+    fn load_required_rejects_missing_seed_environment() {
+        let config = unique_seed_config("WALLET_BENCH_TEST_LOAD_REQUIRED_MISSING");
+        for (_, env_var) in seed_envs(&config.seeds) {
+            // SAFETY: these test-specific names are not read by other code.
+            unsafe { env::remove_var(env_var) };
+        }
+
+        let error = AddressBook::load_required(&config).unwrap_err().to_string();
+        assert!(error.contains("WALLET_BENCH_TEST_LOAD_REQUIRED_MISSING_OLD"));
+        assert!(error.contains("must be set"));
+    }
+
     #[test]
     fn generated_material_redacts_seed_words() {
         let mut seed = CipherSeed::random();
@@ -258,7 +347,9 @@ mod tests {
                 .unwrap();
         assert!(material.address.starts_with('f'));
         assert_eq!(material.birthday, 0);
-        assert_eq!(redact_middle(&material.private_view_key_hex).len(), 15);
+        let serialized = serde_json::to_string(&material).unwrap();
+        assert!(!serialized.contains(&material.seed_words));
+        assert!(!serialized.contains(&material.private_view_key_hex));
     }
 
     #[test]

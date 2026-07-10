@@ -78,4 +78,16 @@ pub enum Command {
         #[arg(long, default_value = "RESULT_PROFILE_SCHEMA.json")]
         out: PathBuf,
     },
+    ValidateProfile {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        submission: bool,
+    },
+    SummarizeProfile {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
 }

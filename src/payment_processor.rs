@@ -7,8 +7,10 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use rusqlite::{Connection, OpenFlags, params, params_from_iter};
+use rusqlite::{Connection, OpenFlags, params_from_iter};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tari_transaction_components::offline_signing::models::SignedOneSidedTransactionResult;
+use tari_utilities::ByteArray;
 use tokio::{process::Command, time};
 
 use crate::{config::Config, seeds::SeedMaterial};
@@ -112,46 +114,6 @@ pub fn payment_receiver_db_path(config: &Config) -> PathBuf {
 
 pub fn payment_processor_db_path(config: &Config) -> PathBuf {
     config.paths.data_dir.join("payment-processor/payments.db")
-}
-
-pub fn unlock_stale_payment_receiver_locks(config: &Config) -> anyhow::Result<usize> {
-    let db_path = payment_receiver_db_path(config);
-    if !db_path.exists() {
-        return Ok(0);
-    }
-    let mut conn = Connection::open(&db_path)
-        .with_context(|| format!("opening payment receiver database {}", db_path.display()))?;
-    let locked_request_ids = {
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT DISTINCT locked_by_request_id
-            FROM outputs
-            WHERE status = 'LOCKED' AND locked_by_request_id IS NOT NULL
-            "#,
-        )?;
-        stmt.query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    if locked_request_ids.is_empty() {
-        return Ok(0);
-    }
-    let tx = conn.transaction()?;
-    for request_id in &locked_request_ids {
-        tx.execute(
-            "UPDATE pending_transactions SET status = 'EXPIRED' WHERE id = ?1 AND status = 'PENDING'",
-            params![request_id],
-        )?;
-        tx.execute(
-            r#"
-            UPDATE outputs
-            SET status = 'UNSPENT', locked_at = NULL, locked_by_request_id = NULL
-            WHERE locked_by_request_id = ?1 AND status = 'LOCKED'
-            "#,
-            params![request_id],
-        )?;
-    }
-    tx.commit()?;
-    Ok(locked_request_ids.len())
 }
 
 pub fn console_wallet_base_path(config: &Config) -> PathBuf {
@@ -522,6 +484,12 @@ pub struct PaymentBatchSnapshot {
     pub has_unsigned_tx: bool,
     pub has_signed_tx: bool,
     pub mined_height: Option<i64>,
+    /// A payment-processor batch UUID is an API observation identifier, not a chain transaction id.
+    /// These fields are populated only by decoding the signed transaction persisted by PP.
+    pub chain_tx_id: Option<String>,
+    pub fee_microtari: Option<u64>,
+    pub kernel_excess_sig_nonce: Option<Vec<u8>>,
+    pub kernel_excess_sig: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -620,13 +588,18 @@ fn inspect_batches(conn: &Connection, ids: &[String]) -> anyhow::Result<Vec<Paym
             error_message,
             unsigned_tx_json IS NOT NULL,
             signed_tx_json IS NOT NULL,
-            mined_height
+            mined_height,
+            signed_tx_json
         FROM payment_batches
         WHERE id IN ({placeholders})
         "#
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(ids.iter()), |row| {
+        let signed_tx_json = row.get::<_, Option<String>>(7)?;
+        let chain = signed_tx_json
+            .as_deref()
+            .and_then(|json| payment_batch_chain_fields(json).ok());
         Ok(PaymentBatchSnapshot {
             id: row.get(0)?,
             status: row.get(1)?,
@@ -635,6 +608,12 @@ fn inspect_batches(conn: &Connection, ids: &[String]) -> anyhow::Result<Vec<Paym
             has_unsigned_tx: row.get::<_, i64>(4)? != 0,
             has_signed_tx: row.get::<_, i64>(5)? != 0,
             mined_height: row.get(6)?,
+            chain_tx_id: chain.as_ref().map(|fields| fields.chain_tx_id.clone()),
+            fee_microtari: chain.as_ref().map(|fields| fields.fee_microtari),
+            kernel_excess_sig_nonce: chain
+                .as_ref()
+                .map(|fields| fields.kernel_excess_sig_nonce.clone()),
+            kernel_excess_sig: chain.map(|fields| fields.kernel_excess_sig),
         })
     })?;
     let mut by_id = rows
@@ -649,6 +628,61 @@ fn inspect_batches(conn: &Connection, ids: &[String]) -> anyhow::Result<Vec<Paym
                 .with_context(|| format!("reading PP batch {id}"))
         })
         .collect()
+}
+
+#[derive(Debug)]
+struct PaymentBatchChainFields {
+    chain_tx_id: String,
+    fee_microtari: u64,
+    kernel_excess_sig_nonce: Vec<u8>,
+    kernel_excess_sig: Vec<u8>,
+}
+
+fn payment_batch_chain_fields(json: &str) -> anyhow::Result<PaymentBatchChainFields> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).context("decoding PP signed batch payload JSON")?;
+    let signed = find_signed_transaction(&value)
+        .context("PP signed batch payload contains no signed transaction")?;
+    let kernel = signed
+        .signed_transaction
+        .transaction
+        .body()
+        .kernels()
+        .first()
+        .context("PP signed transaction has no kernel")?;
+    let kernel_excess_sig_nonce = kernel
+        .excess_sig
+        .get_compressed_public_nonce()
+        .as_bytes()
+        .to_vec();
+    let kernel_excess_sig = kernel.excess_sig.get_signature().as_bytes().to_vec();
+    let chain_tx_id = format!(
+        "{}:{}",
+        hex::encode(&kernel_excess_sig_nonce),
+        hex::encode(&kernel_excess_sig)
+    );
+    Ok(PaymentBatchChainFields {
+        chain_tx_id,
+        fee_microtari: kernel.fee.0,
+        kernel_excess_sig_nonce,
+        kernel_excess_sig,
+    })
+}
+
+fn find_signed_transaction(value: &serde_json::Value) -> Option<SignedOneSidedTransactionResult> {
+    if value.get("signed_transaction").is_some()
+        && let Ok(signed) = serde_json::from_value(value.clone())
+    {
+        return Some(signed);
+    }
+    match value {
+        serde_json::Value::String(json) => serde_json::from_str::<serde_json::Value>(json)
+            .ok()
+            .and_then(|nested| find_signed_transaction(&nested)),
+        serde_json::Value::Array(values) => values.iter().find_map(find_signed_transaction),
+        serde_json::Value::Object(values) => values.values().find_map(find_signed_transaction),
+        _ => None,
+    }
 }
 
 fn inspect_payments(conn: &Connection, ids: &[String]) -> anyhow::Result<Vec<PaymentSnapshot>> {

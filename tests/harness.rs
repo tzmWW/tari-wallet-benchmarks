@@ -4,7 +4,9 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use wallet_bench::{
     config::Config,
-    result_profile::RESULT_SCHEMA_VERSION,
+    env_capture,
+    modes::ModeName,
+    result_profile::{RESULT_SCHEMA_VERSION, ResultProfile, empty_mode_profile},
     seeds::{WalletRole, material_from_seed},
 };
 
@@ -31,23 +33,83 @@ fn schema_command_writes_json() {
         .success();
 
     let json: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(schema_path).unwrap()).unwrap();
-    assert_eq!(json["schema_version"], RESULT_SCHEMA_VERSION);
-    assert_eq!(json["tx_mined_confirmed_status_value"], 6);
+        serde_json::from_str(&fs::read_to_string(&schema_path).unwrap()).unwrap();
+    assert_eq!(
+        json["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(
+        json["properties"]["schema_version"]["const"],
+        RESULT_SCHEMA_VERSION
+    );
+    assert_eq!(
+        json["$defs"]["verified_transaction"]["properties"]["status_value"]["const"],
+        6
+    );
+    assert!(json["$defs"]["transaction_observation"].is_object());
     assert!(
-        json["required_top_level_keys"]
+        json["required"]
             .as_array()
             .unwrap()
             .iter()
             .any(|key| key == "funding")
     );
     assert!(
-        json["required_top_level_keys"]
+        json["required"]
             .as_array()
             .unwrap()
             .iter()
             .any(|key| key == "computed_deltas")
     );
+    assert_eq!(
+        fs::read(&schema_path).unwrap(),
+        fs::read("RESULT_PROFILE_SCHEMA.json").unwrap()
+    );
+}
+
+#[test]
+fn validate_and_summarize_profile_commands_use_schema_v4() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let profile_path = tempdir.path().join("checkpoint.json");
+    let summary_path = tempdir.path().join("summary.md");
+    let mut profile = ResultProfile::new(&Config::default(), env_capture::capture());
+    for mode in ModeName::ALL {
+        profile.modes.insert(
+            mode.as_str().to_string(),
+            empty_mode_profile(mode, Some(format!("{mode:?}-address"))),
+        );
+    }
+    profile.refresh_computed_deltas();
+    profile.write_atomic(&profile_path).unwrap();
+
+    Command::cargo_bin("wallet-bench")
+        .unwrap()
+        .args(["validate-profile", "--profile"])
+        .arg(&profile_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("profile PASS"));
+
+    Command::cargo_bin("wallet-bench")
+        .unwrap()
+        .args(["summarize-profile", "--profile"])
+        .arg(&profile_path)
+        .arg("--out")
+        .arg(&summary_path)
+        .assert()
+        .success();
+
+    let first = fs::read_to_string(&summary_path).unwrap();
+    Command::cargo_bin("wallet-bench")
+        .unwrap()
+        .args(["summarize-profile", "--profile"])
+        .arg(&profile_path)
+        .arg("--out")
+        .arg(&summary_path)
+        .assert()
+        .success();
+    assert_eq!(first, fs::read_to_string(summary_path).unwrap());
+    assert!(first.contains("| old_wallet | S1 |"));
 }
 
 #[test]
