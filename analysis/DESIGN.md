@@ -1,8 +1,9 @@
 # Design Notes
 
 - Mode 1 uses a real `minotari_console_wallet` process with gRPC. The harness
-  manages lifecycle and drives S1, S4, and S5 through one-shot `Transfer`
-  requests. S1 uses exact no-change self-directed multi-recipient transfers;
+  manages lifecycle and drives each scenario through one-shot gRPC requests.
+  S1 uses native `CoinSplit` requests with `target_outputs - 1`
+  explicit splits so the wallet-created change reaches the exact target;
   all scenario failures are recorded without retry.
 - Mode 2 uses the pinned `minotari` library path for signing and direct base-node
   HTTP submission. It verifies submitted transactions by extracting kernel

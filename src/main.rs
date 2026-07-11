@@ -79,18 +79,24 @@ async fn main() -> anyhow::Result<()> {
             config,
             db,
             seed_env,
+            birthday,
         } => {
             let config =
                 Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
             enforce_esmeralda(&config)?;
             #[cfg(feature = "live-minotari")]
             {
-                wallet_bench::live_minotari::scan_wallet_db(&config, &db, seed_env.as_deref())
-                    .await?;
+                wallet_bench::live_minotari::scan_wallet_db(
+                    &config,
+                    &db,
+                    seed_env.as_deref(),
+                    birthday,
+                )
+                .await?;
             }
             #[cfg(not(feature = "live-minotari"))]
             {
-                let _ = (db, seed_env);
+                let _ = (db, seed_env, birthday);
                 anyhow::bail!("scan-wallet requires --features live-minotari");
             }
         }

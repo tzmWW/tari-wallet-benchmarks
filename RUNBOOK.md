@@ -314,8 +314,10 @@ exclusive.
 
 When `mode1_live_topology` is enabled, the harness starts a real
 `minotari_console_wallet` process with gRPC enabled, waits for recovery to find
-the funded balance, and drives S1/S4/S5 through one-shot gRPC `Transfer`
-requests. S1 uses an exact no-change self-directed multi-recipient shape. The console
+the funded balance, and drives the scenarios through one-shot gRPC requests.
+S1 uses native `CoinSplit` with one fewer explicit split than the target
+output count; the wallet's change output completes the exact 1-to-2 doubling or
+1-to-8 fan-out shape. The console
 wallet seed-recovery path reads the birthday embedded in the mnemonic; it does
 not apply the separate `--birthday` flag to seed words. The harness therefore
 rewrites only the mnemonic birthday before launch. This preserves the address and

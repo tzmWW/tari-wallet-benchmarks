@@ -612,10 +612,11 @@ async fn check_selected_chain_readiness(
         }
         match read_scanned_height(db_path) {
             Ok(scanned_height)
-                if scanned_height.saturating_add(config.benchmark.c_min) >= tip.height => {}
+                if scanned_height.saturating_add(config.settle_wait_blocks()) >= tip.height => {}
             Ok(scanned_height) => errors.push(format!(
-                "{label}: scanner height {scanned_height} is stale relative to selected-chain tip {} (allowed lag C_min={})",
-                tip.height, config.benchmark.c_min
+                "{label}: scanner height {scanned_height} is stale relative to selected-chain tip {} (allowed lag settle_wait_blocks={})",
+                tip.height,
+                config.settle_wait_blocks()
             )),
             Err(error) => errors.push(format!("{label}: scanner-height proof failed: {error:#}")),
         }

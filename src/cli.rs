@@ -61,6 +61,10 @@ pub enum Command {
         db: PathBuf,
         #[arg(long)]
         seed_env: Option<String>,
+        /// Rewrite the seed birthday when initializing a new signing DB. The
+        /// address is unchanged; this avoids unnecessary genesis recovery.
+        #[arg(long)]
+        birthday: Option<u16>,
     },
     RecoverMode1Wallet {
         #[arg(long, default_value = "harness.toml")]

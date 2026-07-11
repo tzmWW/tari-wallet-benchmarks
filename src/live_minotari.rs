@@ -96,10 +96,15 @@ pub async fn scan_wallet_db(
     config: &Config,
     db_path: &Path,
     seed_env: Option<&str>,
+    birthday: Option<u16>,
 ) -> anyhow::Result<()> {
     if let Some(seed_env) = seed_env {
         let seed_words = std::env::var(seed_env)
             .with_context(|| format!("reading seed words from env var {seed_env}"))?;
+        let seed_words = match birthday {
+            Some(birthday) => seed_words_with_birthday(&seed_words, birthday)?,
+            None => seed_words,
+        };
         ensure_signing_wallet(db_path, &seed_words, &config.seeds.wallet_password_env)?;
     } else if !db_path.exists() {
         bail!(
@@ -423,7 +428,10 @@ pub async fn scan_to_tip(
 ) -> anyhow::Result<ScanToTipReport> {
     let start = std::time::Instant::now();
     let target_tip = base_node_tip_height(base_url).await?;
-    let chunk_size = batch_size.clamp(1, 100);
+    let configured_chunk_size = batch_size.clamp(1, 100);
+    let mut chunk_size = configured_chunk_size;
+    let mut used_single_block_fallback = false;
+    let mut fallback_blocks_remaining = 0u64;
     let mut last_height = account_snapshot(db_path)
         .map(|snapshot| snapshot.max_height)
         .unwrap_or_default();
@@ -435,7 +443,10 @@ pub async fn scan_to_tip(
     // Full scans can report completion before all downloaded batches are processed;
     // bounded partial scans force progress to be committed before each continuation.
     loop {
-        if last_height.saturating_add(required_confirmations) >= target_tip {
+        // Stateful wallets must process the fixed target tip itself so mined
+        // change is promoted to spendable. Confirmation-lag tolerance belongs
+        // in measurement validation, not in the controller catch-up loop.
+        if last_height >= target_tip {
             break;
         }
 
@@ -464,6 +475,15 @@ pub async fn scan_to_tip(
                 "wallet scan made no progress below tip: max_height={current_height} target_tip={target_tip} more_blocks={more_blocks} no_progress_attempts={no_progress_attempts} elapsed_without_progress_ms={}",
                 elapsed_without_progress.as_millis()
             );
+            if chunk_size > 1 {
+                chunk_size = 1;
+                fallback_blocks_remaining = 16;
+                used_single_block_fallback = true;
+                println!(
+                    "wallet scan switching from configured chunk {} to one-block progress fallback",
+                    configured_chunk_size
+                );
+            }
             if elapsed_without_progress >= no_progress_timeout {
                 stopped_without_progress = true;
                 break;
@@ -477,6 +497,15 @@ pub async fn scan_to_tip(
         }
         no_progress_since = None;
         last_height = current_height;
+        // Stay in boundary-breaking mode for a short successful window before
+        // probing the configured chunk again. Immediate probing repeated the
+        // same failed large request at every two-block boundary on Esmeralda.
+        if chunk_size == 1 && configured_chunk_size > 1 {
+            fallback_blocks_remaining = fallback_blocks_remaining.saturating_sub(1);
+            if fallback_blocks_remaining == 0 {
+                chunk_size = configured_chunk_size;
+            }
+        }
     }
     Ok(ScanToTipReport {
         wall_ms: start.elapsed().as_millis(),
@@ -485,6 +514,7 @@ pub async fn scan_to_tip(
         no_progress_attempts,
         stopped_without_progress,
         last_more_blocks,
+        used_single_block_fallback,
     })
 }
 
@@ -541,6 +571,7 @@ fn annotate_fresh_scan_cells_disabled(profile: &mut ResultProfile) {
             .get_mut("old_wallet")
             .and_then(|mode| mode.scenarios.get_mut(scenario.as_str()))
         {
+            cell.status = CellStatus::NotApplicable;
             cell.notes.push(
                 "fresh live scan cell disabled for this run; set benchmark.live_fresh_scan_cells=true for the long baseline pass"
                     .to_string(),
@@ -552,6 +583,7 @@ fn annotate_fresh_scan_cells_disabled(profile: &mut ResultProfile) {
             .get_mut("new_wallet")
             .and_then(|mode| mode.scenarios.get_mut(scenario.as_str()))
         {
+            cell.status = CellStatus::NotApplicable;
             cell.notes.push(
                 "fresh live scan cell disabled for this run; set benchmark.live_fresh_scan_cells=true for the long baseline pass"
                     .to_string(),
@@ -583,6 +615,7 @@ fn annotate_mode3_disabled(profile: &mut ResultProfile) {
         ScenarioName::S5,
     ] {
         if let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) {
+            cell.status = CellStatus::NotApplicable;
             cell.notes.push(
                 "Mode 3 real payment-processor topology disabled; set benchmark.mode3_live_topology=true to spawn minotari PR daemon plus minotari_payment_processor"
                     .to_string(),
@@ -602,6 +635,7 @@ fn annotate_mode1_disabled(profile: &mut ResultProfile) {
         ScenarioName::S5,
     ] {
         if let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) {
+            cell.status = CellStatus::NotApplicable;
             cell.notes.push(
                 "Mode 1 console-wallet topology disabled; set benchmark.mode1_live_topology=true to spawn minotari_console_wallet with gRPC"
                     .to_string(),
@@ -1973,6 +2007,13 @@ impl ScenarioSendSummary {
     }
 
     fn apply_mode2_verification(&mut self, verification: Mode2VerificationResult) {
+        let verified_fee_total = verification
+            .observed_transactions
+            .iter()
+            .filter(|tx| tx.confirmed)
+            .filter_map(|tx| tx.fee_microtari)
+            .sum::<u64>();
+        self.fee_microtari = self.fee_microtari.max(verified_fee_total);
         self.tx_infos = verification.observed_transactions;
         self.extra_metrics.insert(
             "verification_source".to_string(),
@@ -2897,6 +2938,7 @@ pub struct ScanToTipReport {
     pub no_progress_attempts: u64,
     pub stopped_without_progress: bool,
     pub last_more_blocks: Option<bool>,
+    pub used_single_block_fallback: bool,
 }
 
 impl ScanToTipReport {
@@ -2904,6 +2946,10 @@ impl ScanToTipReport {
         metrics.insert(
             "scan_target_tip".to_string(),
             serde_json::json!(self.target_tip),
+        );
+        metrics.insert(
+            "scan_used_single_block_fallback".to_string(),
+            serde_json::json!(self.used_single_block_fallback),
         );
         metrics.insert(
             "scan_max_height".to_string(),
@@ -3540,12 +3586,13 @@ mod tests {
             .get(ModeName::NewWallet.as_str())
             .unwrap()
             .scenarios[ScenarioName::B0.as_str()];
-        assert_eq!(new_b0.status, CellStatus::ReadyForLiveRun);
+        assert_eq!(new_b0.status, CellStatus::NotApplicable);
         let old_b0 = &profile
             .modes
             .get(ModeName::OldWallet.as_str())
             .unwrap()
             .scenarios[ScenarioName::B0.as_str()];
+        assert_eq!(old_b0.status, CellStatus::NotApplicable);
         assert!(
             old_b0
                 .notes
@@ -3956,6 +4003,29 @@ mod tests {
             serde_json::json!("broadcast")
         );
         assert!(summary.verified_transactions().is_empty());
+    }
+
+    #[test]
+    fn mode2_verification_backfills_confirmed_fee_before_reconciliation() {
+        let mut summary = ScenarioSendSummary::default();
+        summary.apply_mode2_verification(Mode2VerificationResult {
+            observed_transactions: vec![VerifiedTransaction {
+                tx_id: "42".to_string(),
+                status_value: TX_MINED_CONFIRMED_STATUS,
+                mode: "new_wallet".to_string(),
+                scenario: ScenarioName::S1.as_str().to_string(),
+                amount_microtari: None,
+                fee_microtari: Some(660),
+                mined_height: Some(100),
+                confirmations: Some(3),
+                min_confirmations: Some(3),
+                tip_height: Some(102),
+                confirmed: true,
+            }],
+            observations: Vec::new(),
+            used_base_node_query: true,
+        });
+        assert_eq!(summary.fee_microtari, 660);
     }
 
     #[test]

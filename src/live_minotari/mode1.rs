@@ -436,13 +436,13 @@ async fn run_mode1_send_cells(
 ) -> anyhow::Result<()> {
     let amount = parse_amount(&config.benchmark.mode1_payment_amount)?;
     let fee_rate = config.fee_rate()?.0;
-    let s1 = run_mode1_s1(config, &mut context.client, &old_seed.address, fee_rate).await;
+    let s1 = run_mode1_s1(config, &mut context.client, fee_rate).await;
     record_mode1_transfer_summary(
         profile,
         ScenarioName::S1,
         &s1,
         vec![format!(
-            "Mode 1 S1 drove exact no-change self-directed gRPC Transfer rounds; attempted_batches={} cap={}",
+            "Mode 1 S1 drove native gRPC CoinSplit rounds with requested_splits=target_outputs-1 so wallet change completes the exact output count; attempted_batches={} cap={}",
             s1.attempted_batches, config.benchmark.mode1_live_max_s1_txs
         )],
     );
@@ -558,7 +558,6 @@ async fn run_mode1_send_cells(
 async fn run_mode1_s1(
     config: &Config,
     client: &mut WalletGrpcClient<tonic::transport::Channel>,
-    self_address: &str,
     fee_rate: u64,
 ) -> Mode1TransferSummary {
     let mut total = Mode1TransferSummary::default();
@@ -597,12 +596,7 @@ async fn run_mode1_s1(
         };
         for tx_index in 1..=round.tx_count {
             let input = spendable_amounts[(tx_index - 1) as usize];
-            let plan = match exact_no_change_split(
-                input,
-                round.outputs_per_tx,
-                fee_rate,
-                CONSOLE_SELF_OUTPUT_GRAMS,
-            ) {
+            let plan = match mode1_coin_split_plan(input, round.outputs_per_tx, fee_rate) {
                 Ok(plan) => plan,
                 Err(error) => {
                     round_summary.failure_count = round_summary.failure_count.saturating_add(1);
@@ -614,16 +608,17 @@ async fn run_mode1_s1(
                 }
             };
             println!(
-                "old_wallet/S1 round {} tx {}/{} exact self-transfer outputs={} input={} planned_fee={}",
+                "old_wallet/S1 round {} tx {}/{} native coin-split outputs={} requested_splits={} input={} planned_fee={}",
                 round.round_index,
                 tx_index,
                 round.tx_count,
                 round.outputs_per_tx,
+                plan.split_count,
                 input,
                 plan.fee_microtari
             );
             let result =
-                submit_mode1_exact_self_split(client, self_address, plan.child_amounts, fee_rate)
+                submit_mode1_coin_split(client, plan.amount_per_split, plan.split_count, fee_rate)
                     .await;
             round_summary.record_batch(tx_index, round.outputs_per_tx, result);
             round_summary
@@ -987,40 +982,32 @@ async fn submit_mode1_transfer_to_recipients(
         .with_rpc_timing(batch_index, submit_start.elapsed().as_millis()))
 }
 
-async fn submit_mode1_exact_self_split(
+async fn submit_mode1_coin_split(
     client: &mut WalletGrpcClient<tonic::transport::Channel>,
-    self_address: &str,
-    child_amounts: Vec<u64>,
+    amount_per_split: u64,
+    split_count: u32,
     fee_rate: u64,
 ) -> anyhow::Result<Mode1TransferOutcome> {
-    let recipients = child_amounts
-        .into_iter()
-        .map(|amount| grpc::PaymentRecipient {
-            address: self_address.to_string(),
-            amount,
-            fee_per_gram: fee_rate,
-            payment_type: 1,
-            raw_payment_id: Vec::new(),
-            user_payment_id: None,
-        })
-        .collect();
     let submit_start = Instant::now();
     let response = client
-        .transfer(grpc::TransferRequest {
-            recipients,
-            single_tx: true,
+        .coin_split(grpc::CoinSplitRequest {
+            amount_per_split,
+            split_count: u64::from(split_count),
+            fee_per_gram: fee_rate,
+            lock_height: 0,
+            payment_id: format!("wallet-bench-S1-{split_count}-{amount_per_split}").into_bytes(),
         })
         .await?
         .into_inner();
-    let mut outcome = Mode1TransferOutcome::from_response(response);
-    if outcome.failure_count == 0 && !outcome.tx_ids.is_empty() {
-        outcome.success_count = 1;
-        outcome.tx_ids.truncate(1);
-    } else {
-        outcome.success_count = 0;
-        outcome.failure_count = 1;
+    Ok(Mode1TransferOutcome {
+        success_count: 1,
+        failure_count: 0,
+        fee_microtari: 0,
+        tx_ids: vec![response.tx_id.to_string()],
+        errors: Vec::new(),
+        tx_timings: Vec::new(),
     }
-    Ok(outcome.with_rpc_timing(1, submit_start.elapsed().as_millis()))
+    .with_rpc_timing(1, submit_start.elapsed().as_millis()))
 }
 
 pub(super) async fn mode1_unspent_count(
@@ -1096,6 +1083,48 @@ pub(super) const STEALTH_OUTPUT_GRAMS: u64 = 57;
 /// to every memo. The pinned MemoField is padded to 130 bytes, making each output's
 /// rounded feature/script contribution 12 grams and its total weight 65 grams.
 pub(super) const CONSOLE_SELF_OUTPUT_GRAMS: u64 = 65;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Mode1CoinSplitPlan {
+    fee_microtari: u64,
+    amount_per_split: u64,
+    split_count: u32,
+}
+
+/// The console wallet's native coin split adds an ordinary change output. Request
+/// `desired_outputs - 1` explicit splits so the on-chain total is exactly the S1
+/// target. A near-even amount keeps every child usable by the next round.
+fn mode1_coin_split_plan(
+    input_microtari: u64,
+    desired_outputs: u32,
+    fee_per_gram: u64,
+) -> anyhow::Result<Mode1CoinSplitPlan> {
+    if desired_outputs < 2 {
+        bail!("Mode 1 coin split requires at least two total outputs");
+    }
+    let weight = 18u64
+        .checked_add(
+            CONSOLE_SELF_OUTPUT_GRAMS
+                .checked_mul(u64::from(desired_outputs))
+                .context("Mode 1 coin-split output weight overflow")?,
+        )
+        .context("Mode 1 coin-split weight overflow")?;
+    let fee_microtari = weight
+        .checked_mul(fee_per_gram)
+        .context("Mode 1 coin-split fee overflow")?;
+    let available = input_microtari
+        .checked_sub(fee_microtari)
+        .context("Mode 1 coin-split input does not cover fee")?;
+    let amount_per_split = available / u64::from(desired_outputs);
+    if amount_per_split <= fee_microtari {
+        bail!("Mode 1 coin-split child is too small for the next round");
+    }
+    Ok(Mode1CoinSplitPlan {
+        fee_microtari,
+        amount_per_split,
+        split_count: desired_outputs - 1,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExactSplitPlan {
@@ -1221,6 +1250,25 @@ pub(super) fn exact_pp_split_with_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_coin_split_requests_one_fewer_split_than_total_outputs() {
+        let doubling = mode1_coin_split_plan(10_000_000_000, 2, 5).unwrap();
+        assert_eq!(doubling.split_count, 1);
+        assert_eq!(doubling.fee_microtari, 740);
+        assert!(doubling.amount_per_split > doubling.fee_microtari);
+
+        let fanout = mode1_coin_split_plan(1_000_000_000, 8, 5).unwrap();
+        assert_eq!(fanout.split_count, 7);
+        assert_eq!(fanout.fee_microtari, 2_690);
+        assert!(fanout.amount_per_split > fanout.fee_microtari);
+    }
+
+    #[test]
+    fn native_coin_split_rejects_non_splitting_or_dust_inputs() {
+        assert!(mode1_coin_split_plan(10_000, 1, 5).is_err());
+        assert!(mode1_coin_split_plan(1_000, 8, 5).is_err());
+    }
 
     #[test]
     fn exact_split_conserves_value_without_change_for_all_s1_targets() {
