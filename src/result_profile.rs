@@ -379,6 +379,11 @@ impl ResultProfile {
                 PAYMENT_PROCESSOR_REV.to_string(),
             ),
         ]);
+        let mut scenario_config = config.scenario_defaults();
+        scenario_config.insert(
+            "scenario_order".to_string(),
+            serde_json::json!(ScenarioName::ALL.map(ScenarioName::as_str)),
+        );
 
         Self {
             schema_version: RESULT_SCHEMA_VERSION,
@@ -403,7 +408,7 @@ impl ResultProfile {
             },
             environment,
             versions,
-            config: config.scenario_defaults(),
+            config: scenario_config,
             funding: config.funding.as_map(),
             modes: BTreeMap::new(),
             computed_deltas: BTreeMap::new(),
@@ -784,6 +789,10 @@ mod tests {
         let decoded: ResultProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.schema_version, RESULT_SCHEMA_VERSION);
         assert_eq!(decoded.funding["new_wallet"].height, 707741);
+        assert_eq!(
+            decoded.config["scenario_order"],
+            serde_json::json!(["B0", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"])
+        );
     }
 
     #[test]

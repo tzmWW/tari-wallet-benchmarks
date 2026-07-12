@@ -34,13 +34,14 @@ async fn start_mode1_console_wallet(
     config: &Config,
     old_seed: &crate::seeds::SeedMaterial,
 ) -> anyhow::Result<Mode1ConsoleContext> {
-    start_mode1_console_wallet_with_recovery(config, old_seed, false).await
+    start_mode1_console_wallet_with_recovery(config, old_seed, false, config.a_fund()?.0).await
 }
 
 pub(super) async fn start_mode1_console_wallet_with_recovery(
     config: &Config,
     old_seed: &crate::seeds::SeedMaterial,
     recovery: bool,
+    min_available: u64,
 ) -> anyhow::Result<Mode1ConsoleContext> {
     let password = wallet_password(&config.seeds.wallet_password_env)?;
     let base_path = old_wallet_base_path(config);
@@ -109,10 +110,53 @@ pub(super) async fn start_mode1_console_wallet_with_recovery(
         .into_inner()
         .version;
     context.version = Some(version);
-    let required_balance = config.a_fund()?.0;
-    let balance = wait_for_mode1_balance(config, &mut context, required_balance).await?;
+    let balance = wait_for_mode1_balance(config, &mut context, min_available).await?;
     context.balance = Some(balance);
     Ok(context)
+}
+
+pub(super) async fn send_mode1_operator_one_sided(
+    config: &Config,
+    old_seed: &crate::seeds::SeedMaterial,
+    recipient: &str,
+    amount: MicroMinotari,
+) -> anyhow::Result<()> {
+    let mut context =
+        start_mode1_console_wallet_with_recovery(config, old_seed, false, amount.0).await?;
+    let actual = context
+        .client
+        .get_address(grpc::Empty {})
+        .await
+        .context("querying Mode 1 wallet address before sweep")?
+        .into_inner()
+        .one_sided_address;
+    if !mode1_address_matches_seed(&actual, old_seed)? {
+        bail!("Mode 1 sweep refused: console-wallet address does not match configured seed");
+    }
+    let outcome = submit_mode1_transfer(
+        &mut context.client,
+        ScenarioName::S0,
+        1,
+        1,
+        true,
+        recipient,
+        amount,
+        config.fee_rate()?.0,
+    )
+    .await?;
+    if outcome.failure_count > 0 || outcome.tx_ids.is_empty() {
+        bail!(
+            "Mode 1 sweep submission failed: {}",
+            outcome.errors.join("; ")
+        );
+    }
+    println!(
+        "sweep-mode1 submitted amount_microtari={} tx_ids={} fee_microtari={}",
+        amount.0,
+        outcome.tx_ids.join(","),
+        outcome.fee_microtari
+    );
+    Ok(())
 }
 
 pub(super) fn old_wallet_base_path(config: &Config) -> PathBuf {
@@ -369,15 +413,20 @@ fn record_mode1_s0(
     let balance = context.balance.as_ref();
     let available = balance.map(|b| b.available_balance).unwrap_or_default();
     let expected = config.a_fund().map(|amount| amount.0).unwrap_or_default();
-    let (status, success_count, failure_count, error, metrics) =
+    let (status, success_count, failure_count, error, mut metrics) =
         strict_s0_status(expected, available, spendable_count);
+    add_s0_funding_observation(
+        &mut metrics,
+        config.funding.old_wallet.as_ref(),
+        Some(context.birthday),
+    );
     cell.record_repetition(Repetition {
         run: 1,
         status,
         wall_ms: Some(wall_ms),
         success_count,
         failure_count,
-        fee_microtari: None,
+        fee_microtari: Some(0),
         error,
         metrics: Some(metrics),
     });
@@ -419,9 +468,12 @@ fn record_mode1_startup_failure(profile: &mut ResultProfile, wall_ms: u128, erro
             wall_ms: Some(wall_ms),
             success_count: 0,
             failure_count: 1,
-            fee_microtari: None,
+            fee_microtari: Some(0),
             error: Some(format!("{error:#}")),
-            metrics: None,
+            metrics: Some(unavailable_balance_metrics(
+                scenario,
+                "Mode 1 topology failed before final wallet balance could be observed",
+            )),
         });
         cell.notes
             .push("Mode 1 console-wallet startup failed before scenario dispatch".to_string());

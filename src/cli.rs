@@ -70,6 +70,16 @@ pub enum Command {
         #[arg(long, default_value = "harness.toml")]
         config: PathBuf,
     },
+    /// Submit one operator-controlled one-sided transfer from the configured
+    /// Mode 1 console-wallet database. Intended for post-run fund recovery.
+    SweepMode1 {
+        #[arg(long, default_value = "harness.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        recipient: String,
+        #[arg(long)]
+        amount: String,
+    },
     QueryTx {
         #[arg(long, default_value = "harness.toml")]
         config: PathBuf,

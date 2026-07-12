@@ -493,6 +493,10 @@ fn validate_reference_configuration(
     if config["concurrent_batches"] != json!(REFERENCE_S4_RAMP) {
         bail!("submission config must contain the full S4 concurrency ramp");
     }
+    if config["scenario_order"] != json!(["B0", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]) {
+        bail!("submission config must record canonical B0,S0-S7 scenario order");
+    }
+    validate_cross_cutting_scenario_metrics(document)?;
     for (mode, scenarios) in mode_scenarios(document)? {
         if scenarios["S1"]["outcome_status"] != "success" {
             bail!("submission requires canonical successful S1 for {mode}");
@@ -613,6 +617,51 @@ fn validate_reference_configuration(
                 "successful submission S1 for {} has no independently verified transaction",
                 mode.as_str()
             );
+        }
+    }
+    Ok(())
+}
+
+fn validate_cross_cutting_scenario_metrics(document: &Value) -> anyhow::Result<()> {
+    for (mode, scenarios) in mode_scenarios(document)? {
+        for (scenario, cell) in scenarios {
+            for (index, run) in cell["repetitions"]
+                .as_array()
+                .expect("schema checked")
+                .iter()
+                .enumerate()
+            {
+                if run["execution_status"] != "completed" {
+                    continue;
+                }
+                let label = format!("{mode}/{scenario} repetition {}", index + 1);
+                if run["wall_ms"].as_u64().is_none() {
+                    bail!("submission {label} must record wall_ms");
+                }
+                if run["fee_microtari"].as_u64().is_none() {
+                    bail!("submission {label} must record explicit fees, including zero");
+                }
+                let Some(metrics) = run["metrics"].as_object() else {
+                    bail!("submission {label} must record scenario metrics");
+                };
+                let has_balance = metrics.contains_key("balance_reconciliation")
+                    || metrics
+                        .get("balance_delta_microtari")
+                        .is_some_and(|value| !value.is_null())
+                    || metrics
+                        .get("extra")
+                        .and_then(Value::as_object)
+                        .is_some_and(|extra| extra.contains_key("balance_reconciliation"));
+                let has_unavailable_reason = metrics
+                    .get("balance_reconciliation_unavailable_reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| !reason.is_empty());
+                if !has_balance && !has_unavailable_reason {
+                    bail!(
+                        "submission {label} must record final balance reconciliation or an explicit unavailable reason"
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -799,6 +848,49 @@ mod tests {
         let document = profile_document();
         let profile = validate_document(&document, false).unwrap();
         assert_eq!(profile.schema_version, RESULT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn completed_repetitions_require_fee_and_balance_evidence() {
+        let document = serde_json::json!({
+            "modes": {
+                "old_wallet": {
+                    "scenarios": {
+                        "S0": {
+                            "repetitions": [{
+                                "execution_status": "completed",
+                                "wall_ms": 1,
+                                "fee_microtari": 0,
+                                "metrics": {
+                                    "balance_reconciliation_unavailable_reason": "pre-run timing is unavailable"
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+        validate_cross_cutting_scenario_metrics(&document).unwrap();
+
+        let mut missing_fee = document.clone();
+        missing_fee["modes"]["old_wallet"]["scenarios"]["S0"]["repetitions"][0]["fee_microtari"] =
+            Value::Null;
+        assert!(
+            validate_cross_cutting_scenario_metrics(&missing_fee)
+                .unwrap_err()
+                .to_string()
+                .contains("explicit fees")
+        );
+
+        let mut missing_balance = document;
+        missing_balance["modes"]["old_wallet"]["scenarios"]["S0"]["repetitions"][0]["metrics"] =
+            serde_json::json!({});
+        assert!(
+            validate_cross_cutting_scenario_metrics(&missing_balance)
+                .unwrap_err()
+                .to_string()
+                .contains("final balance reconciliation")
+        );
     }
 
     #[test]

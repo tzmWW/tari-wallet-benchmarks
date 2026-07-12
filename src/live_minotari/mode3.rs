@@ -118,8 +118,13 @@ fn record_mode3_s0(
     let expected = config.a_fund().map(|amount| amount.0).unwrap_or_default();
     let spendable_count =
         spendable_output_count(&payment_processor::payment_receiver_db_path(config)).ok();
-    let (status, success_count, failure_count, error, metrics) =
+    let (status, success_count, failure_count, error, mut metrics) =
         strict_s0_status(expected, available, spendable_count);
+    add_s0_funding_observation(
+        &mut metrics,
+        config.funding.payment_processor.as_ref(),
+        Some(context.receiver_birthday),
+    );
 
     let Some(mode) = profile.modes.get_mut("payment_processor") else {
         return;
@@ -133,7 +138,7 @@ fn record_mode3_s0(
         wall_ms: Some(wall_ms),
         success_count,
         failure_count,
-        fee_microtari: None,
+        fee_microtari: Some(0),
         error,
         metrics: Some(metrics),
     });
@@ -177,9 +182,12 @@ fn record_mode3_startup_failure(profile: &mut ResultProfile, wall_ms: u128, erro
             wall_ms: Some(wall_ms),
             success_count: 0,
             failure_count: 1,
-            fee_microtari: None,
+            fee_microtari: Some(0),
             error: Some(format!("{error:#}")),
-            metrics: None,
+            metrics: Some(unavailable_balance_metrics(
+                scenario,
+                "Mode 3 topology failed before final wallet balance could be observed",
+            )),
         });
         cell.notes
             .push("Mode 3 topology startup failed before scenario dispatch".to_string());
@@ -265,12 +273,13 @@ async fn run_mode3_send_cells(
     let s4_balance_after = account_snapshot(&pp_db_path)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
+    let s4_fee_microtari = s4.verified_fee_total();
     add_balance_reconciliation_metrics(
         &mut s4.extra_metrics,
         s4_balance_before,
         s4_balance_after,
         u64::from(s4.accepted_payments).saturating_mul(amount.0),
-        0,
+        s4_fee_microtari,
     );
     s4.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -322,12 +331,13 @@ async fn run_mode3_send_cells(
     let s5_balance_after = account_snapshot(&pp_db_path)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
+    let s5_fee_microtari = s5.verified_fee_total();
     add_balance_reconciliation_metrics(
         &mut s5.extra_metrics,
         s5_balance_before,
         s5_balance_after,
         u64::from(s5.accepted_payments).saturating_mul(amount.0),
-        0,
+        s5_fee_microtari,
     );
     s5.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -338,7 +348,8 @@ async fn run_mode3_send_cells(
         ScenarioName::S5,
         &s5,
         vec![format!(
-            "Mode 3 S5 payment-batch arm used one /v1/payment-batches request with items={} of configured S5_M={} and S5_K={}; cap={}",
+            "Mode 3 S5 payment-batch arm used {} sequential /v1/payment-batches requests with total_items={} of configured S5_M={} and S5_K={}; cap={}",
+            s5.batch_ids.len(),
             s5_items,
             config.benchmark.s5_m,
             config.benchmark.s5_k,
@@ -434,15 +445,33 @@ async fn run_pp_s1_rounds(
             .observe_db(config, pp_observation_timeout(config, ScenarioName::S1))
             .await;
         round_summary.wall_ms = round_start.elapsed().as_millis();
-        let observed_utxos = spendable_output_count(&db_path).ok();
-        let round_balance_after = account_snapshot(&db_path)
-            .ok()
-            .map(|snapshot| snapshot.available_microtari);
         let observed_fees = round_summary
             .chain_proofs
             .values()
             .map(|proof| proof.fee_microtari)
             .fold(0, u64::saturating_add);
+        if pp_summary_complete(&round_summary) {
+            let expected_balance =
+                round_balance_before.map(|before| before.saturating_sub(observed_fees));
+            if let Err(error) = wait_for_pp_receiver_round_state(
+                config,
+                &db_path,
+                u64::from(round.target_utxos_after),
+                expected_balance,
+            )
+            .await
+            {
+                round_summary.failed_batches = round_summary.failed_batches.saturating_add(1);
+                round_summary.errors.push(format!(
+                    "PP S1 round {} companion-wallet refresh failed: {error:#}",
+                    round.round_index
+                ));
+            }
+        }
+        let observed_utxos = spendable_output_count(&db_path).ok();
+        let round_balance_after = account_snapshot(&db_path)
+            .ok()
+            .map(|snapshot| snapshot.available_microtari);
         let fee_only_balance_delta_ok = round_balance_before
             .zip(round_balance_after)
             .is_some_and(|(before, after)| before.saturating_sub(after) == observed_fees);
@@ -474,6 +503,42 @@ async fn run_pp_s1_rounds(
     }
     total.wall_ms = start.elapsed().as_millis();
     total
+}
+
+async fn wait_for_pp_receiver_round_state(
+    config: &Config,
+    db_path: &Path,
+    expected_outputs: u64,
+    expected_balance: Option<u64>,
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let timeout = config.timeout(config.timeouts.confirmation_secs);
+    let mut interval = time::interval(Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        let outputs = spendable_output_count(db_path).ok();
+        let balance = account_snapshot(db_path)
+            .ok()
+            .map(|snapshot| snapshot.available_microtari);
+        if pp_receiver_state_ready(outputs, balance, expected_outputs, expected_balance) {
+            return Ok(());
+        }
+        if start.elapsed() >= timeout {
+            bail!(
+                "payment receiver did not converge within {timeout:?}: expected_outputs={expected_outputs} observed_outputs={outputs:?} expected_balance={expected_balance:?} observed_balance={balance:?}"
+            );
+        }
+    }
+}
+
+pub(super) fn pp_receiver_state_ready(
+    observed_outputs: Option<u64>,
+    observed_balance: Option<u64>,
+    expected_outputs: u64,
+    expected_balance: Option<u64>,
+) -> bool {
+    observed_outputs == Some(expected_outputs)
+        && expected_balance.is_none_or(|expected| observed_balance == Some(expected))
 }
 
 async fn run_pp_s4_batches(
@@ -777,7 +842,7 @@ pub(super) fn record_pp_summary(
         wall_ms: Some(summary.wall_ms),
         success_count: summary.accepted_batches,
         failure_count: summary.failed_batches,
-        fee_microtari: None,
+        fee_microtari: Some(summary.verified_fee_total()),
         error: summary.error_note().or_else(|| {
             (!all_verified_ok)
                 .then_some("one or more PP batches did not verify as terminal-ok".to_string())

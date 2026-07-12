@@ -46,8 +46,9 @@ mod verification;
 use mode1::{
     STEALTH_OUTPUT_GRAMS, annotate_mode1_console_wallet, exact_no_change_split,
     exact_pp_split_with_change, grpc_bind_multiaddr, mode1_scan_grpc_address, mode1_unspent_count,
-    mode1_wallet_birthday, old_wallet_base_path, start_mode1_console_wallet_with_recovery,
-    wait_for_mode1_grpc_address, wait_for_mode1_scan_to_tip,
+    mode1_wallet_birthday, old_wallet_base_path, send_mode1_operator_one_sided,
+    start_mode1_console_wallet_with_recovery, wait_for_mode1_grpc_address,
+    wait_for_mode1_scan_to_tip,
 };
 use mode2::{
     annotate_mode2_live_scenarios, annotate_mode2_send_smoke, base_node_endpoint_url,
@@ -61,12 +62,14 @@ use mode2::{
 };
 use mode3::{annotate_mode3_payment_processor, pp_snapshot_is_terminal_for_summary};
 #[cfg(test)]
-use mode3::{pp_observation_timeout, recipient_batches, record_pp_summary};
+use mode3::{
+    pp_observation_timeout, pp_receiver_state_ready, recipient_batches, record_pp_summary,
+};
 use scan::{
     ResourcePeaks, account_balance, account_snapshot, amount_field_as_microtari,
-    record_blocked_prerequisite_cells, run_library_checkpoint_scan_cells,
-    run_library_fresh_scan_for_cell, run_mode1_checkpoint_scan_cells,
-    run_mode1_fresh_scan_for_cell, spendable_output_amounts, spendable_output_count,
+    record_blocked_prerequisite_cells, run_b0_fresh_scan_for_mode,
+    run_library_checkpoint_scan_cells, run_mode1_checkpoint_scan_cells, spendable_output_amounts,
+    spendable_output_count,
 };
 #[cfg(test)]
 use scan::{record_blocked_checkpoint_scan, record_blocked_prerequisite_cell};
@@ -78,7 +81,7 @@ use verification::{
 };
 
 use crate::{
-    config::{Config, parse_amount},
+    config::{Config, FundingRecord, parse_amount},
     modes::ScenarioName,
     payment_processor::{
         self, BulkPaymentItem, BulkPaymentRequest, PaymentProcessorClient,
@@ -139,7 +142,9 @@ pub async fn recover_mode1_console_wallet(config: &Config) -> anyhow::Result<()>
         .addresses
         .get(WalletRole::OldWallet.label())
         .context("old wallet seed material missing")?;
-    let mut context = start_mode1_console_wallet_with_recovery(config, old_seed, true).await?;
+    let mut context =
+        start_mode1_console_wallet_with_recovery(config, old_seed, true, config.a_fund()?.0)
+            .await?;
     let spendable_count = mode1_unspent_count(&mut context.client).await.ok();
     let balance = context
         .balance
@@ -159,6 +164,20 @@ pub async fn recover_mode1_console_wallet(config: &Config) -> anyhow::Result<()>
     Ok(())
 }
 
+pub async fn sweep_mode1_console_wallet(
+    config: &Config,
+    recipient: &str,
+    amount: &str,
+) -> anyhow::Result<()> {
+    let book = AddressBook::load_required(config)?;
+    let old_seed = book
+        .addresses
+        .get(WalletRole::OldWallet.label())
+        .context("old wallet seed material missing")?;
+    let amount = parse_amount(amount)?;
+    send_mode1_operator_one_sided(config, old_seed, recipient, amount).await
+}
+
 /// Proves that the configured console-wallet database opens as the address
 /// derived from the loaded benchmark seed. This intentionally uses the same
 /// gRPC surface as Mode 1 rather than reading or repairing encrypted wallet
@@ -167,7 +186,8 @@ pub async fn verify_mode1_wallet_identity(
     config: &Config,
     seed: &crate::seeds::SeedMaterial,
 ) -> anyhow::Result<()> {
-    let mut context = start_mode1_console_wallet_with_recovery(config, seed, false).await?;
+    let mut context =
+        start_mode1_console_wallet_with_recovery(config, seed, false, config.a_fund()?.0).await?;
     let actual = context
         .client
         .get_address(grpc::Empty {})
@@ -230,11 +250,10 @@ pub async fn query_wallet_transaction(
     Ok(())
 }
 
-pub async fn annotate_profile_with_library_smoke(
+async fn annotate_mode2_s0(
     config: &Config,
     book: &AddressBook,
     profile: &mut ResultProfile,
-    partial_profile_path: Option<&Path>,
 ) -> anyhow::Result<()> {
     let Some(seed) = book.addresses.get(WalletRole::NewWallet.label()) else {
         return Ok(());
@@ -242,6 +261,7 @@ pub async fn annotate_profile_with_library_smoke(
     let db_path = &config.modes.new_wallet_database;
     ensure_signing_wallet(db_path, &seed.seed_words, &config.seeds.wallet_password_env)?;
 
+    let s0_start = Instant::now();
     let scan = scan_to_tip(
         db_path,
         &wallet_password(&config.seeds.wallet_password_env)?,
@@ -259,6 +279,11 @@ pub async fn annotate_profile_with_library_smoke(
         let spendable_count = spendable_output_count(db_path).ok();
         let (status, success_count, failure_count, error, mut metrics) =
             strict_s0_status(expected, available, spendable_count);
+        add_s0_funding_observation(
+            &mut metrics,
+            config.funding.new_wallet.as_ref(),
+            Some(seed.birthday),
+        );
         if let serde_json::Value::Object(map) = &mut metrics {
             scan_report.insert_metrics(map);
         }
@@ -294,7 +319,7 @@ pub async fn annotate_profile_with_library_smoke(
                     wall_ms: Some(wall_ms),
                     success_count,
                     failure_count,
-                    fee_microtari: None,
+                    fee_microtari: Some(0),
                     error,
                     metrics: Some(metrics),
                 });
@@ -312,17 +337,34 @@ pub async fn annotate_profile_with_library_smoke(
                 cell.record_repetition(Repetition {
                     run: 1,
                     status: CellStatus::Failed,
-                    wall_ms: None,
+                    wall_ms: Some(s0_start.elapsed().as_millis()),
                     success_count: 0,
                     failure_count: 1,
-                    fee_microtari: None,
+                    fee_microtari: Some(0),
                     error: Some(format!("{error:#}")),
-                    metrics: None,
+                    metrics: Some(unavailable_balance_metrics(
+                        ScenarioName::S0,
+                        "Mode 2 S0 scan failed before final wallet balance could be observed",
+                    )),
                 });
             }
         }
     }
 
+    Ok(())
+}
+
+pub async fn annotate_profile_with_library_smoke(
+    config: &Config,
+    book: &AddressBook,
+    profile: &mut ResultProfile,
+    partial_profile_path: Option<&Path>,
+) -> anyhow::Result<()> {
+    if !config.benchmark.live_fresh_scan_cells {
+        annotate_fresh_scan_cells_disabled(profile);
+    } else {
+        run_b0_fresh_scan_for_mode(config, profile, book, "old_wallet").await?;
+    }
     if config.benchmark.mode1_live_topology {
         annotate_mode1_console_wallet(config, book, profile).await?;
     } else {
@@ -330,6 +372,10 @@ pub async fn annotate_profile_with_library_smoke(
     }
     write_profile_checkpoint(profile, partial_profile_path, "old_wallet")?;
 
+    if config.benchmark.live_fresh_scan_cells {
+        run_b0_fresh_scan_for_mode(config, profile, book, "new_wallet").await?;
+    }
+    annotate_mode2_s0(config, book, profile).await?;
     if config.benchmark.mode2_live_scenarios {
         annotate_mode2_live_scenarios(config, book, profile).await?;
     } else if config.benchmark.mode2_send_smoke {
@@ -357,9 +403,7 @@ pub async fn annotate_profile_with_library_smoke(
     write_profile_checkpoint(profile, partial_profile_path, "new_wallet")?;
 
     if config.benchmark.live_fresh_scan_cells {
-        annotate_fresh_scan_b0_cells(config, book, profile).await?;
-    } else {
-        annotate_fresh_scan_cells_disabled(profile);
+        run_b0_fresh_scan_for_mode(config, profile, book, "payment_processor").await?;
     }
     write_profile_checkpoint(profile, partial_profile_path, "fresh_scans")?;
 
@@ -427,7 +471,7 @@ pub async fn scan_to_tip(
     no_progress_timeout: Duration,
 ) -> anyhow::Result<ScanToTipReport> {
     let start = std::time::Instant::now();
-    let target_tip = base_node_tip_height(base_url).await?;
+    let mut target_tip = base_node_tip_height(base_url).await?;
     let configured_chunk_size = batch_size.clamp(1, 100);
     let mut chunk_size = configured_chunk_size;
     let mut used_single_block_fallback = false;
@@ -447,7 +491,15 @@ pub async fn scan_to_tip(
         // change is promoted to spendable. Confirmation-lag tolerance belongs
         // in measurement validation, not in the controller catch-up loop.
         if last_height >= target_tip {
-            break;
+            let latest_tip = base_node_tip_height(base_url).await?;
+            if last_height.saturating_add(required_confirmations) >= latest_tip {
+                target_tip = latest_tip;
+                break;
+            }
+            println!(
+                "wallet scan reached fixed target {target_tip}; continuing to moving tip {latest_tip}"
+            );
+            target_tip = latest_tip;
         }
 
         let (_, more_blocks) = Scanner::new(
@@ -516,46 +568,6 @@ pub async fn scan_to_tip(
         last_more_blocks,
         used_single_block_fallback,
     })
-}
-
-async fn annotate_fresh_scan_b0_cells(
-    config: &Config,
-    book: &AddressBook,
-    profile: &mut ResultProfile,
-) -> anyhow::Result<()> {
-    let spec = FreshScanSpec {
-        scenario: ScenarioName::B0,
-        wallet_state: FreshScanWalletState::EmptyGenesis,
-        checkpoint: ScanCheckpoint::Empty,
-    };
-
-    if let Some(old_wallet) = book.addresses.get(WalletRole::OldWallet.label()) {
-        run_mode1_fresh_scan_for_cell(config, profile, old_wallet, spec).await?;
-    }
-
-    if let Some(new_wallet) = book.addresses.get(WalletRole::NewWallet.label()) {
-        run_library_fresh_scan_for_cell(
-            config,
-            profile,
-            "new_wallet",
-            Some(&new_wallet.seed_words),
-            spec,
-        )
-        .await?;
-    }
-
-    if let Some(pp_wallet) = book.addresses.get(WalletRole::PaymentProcessor.label()) {
-        run_library_fresh_scan_for_cell(
-            config,
-            profile,
-            "payment_processor",
-            Some(&pp_wallet.seed_words),
-            spec,
-        )
-        .await?;
-    }
-
-    Ok(())
 }
 
 fn annotate_fresh_scan_cells_disabled(profile: &mut ResultProfile) {
@@ -718,10 +730,50 @@ fn strict_s0_status(
             "observed_spendable_count": spendable_count,
             "expected_available_microtari": expected,
             "available_microtari": available,
+            "balance_reconciliation": {
+                "expected_balance_microtari": expected,
+                "observed_balance_microtari": available,
+                "delta_microtari": i128::from(expected) - i128::from(available),
+                "flagged": !balance_ok,
+                "assumption": "S0 expected balance equals A_fund; funding fee is outside measurement"
+            },
             "balance_matches_expected": balance_ok,
             "spendable_count_matches_expected": count_ok
         }),
     )
+}
+
+fn add_s0_funding_observation(
+    metrics: &mut serde_json::Value,
+    funding: Option<&FundingRecord>,
+    wallet_birthday: Option<u16>,
+) {
+    let Some(map) = metrics.as_object_mut() else {
+        return;
+    };
+    map.insert(
+        "funding_observation".to_string(),
+        serde_json::json!({
+            "tx_id": funding.map(|record| record.tx_id.as_str()),
+            "mined_height": funding.map(|record| record.height),
+            "birthday": funding.and_then(|record| record.birthday).or(wallet_birthday),
+            "birthday_start_height": funding.and_then(|record| record.birthday_start_height),
+            "broadcast_to_mempool_ms": null,
+            "broadcast_to_mempool_unavailable_reason": "S0 funding is performed before the benchmark run, as allowed by the bounty seed strategy",
+            "broadcast_to_confirmed_at_c_min_ms": null,
+            "broadcast_to_confirmed_unavailable_reason": "pre-run funding has no harness-observed broadcast timestamp"
+        }),
+    );
+}
+
+fn unavailable_balance_metrics(
+    scenario: ScenarioName,
+    reason: impl Into<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "scenario": scenario.as_str(),
+        "balance_reconciliation_unavailable_reason": reason.into()
+    })
 }
 
 fn add_balance_reconciliation_metrics(
@@ -1165,6 +1217,13 @@ fn pp_summary_complete(summary: &PpScenarioSummary) -> bool {
 }
 
 impl PpScenarioSummary {
+    fn verified_fee_total(&self) -> u64 {
+        self.chain_proofs
+            .values()
+            .map(|proof| proof.fee_microtari)
+            .fold(0, u64::saturating_add)
+    }
+
     fn record_batch(&mut self, batch_index: u32, result: anyhow::Result<PpBatchSubmission>) {
         match result {
             Ok(submission) => {
@@ -1450,7 +1509,7 @@ impl PpScenarioSummary {
                     Some(
                         "payment-processor acceptance precedes worker broadcast and exposes no per-batch mempool timestamp",
                     ),
-                    Some(self.wall_ms),
+                    None,
                     proof.map(|proof| proof.fee_microtari),
                     terminal_outcome,
                     (terminal_outcome != "confirmed")
@@ -1860,7 +1919,7 @@ impl Mode1TransferSummary {
                     timing_u128(timing, "construction_complete_ms"),
                     None,
                     Some("console-wallet gRPC does not expose a per-transaction mempool timestamp"),
-                    Some(self.wall_ms),
+                    None,
                     verified.and_then(|tx| tx.fee_microtari),
                     if confirmed { "confirmed" } else { "timed_out" },
                     (!confirmed).then(|| errors.next().cloned()).flatten(),
@@ -2147,7 +2206,7 @@ impl ScenarioSendSummary {
                     Some(
                         "base-node submission exposes acceptance but not a per-transaction mempool timestamp",
                     ),
-                    Some(self.wall_ms),
+                    None,
                     verified
                         .and_then(|tx| tx.fee_microtari)
                         .or_else(|| timing.get("fee_microtari").and_then(serde_json::Value::as_u64)),
@@ -2247,6 +2306,9 @@ fn transaction_observation(
         "mempool_available": mempool_available,
         "mempool_reason": mempool_reason,
         "confirmation_ms": confirmation_ms,
+        "confirmation_timing_reason": confirmation_ms.is_none().then_some(
+            "per-transaction C_min timestamp was not observed; scenario wall time is not substituted"
+        ),
         "fee_microtari": fee_microtari,
         "terminal_outcome": terminal_outcome,
         "error": error,
@@ -3034,6 +3096,7 @@ impl ScanMeasurement {
             "outputs_match_expected": self.expectations.expected_outputs.map(|expected| expected == self.spendable_outputs),
             "expected_available_microtari": self.expectations.expected_available_microtari,
             "balance_matches_expected": self.expectations.expected_available_microtari.map(|expected| expected == self.available_microtari),
+            "balance_delta_microtari": self.expectations.expected_available_microtari.map(|expected| i128::from(expected) - i128::from(self.available_microtari)),
             "birthday": self.birthday,
             "birthday_start_height": self.birthday_start_height,
             "tip_start": self.tip_start,
@@ -3475,7 +3538,7 @@ mod tests {
         assert_eq!(cell.spread_wall_ms, None);
         assert_eq!(cell.repetitions.len(), 1);
         assert_eq!(cell.repetitions[0].status, CellStatus::Failed);
-        assert_eq!(cell.repetitions[0].wall_ms, None);
+        assert_eq!(cell.repetitions[0].wall_ms, Some(0));
         assert_eq!(cell.repetitions[0].success_count, 0);
         assert_eq!(cell.repetitions[0].failure_count, 1);
         assert!(
@@ -3795,6 +3858,28 @@ mod tests {
             payments: Vec::new(),
         };
         assert!(pp_snapshot_is_terminal_for_summary(&snapshot, 1));
+    }
+
+    #[test]
+    fn pp_receiver_state_requires_outputs_and_balance_to_converge() {
+        assert!(pp_receiver_state_ready(
+            Some(2),
+            Some(9_999_999_340),
+            2,
+            Some(9_999_999_340)
+        ));
+        assert!(!pp_receiver_state_ready(
+            Some(2),
+            Some(0),
+            2,
+            Some(9_999_999_340)
+        ));
+        assert!(!pp_receiver_state_ready(
+            Some(0),
+            Some(9_999_999_340),
+            2,
+            Some(9_999_999_340)
+        ));
     }
 
     #[test]
@@ -4164,6 +4249,7 @@ mod tests {
             profile.chain_verification.verified_transactions[0].tx_id,
             "kernel-confirmed"
         );
+        assert_eq!(cell.repetitions[0].fee_microtari, Some(700));
         let metrics = cell.repetitions[0].metrics.as_ref().unwrap();
         assert_eq!(
             metrics["verification_source"],
@@ -4201,7 +4287,7 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_transaction_observation_records_scenario_terminal_duration() {
+    fn confirmed_transaction_observation_does_not_fake_per_tx_duration() {
         let mut summary = ScenarioSendSummary {
             attempted: 1,
             wall_ms: 321,
@@ -4235,7 +4321,11 @@ mod tests {
 
         let observations = summary.transaction_observations();
         assert_eq!(observations[0]["terminal_outcome"], "confirmed");
-        assert_eq!(observations[0]["confirmation_ms"], 321);
+        assert_eq!(observations[0]["confirmation_ms"], serde_json::Value::Null);
+        assert_eq!(
+            observations[0]["confirmation_timing_reason"],
+            "per-transaction C_min timestamp was not observed; scenario wall time is not substituted"
+        );
     }
 
     #[test]

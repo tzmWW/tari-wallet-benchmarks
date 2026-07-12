@@ -25,9 +25,10 @@ serialized transaction. Top-level chain verification rows are emitted only for
 mined transactions that are at least `C_min` deep; PP rows additionally require
 the real signed-transaction kernel and independent base-node proof. Result profiles include
 computed scan/S5 deltas, strict S0 checks, scan resource peaks, per-scenario
-balance reconciliation, and S5 per-arm metrics. Fresh scan cells are
-checkpointed: B0 uses an empty genesis seed, S2/S3 run after a valid S1
-checkpoint, and S6/S7 run after S5. Mode 1 scan cells use real
+balance reconciliation, and S5 per-arm metrics. Each mode is dispatched in the
+canonical `B0, S0, S1, S2, S3, S4, S5, S6, S7` order. Every scan repetition
+wipes its wallet data directory; B0 rewrites the mnemonic's encoded birthday to
+`0`, S2/S3 run after a valid S1 checkpoint, and S6/S7 run after S5. Mode 1 scan cells use real
 `minotari_console_wallet --recovery`; Mode 2 and PP companion scans use fresh
 minotari scanner databases. The July 2 profile is historical, non-promotable
 evidence: schema-v4 submission validation is required before a candidate can be
@@ -64,6 +65,7 @@ Full operator detail is in [RUNBOOK.md](RUNBOOK.md).
 Result profiles contain no seeds or passwords. A candidate is promotable only
 after `validate-profile --submission` passes; this requires all 27 cells,
 canonical 512-output S1 evidence, zero live caps, independent `C_min` chain
-proofs, and no fabricated incomplete-arm S5 comparison. Fund fresh seeds rather
+proofs, the recorded canonical scenario order, explicit fees and final-balance
+evidence for every completed repetition, and no fabricated incomplete-arm S5 comparison. Fund fresh seeds rather
 than restoring or repairing spent benchmark DBs, then pass
 `preflight --check-funds` before spending.

@@ -120,6 +120,11 @@ Two live-only diagnostics are also available for recovery and audit work:
 ```sh
 cargo run --features live-minotari -- recover-mode1-wallet --config harness.toml
 
+cargo run --features live-minotari -- sweep-mode1 \
+  --config harness.toml \
+  --recipient f2... \
+  --amount "100 T"
+
 cargo run --features live-minotari -- query-tx \
   --config harness.toml \
   --db .bench-data/final-local-20260702T151225Z/new-wallet/wallet.db \
@@ -127,7 +132,10 @@ cargo run --features live-minotari -- query-tx \
 ```
 
 `recover-mode1-wallet` performs a supported console-wallet recovery path for the
-configured Mode 1 wallet. `query-tx` prints wallet DB status plus independent
+configured Mode 1 wallet. `sweep-mode1` is an operator-only, one-shot gRPC
+one-sided transfer from that configured console-wallet DB; it verifies the DB's
+address against the configured seed and does not retry a rejected submission.
+`query-tx` prints wallet DB status plus independent
 base-node transaction-query evidence for a Mode 2 transaction id.
 
 ## Preflight
@@ -299,12 +307,18 @@ progress while they execute.
 Fresh scan cells are checkpointed against actual scenario progress. B0 uses an
 empty genesis seed before spends. S2/S3 run only after an S1 checkpoint exists;
 S6/S7 run only after an S5 checkpoint exists. If the prerequisite spend is
-blocked, the scan cell records an explicit failed repetition with
-`blocked_prerequisite = true`, `wall_ms = null`, `success_count = 0`, and
+blocked, the scan cell records an explicit non-executed repetition with
+`blocked_prerequisite = true`, `wall_ms = 0`, `success_count = 0`, and
 `failure_count = 1` instead of inventing a measurement. Mode 1 fresh scans launch
 a real `minotari_console_wallet --recovery` instance with a fresh base path and
 poll its gRPC state until it reaches the public tip. Mode 2 and PP companion scan
 cells use the minotari scanner path with fresh databases.
+
+The runner dispatches each wallet mode in the bounty's required chronology:
+`B0, S0, S1, S2, S3, S4, S5, S6, S7`. It does not append B0 after stateful
+scenarios. Every scan repetition deletes its own wallet data directory first.
+For B0, the API rewrites the seed words so their encoded birthday is exactly
+`0`; changing a separate launch flag is not accepted as genesis proof.
 
 When `mode2_send_smoke` is enabled, the harness constructs, signs, persists, and
 submits one one-sided transaction from the Mode 2 wallet using a direct JSON-RPC
@@ -358,6 +372,10 @@ S5 through the direct minotari crate path:
   but the base-node tip is the chain-advance clock because wallet scan-tip
   metadata can update in coarse buckets. This is a settlement gate for the known
   `FundsPending` lock behavior, not a retry.
+- The scan target follows the moving public tip: after reaching the sampled
+  target, the harness refreshes the tip and continues until the wallet is within
+  the configured confirmation tolerance. A scan that merely reaches a stale
+  snapshot cannot unlock the next scenario.
 - Each Mode 2 S1 round independently re-queries every submitted transaction
   until it reaches `C_min` or the confirmation timeout expires. A failed round
   blocks later S1 rounds and all dependent cells. S4/S5 preserve the same
@@ -434,10 +452,11 @@ strict S0 checks, scan resource/expectation evidence, balance reconciliation,
 and S5 arms. The top-level `computed_deltas` section derives scan deltas and
 S5 throughput ratios only from complete source arms.
 Each transaction observation carries the submitted transaction or PP batch
-identity when the surface returned one. Its `confirmation_ms` is the enclosing
-scenario/arm wall time from first dispatch through terminal `C_min` observation
-or timeout; mempool timestamps remain explicitly unavailable where the wallet
-surface does not expose them.
+identity when the surface returned one. `confirmation_ms` is recorded only for
+an independently measured per-transaction dispatch-to-`C_min` interval. The
+scenario wall is not copied into each row. Missing timing surfaces, including
+the pre-run S0 funding broadcast permitted by the bounty, are null with an
+explicit unavailable reason.
 Environment capture includes OS, CPU, memory, disk kind/name, base-node host, and
 whether the base-node path is local or remote.
 
@@ -465,3 +484,8 @@ summary only after the run is complete:
 cargo run -- validate-profile --profile candidate.json --submission
 cargo run -- summarize-profile --profile candidate.json --out candidate.md
 ```
+
+Submission validation additionally requires the exact canonical scenario order,
+an explicit fee value (including zero), wall time, and final-balance
+reconciliation or an explicit unavailable reason for every completed
+repetition. A schema-valid checkpoint or historical baseline is not sufficient.

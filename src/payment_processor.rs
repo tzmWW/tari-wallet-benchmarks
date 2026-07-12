@@ -189,7 +189,10 @@ pub async fn start_payment_receiver(
         .arg("--database-path")
         .arg(db_path)
         .arg("--scan-interval-secs")
-        .arg(config.timeouts.scan_batch_secs.to_string())
+        // The companion wallet must refresh after each confirmed PP batch so
+        // the bounty's per-round UTXO and balance invariants observe current
+        // state. This is wallet-state refresh, not transaction retry/backoff.
+        .arg(config.benchmark.mode3_worker_sleep_secs.to_string())
         .arg("--api-port")
         .arg(api_port.to_string());
     spawn_logged_process("mode3-payment-receiver", command)

@@ -82,6 +82,42 @@ pub(super) async fn run_library_checkpoint_scan_cells(
     Ok(())
 }
 
+pub(super) async fn run_b0_fresh_scan_for_mode(
+    config: &Config,
+    profile: &mut ResultProfile,
+    book: &AddressBook,
+    mode: &str,
+) -> anyhow::Result<()> {
+    let spec = FreshScanSpec {
+        scenario: ScenarioName::B0,
+        wallet_state: FreshScanWalletState::EmptyGenesis,
+        checkpoint: ScanCheckpoint::Empty,
+    };
+    match mode {
+        "old_wallet" => {
+            if let Some(seed) = book.addresses.get(WalletRole::OldWallet.label()) {
+                run_mode1_fresh_scan_for_cell(config, profile, seed, spec).await?;
+            }
+        }
+        "new_wallet" => {
+            let seed = book
+                .addresses
+                .get(WalletRole::NewWallet.label())
+                .map(|seed| seed.seed_words.as_str());
+            run_library_fresh_scan_for_cell(config, profile, mode, seed, spec).await?;
+        }
+        "payment_processor" => {
+            let seed = book
+                .addresses
+                .get(WalletRole::PaymentProcessor.label())
+                .map(|seed| seed.seed_words.as_str());
+            run_library_fresh_scan_for_cell(config, profile, mode, seed, spec).await?;
+        }
+        _ => bail!("unsupported B0 mode {mode}"),
+    }
+    Ok(())
+}
+
 pub(super) async fn run_library_fresh_scan_for_cell(
     config: &Config,
     profile: &mut ResultProfile,
@@ -150,14 +186,15 @@ pub(super) fn record_blocked_checkpoint_scan(cell: &mut ScenarioCell, spec: Fres
     cell.record_repetition(Repetition {
         run: 1,
         status: CellStatus::Failed,
-        wall_ms: None,
+        wall_ms: Some(0),
         success_count: 0,
         failure_count: 1,
-        fee_microtari: None,
+        fee_microtari: Some(0),
         error: Some(note),
         metrics: Some(serde_json::json!({
             "blocked_prerequisite": true,
-            "scan_checkpoint": spec.checkpoint.label()
+            "scan_checkpoint": spec.checkpoint.label(),
+            "balance_reconciliation_unavailable_reason": "scenario did not execute because its checkpoint prerequisite failed"
         })),
     });
 }
@@ -193,15 +230,16 @@ pub(super) fn record_blocked_prerequisite_cell(
     cell.record_repetition(Repetition {
         run: 1,
         status: CellStatus::Failed,
-        wall_ms: None,
+        wall_ms: Some(0),
         success_count: 0,
         failure_count: 1,
-        fee_microtari: None,
+        fee_microtari: Some(0),
         error: Some(note),
         metrics: Some(serde_json::json!({
             "blocked_prerequisite": true,
             "prerequisite": prerequisite,
-            "blocked_scenario": scenario.as_str()
+            "blocked_scenario": scenario.as_str(),
+            "balance_reconciliation_unavailable_reason": "scenario did not execute because its prerequisite failed"
         })),
     });
 }
@@ -215,6 +253,7 @@ async fn run_library_fresh_scan_cell(
     cell: &mut ScenarioCell,
 ) -> anyhow::Result<()> {
     for run in 1..=config.benchmark.scan_repetitions {
+        let run_start = Instant::now();
         println!(
             "live scan {mode}/{} run {run}/{} birthday={} starting",
             spec.scenario.as_str(),
@@ -243,7 +282,7 @@ async fn run_library_fresh_scan_cell(
                     wall_ms: Some(measurement.wall_ms),
                     success_count: if verification_ok { 1 } else { 0 },
                     failure_count: if verification_ok { 0 } else { 1 },
-                    fee_microtari: None,
+                    fee_microtari: Some(0),
                     error: (!verification_ok).then(|| measurement.scan_verification_error()),
                     metrics: Some(measurement.metrics(mode, spec)),
                 });
@@ -257,12 +296,15 @@ async fn run_library_fresh_scan_cell(
                 cell.record_repetition(Repetition {
                     run,
                     status: CellStatus::Failed,
-                    wall_ms: None,
+                    wall_ms: Some(run_start.elapsed().as_millis()),
                     success_count: 0,
                     failure_count: 1,
-                    fee_microtari: None,
+                    fee_microtari: Some(0),
                     error: Some(format!("{error:#}")),
-                    metrics: None,
+                    metrics: Some(unavailable_balance_metrics(
+                        spec.scenario,
+                        "scan failed before final wallet balance could be observed",
+                    )),
                 });
             }
         }
@@ -279,6 +321,7 @@ async fn run_mode1_fresh_scan_cell(
     cell: &mut ScenarioCell,
 ) -> anyhow::Result<()> {
     for run in 1..=config.benchmark.scan_repetitions {
+        let run_start = Instant::now();
         println!(
             "live scan old_wallet/{} run {run}/{} birthday={} starting",
             spec.scenario.as_str(),
@@ -306,7 +349,7 @@ async fn run_mode1_fresh_scan_cell(
                     wall_ms: Some(measurement.wall_ms),
                     success_count: if verification_ok { 1 } else { 0 },
                     failure_count: if verification_ok { 0 } else { 1 },
-                    fee_microtari: None,
+                    fee_microtari: Some(0),
                     error: (!verification_ok).then(|| measurement.scan_verification_error()),
                     metrics: Some(measurement.metrics("old_wallet", spec)),
                 });
@@ -320,12 +363,15 @@ async fn run_mode1_fresh_scan_cell(
                 cell.record_repetition(Repetition {
                     run,
                     status: CellStatus::Failed,
-                    wall_ms: None,
+                    wall_ms: Some(run_start.elapsed().as_millis()),
                     success_count: 0,
                     failure_count: 1,
-                    fee_microtari: None,
+                    fee_microtari: Some(0),
                     error: Some(format!("{error:#}")),
-                    metrics: None,
+                    metrics: Some(unavailable_balance_metrics(
+                        spec.scenario,
+                        "console-wallet recovery failed before final balance could be observed",
+                    )),
                 });
             }
         }
@@ -610,7 +656,7 @@ pub(super) fn spendable_output_count(db_path: &Path) -> anyhow::Result<u64> {
     let conn = Connection::open(db_path)?;
     let active = active_output_predicate(&conn)?;
     let sql = format!(
-        "SELECT COUNT(*) FROM outputs WHERE {active} CAST(status AS TEXT) IN ('UNSPENT', '0')"
+        "SELECT COUNT(*) FROM outputs WHERE {active} confirmed_height IS NOT NULL AND CAST(status AS TEXT) IN ('UNSPENT', '0')"
     );
     let count: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
     Ok(u64::try_from(count).unwrap_or_default())
@@ -620,7 +666,7 @@ pub(super) fn spendable_output_amounts(db_path: &Path) -> anyhow::Result<Vec<u64
     let conn = Connection::open(db_path)?;
     let active = active_output_predicate(&conn)?;
     let sql = format!(
-        "SELECT value FROM outputs WHERE {active} CAST(status AS TEXT) IN ('UNSPENT', '0') ORDER BY value DESC"
+        "SELECT value FROM outputs WHERE {active} confirmed_height IS NOT NULL AND CAST(status AS TEXT) IN ('UNSPENT', '0') ORDER BY value DESC"
     );
     let mut stmt = conn.prepare(&sql)?;
     stmt.query_map([], |row| row.get::<_, i64>(0))?
@@ -645,5 +691,35 @@ fn active_output_predicate(conn: &Connection) -> anyhow::Result<&'static str> {
         Ok("marked_deleted_at_height IS NULL AND")
     } else {
         Ok("")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spendable_queries_exclude_unconfirmed_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("wallet.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE outputs (
+                id INTEGER PRIMARY KEY,
+                value INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                confirmed_height INTEGER,
+                deleted_at TIMESTAMP
+            );
+            INSERT INTO outputs (value, status, confirmed_height) VALUES
+                (100, 'UNSPENT', 10),
+                (200, 'UNSPENT', NULL),
+                (300, 'SPENT', 10);",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(spendable_output_count(&db_path).unwrap(), 1);
+        assert_eq!(spendable_output_amounts(&db_path).unwrap(), vec![100]);
     }
 }

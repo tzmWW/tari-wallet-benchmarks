@@ -113,6 +113,27 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("recover-mode1-wallet requires --features live-minotari");
             }
         }
+        Command::SweepMode1 {
+            config,
+            recipient,
+            amount,
+        } => {
+            let config =
+                Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
+            enforce_esmeralda(&config)?;
+            #[cfg(feature = "live-minotari")]
+            {
+                wallet_bench::live_minotari::sweep_mode1_console_wallet(
+                    &config, &recipient, &amount,
+                )
+                .await?;
+            }
+            #[cfg(not(feature = "live-minotari"))]
+            {
+                let _ = (recipient, amount);
+                anyhow::bail!("sweep-mode1 requires --features live-minotari");
+            }
+        }
         Command::QueryTx { config, db, tx_id } => {
             let config =
                 Config::load(&config).with_context(|| format!("loading {}", config.display()))?;

@@ -9,13 +9,13 @@ This is the final status review for
 |---|---|
 | Standalone harness source | Satisfied. This repo builds a Rust `wallet-bench` binary and pins external Tari/minotari sources. |
 | Run instructions | Satisfied. `README.md` gives the short path; `RUNBOOK.md` covers setup, funding, local-node proof, preflight, live run, and diagnostics. |
-| Baseline result profile | Satisfied as current-status evidence. `baselines/esmeralda_baseline.json` is schema v3 output from the July 2 local-node run. |
+| Baseline result profile | **Blocked.** `baselines/esmeralda_baseline.json` is historical schema-v3 evidence and fails the current schema-v4/submission contract. It must be replaced only by a passing clean candidate. |
 | Three wallet modes | Satisfied. Mode 1 is real console-wallet gRPC, Mode 2 is pinned `minotari` library APIs, Mode 3 is real `minotari_payment_processor` plus companion wallet. |
-| All B0/S0-S7 cells | Satisfied structurally. Every cell emits a concrete status/repetition. Failed cells are preserved as observations. |
+| All B0/S0-S7 cells | Implemented in required per-mode order: `B0,S0,S1,S2,S3,S4,S5,S6,S7`. Every scan repetition wipes its DB; B0 uses seed words whose encoded birthday is `0`. Failed and blocked cells remain visible. |
 | Config parameters recorded | Satisfied. The profile records `A_fund`, `C_min`, S1/S4/S5 parameters, fee rate, versions, live flags, scan/send repetitions, and caps. |
-| One `A_fund` UTXO per mode | Satisfied for the July 2 starting state. All three modes used the same three-recipient funding tx `5740188747787224553` for exactly `10000 T` each. |
+| One `A_fund` UTXO per mode | Must be reproven for the next namespace by selected-chain strict preflight. Prior funded namespaces were spent and are historical only. |
 | Full S4 ramp | Satisfied in current baseline: `[8, 16, 32, 64, 128]`. |
-| Structured output for comparison | Satisfied. JSON profile plus `RESULT_PROFILE_SCHEMA.json`; schema v3 includes top-level `computed_deltas`. |
+| Structured output for comparison | Implemented in schema v4. Submission validation now also requires canonical order, wall time, explicit fees, and final-balance evidence for every completed repetition. |
 | No hidden wallet pain | Satisfied by design and static checks. Scenario failures, pending funds, PP contention, and below-tip scans are recorded instead of retried away. |
 
 ## Review Signals Considered
@@ -33,27 +33,29 @@ This is the final status review for
   behavior. That repo stopped with Mode 2/3 blockers; this repo should preserve
   its broader three-mode live evidence as the differentiator.
 
-## Current Baseline Integrity
+## Latest Run Integrity
 
-- Latest profile: `baselines/esmeralda_baseline.json`, generated at
-  `2026-07-02T22:16:39.401016Z`.
-- Local node: `127.0.0.1`, with funding-block proof recorded in `RUNBOOK.md`.
-- Live shape: all live topology flags enabled, all live caps `0`,
-  `live_fresh_scan_cells = true`, `scan_repetitions = 1`, `repetitions = 1`,
-  S4 ramp `[8, 16, 32, 64, 128]`.
-- Confirmed top-level chain evidence: 6 rows total. Pending or unconfirmed rows
-  remain scenario metrics.
-- Failed cells are expected for this current-status baseline:
-  - Mode 1/2 send failures expose single-UTXO pending funds and locked change.
-  - Mode 3 failures expose PP/API contention and `PENDING_BATCHING` behavior.
-  - Mode 2/PP companion scanner failures expose below-tip scanner completion.
-  - Mode 1 scan mismatches expose checkpoint reconciliation differences after
-    partial sends.
+- Latest complete diagnostic profile:
+  `.bench-data/final-ready-20260711T024112Z/candidates/clean-20260711T104411Z`.
+  It is schema-v4 and `run_complete=true`, but is not promotable.
+- The wrapper failed after profile creation because zsh reserves `status`; the
+  ignored namespace wrappers now use `run_status`, so validation and summary are
+  no longer skipped after a completed run.
+- The old runner appended scan work out of mode-local chronology. Orchestration
+  now runs each mode B0 through S7 in order and checkpoints after each mode.
+- Mode 2 and PP each confirmed the first S1 transaction, but evaluated balance
+  before their wallet/companion state converged. Both now perform a bounded
+  post-confirmation refresh before applying the exact S1 invariant.
+- The diagnostic run preserves real wallet behavior: Mode 1 S1 was 127/127;
+  recovery rediscovered 127 spent parents plus 512 children; S4 was 17/248; S5
+  was 99/100 with one SQLite lock; later recovery hit RPC decoding failures.
+- The profile contains 245 independently confirmed transactions. That does not
+  override the failed submission gate (`new_wallet/S1` was non-canonical).
 
 ## Remaining Risks
 
-- The profile is not an all-ok statistical benchmark. It is a real, strict
-  current-status run that surfaces wallet pain.
+- No committed submission baseline currently passes schema v4 and
+  `validate-profile --submission`.
 - Live stateful send paths currently emit one repetition per scenario. Do not
   claim three-repetition statistics until those loops are implemented and funded.
 - Post-run wallet DBs are mutated, and the July 2 pre-run backup is no longer a
@@ -61,6 +63,9 @@ This is the final status review for
   must fund fresh seeds and pass `preflight --check-funds`.
 - Cleanup and recoup work must never delete useful proof artifacts or stage
   ignored secrets/DBs/logs.
+- S0 funding occurs before the measured run, as the bounty permits. The profile
+  records its tx/height/birthday and explicitly marks broadcast/confirmation
+  timing unavailable rather than fabricating per-transaction durations.
 
 ## Final Publish Gate
 
@@ -74,4 +79,5 @@ cargo test --all-features
 ast-grep scan
 jq empty baselines/esmeralda_baseline.json RESULT_PROFILE_SCHEMA.json
 cargo run -- preflight --config harness.toml
+cargo run -- validate-profile --profile candidate.json --submission
 ```

@@ -643,6 +643,34 @@ async fn run_mode2_s1_rounds(
                     ));
                 }
             }
+            match scan_to_tip(
+                &request.db_path,
+                &request.password,
+                &config.network.base_node_http_url,
+                config.benchmark.scan_batch_size,
+                config.benchmark.c_min,
+                config.timeout(config.timeouts.scan_batch_secs),
+            )
+            .await
+            {
+                Ok(report) => {
+                    let refresh_note = format!(
+                        "post-confirmation wallet refresh reached height {} against target {} in {} ms",
+                        report.max_height, report.target_tip, report.wall_ms
+                    );
+                    settle_note = Some(match settle_note {
+                        Some(note) => format!("{note}; {refresh_note}"),
+                        None => refresh_note,
+                    });
+                }
+                Err(error) => {
+                    round_summary.failure_count = round_summary.failure_count.saturating_add(1);
+                    round_summary.errors.push(format!(
+                        "mode2 S1 round {} post-confirmation wallet refresh failed: {error:#}",
+                        round.round_index
+                    ));
+                }
+            }
         }
         let observed_utxos = spendable_output_count(&request.db_path).ok();
         let round_balance_after = account_snapshot(&request.db_path)
