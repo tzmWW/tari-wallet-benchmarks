@@ -125,7 +125,11 @@ pub fn schema_document() -> Value {
                     "tx_id": {"type": "string", "minLength": 1},
                     "height": {"type": "integer", "minimum": 0},
                     "birthday": {"$ref": "#/$defs/nullable_integer"},
-                    "birthday_start_height": {"$ref": "#/$defs/nullable_integer"}
+                    "birthday_start_height": {"$ref": "#/$defs/nullable_integer"},
+                    "construction_ms": {"$ref": "#/$defs/nullable_integer"},
+                    "broadcast_to_mempool_ms": {"$ref": "#/$defs/nullable_integer"},
+                    "broadcast_to_confirmed_at_c_min_ms": {"$ref": "#/$defs/nullable_integer"},
+                    "tip_height_at_confirmation": {"$ref": "#/$defs/nullable_integer"}
                 }
             },
             "funding": {
@@ -497,6 +501,7 @@ fn validate_reference_configuration(
         bail!("submission config must record canonical B0,S0-S7 scenario order");
     }
     validate_cross_cutting_scenario_metrics(document)?;
+    validate_scenario_specific_metrics(document)?;
     for (mode, scenarios) in mode_scenarios(document)? {
         if scenarios["S1"]["outcome_status"] != "success" {
             bail!("submission requires canonical successful S1 for {mode}");
@@ -607,6 +612,16 @@ fn validate_reference_configuration(
                 mode.as_str()
             );
         }
+        if funding.construction_ms.is_none()
+            || funding.broadcast_to_mempool_ms.is_none()
+            || funding.broadcast_to_confirmed_at_c_min_ms.is_none()
+            || funding.tip_height_at_confirmation.is_none()
+        {
+            bail!(
+                "submission funding for {} is missing measured S0 timing/tip evidence",
+                mode.as_str()
+            );
+        }
         if !profile
             .chain_verification
             .verified_transactions
@@ -662,6 +677,184 @@ fn validate_cross_cutting_scenario_metrics(document: &Value) -> anyhow::Result<(
                     );
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
+    let expected_rounds = [
+        (1, 1, 2, 2),
+        (2, 2, 2, 4),
+        (3, 4, 2, 8),
+        (4, 8, 2, 16),
+        (5, 16, 2, 32),
+        (6, 32, 2, 64),
+        (7, 64, 8, 512),
+    ];
+    let mut recipient_set: Option<Vec<Value>> = None;
+    for (mode, scenarios) in mode_scenarios(document)? {
+        let b0 = &scenarios["B0"]["repetitions"][0]["metrics"];
+        if b0["birthday"] != 0
+            || b0["detected_outputs"] != 0
+            || b0["spendable_outputs"] != 0
+            || b0["available_microtari"] != 0
+            || b0["history_transactions"] != 0
+            || b0["max_height"] != b0["H_tip_end"]
+            || b0["tip_lag_tolerance_blocks"] != 0
+            || b0["scan_reached_tip"] != true
+        {
+            bail!("submission B0 exact empty-tip contract failed for {mode}");
+        }
+        for key in [
+            "T_scan_ms",
+            "blocks_per_sec",
+            "H_tip_start",
+            "H_tip_end",
+            "peak_rss_bytes",
+            "peak_cpu_percent",
+        ] {
+            if !b0[key].is_number() {
+                bail!("submission B0 metric {key} missing for {mode}");
+            }
+        }
+
+        let s1_metrics = &scenarios["S1"]["repetitions"][0]["metrics"];
+        for (round_index, tx_count, outputs_per_tx, target) in expected_rounds {
+            let key = format!("round_{round_index}");
+            let direct = s1_metrics.get(&key).filter(|value| !value.is_null());
+            let nested = s1_metrics["extra"]
+                .get(&key)
+                .filter(|value| !value.is_null());
+            let array = s1_metrics["rounds"].as_array().and_then(|rounds| {
+                rounds
+                    .iter()
+                    .find(|round| round["round_index"] == round_index)
+            });
+            let plan = s1_metrics["extra"]["rounds"].as_array().and_then(|rounds| {
+                rounds
+                    .iter()
+                    .find(|round| round["round_index"] == round_index)
+            });
+            let observed = direct.or(nested).or(array).with_context(|| {
+                format!("submission {mode}/S1 missing round {round_index} metrics")
+            })?;
+            let shape = array
+                .or(plan)
+                .or(direct)
+                .or(nested)
+                .expect("observed above");
+            if shape["tx_count"] != tx_count
+                || shape["outputs_per_tx"] != outputs_per_tx
+                || shape["target_utxos_after"] != target
+                || observed["wall_ms"].as_u64().is_none()
+                || observed["failure_count"] != 0
+                || observed["fee_only_balance_delta_ok"] != true
+            {
+                bail!("submission {mode}/S1 round {round_index} contract failed");
+            }
+        }
+        validate_transaction_observations(mode, "S1", s1_metrics)?;
+
+        let s4 = &scenarios["S4"]["repetitions"][0]["metrics"];
+        if s4["batch_summaries"].as_array().is_none()
+            || s4["max_serialization_gap_ms"].as_u64().is_none()
+            || s4["double_selection_rejections"].as_u64().is_none()
+        {
+            bail!("submission {mode}/S4 is missing concurrency batch metrics");
+        }
+        validate_transaction_observations(mode, "S4", s4)?;
+
+        let s5 = &scenarios["S5"]["repetitions"][0]["metrics"];
+        let set = s5
+            .get("recipient_set")
+            .or_else(|| s5["extra"].get("recipient_set"))
+            .and_then(Value::as_array)
+            .with_context(|| format!("submission {mode}/S5 missing recipient_set"))?;
+        if set.len() != 100
+            || recipient_set
+                .as_ref()
+                .is_some_and(|expected| expected != set)
+        {
+            bail!("submission S5 recipient set is not the same 100 addresses for every mode");
+        }
+        recipient_set = Some(set.clone());
+        if s5
+            .get("unspent_before")
+            .or_else(|| s5["extra"].get("unspent_before"))
+            .is_none()
+            || s5
+                .get("balance_before_microtari")
+                .or_else(|| s5["extra"].get("balance_before_microtari"))
+                .is_none()
+        {
+            bail!("submission {mode}/S5 missing disclosed post-S4 starting state");
+        }
+        validate_transaction_observations(mode, "S5", s5)?;
+
+        for scenario in ["S2", "S3", "S6", "S7"] {
+            let cell = &scenarios[scenario];
+            if cell["execution_status"] != "completed" {
+                continue;
+            }
+            for run in cell["repetitions"].as_array().expect("schema checked") {
+                let metrics = &run["metrics"];
+                if metrics["birthday"].as_u64()
+                    != Some(if matches!(scenario, "S2" | "S6") {
+                        0
+                    } else {
+                        profile_funding_birthday(document, mode)?
+                    })
+                    || metrics["max_height"] != metrics["H_tip_end"]
+                    || metrics["tip_lag_tolerance_blocks"] != 0
+                    || metrics["history_matches_expected"] != true
+                {
+                    bail!("submission {mode}/{scenario} scan contract failed");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn profile_funding_birthday(document: &Value, mode: &str) -> anyhow::Result<u64> {
+    document["funding"][mode]["birthday"]
+        .as_u64()
+        .with_context(|| format!("funding birthday missing for {mode}"))
+}
+
+fn validate_transaction_observations(
+    mode: &str,
+    scenario: &str,
+    metrics: &Value,
+) -> anyhow::Result<()> {
+    let observations = metrics["transaction_observations"]
+        .as_array()
+        .with_context(|| {
+            format!("submission {mode}/{scenario} missing transaction observations")
+        })?;
+    if observations.is_empty() {
+        bail!("submission {mode}/{scenario} has no transaction observations");
+    }
+    for observation in observations {
+        let outcome = observation["terminal_outcome"].as_str().unwrap_or_default();
+        if observation["transaction_id"].is_string()
+            && observation["construction_ms"].as_u64().is_none()
+        {
+            bail!("submission {mode}/{scenario} transaction is missing construction time");
+        }
+        if outcome == "confirmed"
+            && (observation["confirmation_ms"].as_u64().is_none()
+                || observation["fee_microtari"].as_u64().is_none()
+                || observation["mined_height"].as_u64().is_none()
+                || observation["tip_end_height"].as_u64().is_none())
+        {
+            bail!(
+                "submission {mode}/{scenario} confirmed transaction is missing timing/fee/tip evidence"
+            );
+        }
+        if outcome != "confirmed" && observation["error"].as_str().unwrap_or_default().is_empty() {
+            bail!("submission {mode}/{scenario} failed transaction is missing an error reason");
         }
     }
     Ok(())

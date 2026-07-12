@@ -70,7 +70,13 @@ pub(super) async fn run_library_checkpoint_scan_cells(
     scenarios: &[ScenarioName],
     checkpoint: ScanCheckpoint,
 ) -> anyhow::Result<()> {
-    let birthday = current_birthday();
+    let birthday = match mode {
+        "new_wallet" => config.funding.new_wallet.as_ref(),
+        "payment_processor" => config.funding.payment_processor.as_ref(),
+        _ => None,
+    }
+    .and_then(|funding| funding.birthday)
+    .with_context(|| format!("funding birthday missing for {mode}"))?;
     for scenario in scenarios {
         let spec = FreshScanSpec {
             scenario: *scenario,
@@ -147,7 +153,12 @@ pub(super) async fn run_mode1_checkpoint_scan_cells(
     scenarios: &[ScenarioName],
     checkpoint: ScanCheckpoint,
 ) -> anyhow::Result<()> {
-    let birthday = mode1_wallet_birthday(old_seed);
+    let birthday = config
+        .funding
+        .old_wallet
+        .as_ref()
+        .and_then(|funding| funding.birthday)
+        .context("funding.old_wallet.birthday missing")?;
     for scenario in scenarios {
         let spec = FreshScanSpec {
             scenario: *scenario,
@@ -399,6 +410,7 @@ async fn run_library_fresh_scan(
     let tip_start = base_node_tip_height(&config.network.base_node_http_url)
         .await
         .ok();
+    let tip_tolerance = 0;
     let (scan_result, resource_peaks) = with_resource_sampling(
         Some(std::process::id()),
         scan_to_tip(
@@ -406,17 +418,16 @@ async fn run_library_fresh_scan(
             &password,
             &config.network.base_node_http_url,
             config.benchmark.scan_batch_size,
-            config.benchmark.c_min,
+            tip_tolerance,
             config.timeout(config.timeouts.scan_batch_secs),
         ),
     )
     .await;
     let scan_report = scan_result?;
-    let tip_end = base_node_tip_height(&config.network.base_node_http_url)
-        .await
-        .ok();
+    let tip_end = Some(scan_report.target_tip);
     let account = account_snapshot(&db_path)?;
     let detected_outputs = detected_output_count(&db_path).unwrap_or_default();
+    let history_transactions = history_transaction_count(&db_path).unwrap_or_default();
     let spendable_outputs = spendable_output_count(&db_path).unwrap_or_default();
 
     Ok(ScanMeasurement {
@@ -428,10 +439,11 @@ async fn run_library_fresh_scan(
         tip_start,
         tip_end,
         detected_outputs,
+        history_transactions,
         spendable_outputs,
         resource_peaks,
         expectations,
-        tip_lag_tolerance_blocks: config.benchmark.c_min,
+        tip_lag_tolerance_blocks: tip_tolerance,
         scan_no_progress_attempts: scan_report.no_progress_attempts,
         scan_stopped_without_progress: scan_report.stopped_without_progress,
         scan_last_more_blocks: scan_report.last_more_blocks,
@@ -451,11 +463,7 @@ async fn run_mode1_fresh_scan(
     let grpc_bind = grpc_bind_multiaddr(&grpc_address)?;
     let password = wallet_password(&config.seeds.wallet_password_env)?;
     let seed_words = match spec.wallet_state {
-        FreshScanWalletState::EmptyGenesis => {
-            let mut seed = CipherSeed::random();
-            seed.change_birthday(0);
-            crate::seeds::seed_words_from_seed(&seed)?
-        }
+        FreshScanWalletState::EmptyGenesis => seed_words_with_birthday(&old_seed.seed_words, 0)?,
         FreshScanWalletState::FundedGenesis | FreshScanWalletState::FundedBirthday { .. } => {
             seed_words_with_birthday(&old_seed.seed_words, spec.birthday())?
         }
@@ -516,6 +524,7 @@ async fn run_mode1_fresh_scan(
             &mut process,
             &mut client,
             tip_start,
+            Some(&config.network.base_node_http_url),
             config.timeout(config.timeouts.startup_secs),
             config.timeout(config.timeouts.scan_batch_secs),
         ),
@@ -527,10 +536,11 @@ async fn run_mode1_fresh_scan(
         .await?
         .into_inner();
     let detected_outputs = mode1_unspent_count(&mut client).await.unwrap_or_default();
+    let history_transactions =
+        history_transaction_count(&base_path.join("esmeralda/data/wallet/db/console_wallet.db"))
+            .unwrap_or_default();
     let spendable_outputs = detected_outputs;
-    let tip_end = base_node_tip_height(&config.network.base_node_http_url)
-        .await
-        .ok();
+    let tip_end = Some(max_height);
 
     Ok(ScanMeasurement {
         wall_ms: start.elapsed().as_millis(),
@@ -541,10 +551,11 @@ async fn run_mode1_fresh_scan(
         tip_start,
         tip_end,
         detected_outputs,
+        history_transactions,
         spendable_outputs,
         resource_peaks,
         expectations,
-        tip_lag_tolerance_blocks: config.benchmark.c_min,
+        tip_lag_tolerance_blocks: 0,
         scan_no_progress_attempts: 0,
         scan_stopped_without_progress: false,
         scan_last_more_blocks: None,
@@ -601,6 +612,14 @@ fn reset_sqlite_files(db_path: &Path) -> anyhow::Result<()> {
 fn detected_output_count(db_path: &Path) -> anyhow::Result<u64> {
     let conn = Connection::open(db_path)?;
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM outputs", [], |row| row.get(0))?;
+    Ok(u64::try_from(count).unwrap_or_default())
+}
+
+fn history_transaction_count(db_path: &Path) -> anyhow::Result<u64> {
+    let conn = Connection::open(db_path)?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM completed_transactions", [], |row| {
+        row.get(0)
+    })?;
     Ok(u64::try_from(count).unwrap_or_default())
 }
 

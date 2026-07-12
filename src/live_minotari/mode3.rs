@@ -302,9 +302,11 @@ async fn run_mode3_send_cells(
         .into_iter()
         .take(s5_items as usize)
         .collect::<Vec<_>>();
+    let s5_recipient_set = s5_recipients.clone();
     let s5_balance_before = account_snapshot(&pp_db_path)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
+    let s5_unspent_before = spendable_output_count(&pp_db_path).ok();
     let mut s5 = run_pp_recipient_batches_sequential(
         config,
         context,
@@ -314,6 +316,10 @@ async fn run_mode3_send_cells(
         amount,
     )
     .await;
+    s5.extra_metrics.insert(
+        "recipient_set".to_string(),
+        serde_json::json!(s5_recipient_set),
+    );
     s5.extra_metrics.insert(
         "s5_batch_size".to_string(),
         serde_json::json!(config.benchmark.s5_k),
@@ -338,6 +344,10 @@ async fn run_mode3_send_cells(
         s5_balance_after,
         u64::from(s5.accepted_payments).saturating_mul(amount.0),
         s5_fee_microtari,
+    );
+    s5.extra_metrics.insert(
+        "unspent_before".to_string(),
+        serde_json::json!(s5_unspent_before),
     );
     s5.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -481,6 +491,8 @@ async fn run_pp_s1_rounds(
                 "target_utxos_after": round.target_utxos_after,
                 "observed_unspent_count": observed_utxos,
                 "observed_fee_microtari": observed_fees,
+                "success_count": round_summary.accepted_batches,
+                "failure_count": round_summary.failed_batches,
                 "fee_only_balance_delta_ok": fee_only_balance_delta_ok,
                 "wall_ms": round_summary.wall_ms
             }),

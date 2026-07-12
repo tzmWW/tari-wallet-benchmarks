@@ -8,12 +8,24 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use sysinfo::Disks;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct S0FundingEvidence {
+    pub schema_version: u32,
+    pub b0_run_id: String,
+    pub addresses: std::collections::BTreeMap<String, String>,
+    pub birthday: u16,
+    pub birthday_start_height: u64,
+    pub transaction: crate::result_profile::S0FundingTransactionEvidence,
+}
+
 use crate::{
     config::Config,
     env_capture,
-    modes::ModeName,
+    modes::{ModeName, ScenarioName},
     payment_processor,
-    result_profile::{ResultProfile, empty_mode_profile},
+    result_profile::{
+        CellStatus, ProfileKind, ResultProfile, empty_mode_profile, profile_validation,
+    },
     seeds::{AddressBook, WalletRole},
 };
 
@@ -147,6 +159,8 @@ pub async fn run_profile(
     profile_path: &Path,
     fresh_data_dir: bool,
     yes: bool,
+    b0_profile_path: &Path,
+    s0_evidence_path: &Path,
 ) -> anyhow::Result<()> {
     let book = AddressBook::load_required(config)?;
     preflight_for_live_run(config, &book).await?;
@@ -189,6 +203,9 @@ pub async fn run_profile(
         );
     }
 
+    import_prefunding_b0(config, &mut profile, b0_profile_path)?;
+    validate_s0_funding_evidence(config, &profile, s0_evidence_path)?;
+
     #[cfg(feature = "live-minotari")]
     {
         crate::live_minotari::annotate_profile_with_library_smoke(
@@ -196,6 +213,7 @@ pub async fn run_profile(
             &book,
             &mut profile,
             Some(profile_path),
+            true,
         )
         .await?;
     }
@@ -227,6 +245,287 @@ pub async fn run_profile(
     profile.refresh_computed_deltas();
     profile.write_validated_atomic(profile_path, false)?;
     println!("wrote {}", profile_path.display());
+    Ok(())
+}
+
+#[cfg(feature = "live-minotari")]
+pub async fn prepare_b0_profile(config: &Config, profile_path: &Path) -> anyhow::Result<()> {
+    config.validate_prefunding_b0()?;
+    let book = AddressBook::load_required(config)?;
+    let mut profile = ResultProfile::new(
+        config,
+        env_capture::capture_for_base_node(&config.network.base_node_http_url),
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let tip = fetch_chain_tip(&client, &config.network.base_node_http_url).await?;
+    if !tip.is_synced {
+        bail!("prepare-b0 requires a base node synchronized to tip");
+    }
+    profile.set_tip_start(tip.height, Some(hex::encode(&tip.hash)));
+    profile.base_node.pruning_horizon = Some(tip.pruning_horizon);
+    profile.base_node.is_synced = Some(tip.is_synced);
+    for mode in ModeName::ALL {
+        let address = match mode {
+            ModeName::OldWallet => book.addresses.get(WalletRole::OldWallet.label()),
+            ModeName::NewWallet => book.addresses.get(WalletRole::NewWallet.label()),
+            ModeName::PaymentProcessor => book.addresses.get(WalletRole::PaymentProcessor.label()),
+        }
+        .map(|seed| seed.address.clone());
+        profile
+            .modes
+            .insert(mode.as_str().to_string(), empty_mode_profile(mode, address));
+    }
+    crate::live_minotari::annotate_prefunding_b0(config, &book, &mut profile).await?;
+    let tip = fetch_chain_tip(&client, &config.network.base_node_http_url).await?;
+    profile.set_tip_end(tip.height, Some(hex::encode(&tip.hash)));
+    profile.base_node.is_synced = Some(tip.is_synced);
+    profile.refresh_computed_deltas();
+    validate_prefunding_b0_metrics(&profile)?;
+    profile.write_validated_atomic(profile_path, false)?;
+    println!("wrote pre-funding B0 checkpoint {}", profile_path.display());
+    Ok(())
+}
+
+#[cfg(feature = "live-minotari")]
+pub async fn fund_s0_from_checkpoint(
+    config: &Config,
+    source_db: &Path,
+    b0_profile_path: &Path,
+    evidence_path: &Path,
+) -> anyhow::Result<()> {
+    config.validate_prefunding_b0()?;
+    let checkpoint = profile_validation::validate_path(b0_profile_path, false)?;
+    validate_prefunding_b0_metrics(&checkpoint)?;
+    let current = ResultProfile::new(config, env_capture::capture());
+    if checkpoint.harness_git_commit != current.harness_git_commit {
+        bail!("fund-s0 B0 checkpoint harness commit does not match this binary");
+    }
+    if checkpoint.profile_kind != ProfileKind::Checkpoint
+        || !checkpoint
+            .completed_stages
+            .iter()
+            .any(|stage| stage == "prefunding_b0")
+    {
+        bail!("fund-s0 requires a completed pre-funding B0 checkpoint");
+    }
+    let book = AddressBook::load_required(config)?;
+    let (birthday, birthday_start_height) =
+        crate::live_minotari::initialize_s0_wallets(config, &book).await?;
+    let mut addresses = std::collections::BTreeMap::new();
+    let recipients = [
+        (ModeName::OldWallet, WalletRole::OldWallet),
+        (ModeName::NewWallet, WalletRole::NewWallet),
+        (ModeName::PaymentProcessor, WalletRole::PaymentProcessor),
+    ]
+    .into_iter()
+    .map(|(mode, role)| {
+        let address = book
+            .addresses
+            .get(role.label())
+            .with_context(|| format!("missing {} seed", role.label()))?
+            .address
+            .clone();
+        if checkpoint.modes[mode.as_str()].address.as_deref() != Some(address.as_str()) {
+            bail!("B0 checkpoint address mismatch for {}", mode.as_str());
+        }
+        addresses.insert(mode.as_str().to_string(), address.clone());
+        Ok(address)
+    })
+    .collect::<anyhow::Result<Vec<_>>>()?;
+    let transaction = crate::live_minotari::fund_s0_outputs(config, source_db, &recipients).await?;
+    let evidence = S0FundingEvidence {
+        schema_version: 1,
+        b0_run_id: checkpoint.run_id,
+        addresses,
+        birthday,
+        birthday_start_height,
+        transaction,
+    };
+    if let Some(parent) = evidence_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(&evidence)?;
+    bytes.push(b'\n');
+    fs::write(evidence_path, bytes)?;
+    println!("wrote S0 funding evidence {}", evidence_path.display());
+    Ok(())
+}
+
+fn import_prefunding_b0(
+    config: &Config,
+    profile: &mut ResultProfile,
+    checkpoint_path: &Path,
+) -> anyhow::Result<()> {
+    let checkpoint =
+        profile_validation::validate_path(checkpoint_path, false).with_context(|| {
+            format!(
+                "validating pre-funding B0 checkpoint {}",
+                checkpoint_path.display()
+            )
+        })?;
+    validate_prefunding_b0_metrics(&checkpoint)?;
+    if checkpoint.profile_kind != ProfileKind::Checkpoint
+        || !checkpoint
+            .completed_stages
+            .iter()
+            .any(|stage| stage == "prefunding_b0")
+        || checkpoint.config.get("prefunding_b0_checkpoint") != Some(&serde_json::json!(true))
+    {
+        bail!("B0 checkpoint is missing prefunding_b0 provenance");
+    }
+    if checkpoint.harness_git_commit != profile.harness_git_commit {
+        bail!("B0 checkpoint harness commit does not match the funded continuation");
+    }
+    if checkpoint.network != profile.network {
+        bail!("B0 checkpoint network does not match the funded continuation");
+    }
+    let b0_tip_end = checkpoint
+        .base_node
+        .tip_end_height
+        .context("B0 checkpoint is missing H_tip_end")?;
+    for (role, funding) in config.funding.records() {
+        let funding = funding.with_context(|| format!("funding.{role} must be set"))?;
+        if funding.height <= b0_tip_end {
+            bail!(
+                "funding.{role} height {} must be after pre-funding B0 H_tip_end {b0_tip_end}",
+                funding.height
+            );
+        }
+    }
+    for mode in ModeName::ALL {
+        let mode_name = mode.as_str();
+        let source = checkpoint
+            .modes
+            .get(mode_name)
+            .with_context(|| format!("B0 checkpoint missing mode {mode_name}"))?;
+        let target = profile
+            .modes
+            .get_mut(mode_name)
+            .with_context(|| format!("continuation missing mode {mode_name}"))?;
+        if source.address != target.address {
+            bail!("B0 checkpoint address mismatch for {mode_name}");
+        }
+        target.scenarios.insert(
+            ScenarioName::B0.as_str().to_string(),
+            source.scenarios[ScenarioName::B0.as_str()].clone(),
+        );
+    }
+    profile.base_node.tip_start_height = checkpoint.base_node.tip_start_height;
+    profile.base_node.tip_start_hash = checkpoint.base_node.tip_start_hash;
+    profile.mark_checkpoint_stage("prefunding_b0");
+    profile.config.insert(
+        "prefunding_b0_checkpoint".to_string(),
+        serde_json::json!(true),
+    );
+    profile.config.insert(
+        "prefunding_b0_run_id".to_string(),
+        serde_json::json!(checkpoint.run_id),
+    );
+    Ok(())
+}
+
+fn validate_s0_funding_evidence(
+    config: &Config,
+    profile: &ResultProfile,
+    evidence_path: &Path,
+) -> anyhow::Result<()> {
+    let bytes = fs::read(evidence_path)
+        .with_context(|| format!("reading S0 evidence {}", evidence_path.display()))?;
+    let evidence: S0FundingEvidence = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing S0 evidence {}", evidence_path.display()))?;
+    if evidence.schema_version != 1
+        || profile.config.get("prefunding_b0_run_id")
+            != Some(&serde_json::json!(evidence.b0_run_id))
+    {
+        bail!("S0 evidence does not continue the imported B0 checkpoint");
+    }
+    if evidence
+        .transaction
+        .tip_height_at_confirmation
+        .saturating_sub(evidence.transaction.mined_height)
+        < config.benchmark.c_min
+    {
+        bail!("S0 evidence transaction did not reach C_min");
+    }
+    for mode in ModeName::ALL {
+        let label = mode.as_str();
+        if profile.modes[label].address.as_ref() != evidence.addresses.get(label) {
+            bail!("S0 evidence address mismatch for {label}");
+        }
+        let funding = profile
+            .funding
+            .get(label)
+            .with_context(|| format!("funding record missing for {label}"))?;
+        if funding.tx_id != evidence.transaction.tx_id
+            || funding.height != evidence.transaction.mined_height
+            || funding.birthday != Some(evidence.birthday)
+            || funding.birthday_start_height != Some(evidence.birthday_start_height)
+            || funding.construction_ms != Some(evidence.transaction.construction_ms)
+            || funding.broadcast_to_mempool_ms != Some(evidence.transaction.broadcast_to_mempool_ms)
+            || funding.broadcast_to_confirmed_at_c_min_ms
+                != Some(evidence.transaction.broadcast_to_confirmed_at_c_min_ms)
+            || funding.tip_height_at_confirmation
+                != Some(evidence.transaction.tip_height_at_confirmation)
+        {
+            bail!("funding record does not match measured S0 evidence for {label}");
+        }
+    }
+    Ok(())
+}
+
+fn validate_prefunding_b0_metrics(profile: &ResultProfile) -> anyhow::Result<()> {
+    if !profile.funding.is_empty() {
+        bail!("pre-funding B0 checkpoint must not contain funding records");
+    }
+    for mode in ModeName::ALL {
+        let label = mode.as_str();
+        let cell = &profile.modes[label].scenarios[ScenarioName::B0.as_str()];
+        if cell.status != CellStatus::Ok || cell.repetitions.is_empty() {
+            bail!("pre-funding B0 must succeed for {label}");
+        }
+        for repetition in &cell.repetitions {
+            let metrics = repetition
+                .metrics
+                .as_ref()
+                .with_context(|| format!("pre-funding B0 metrics missing for {label}"))?;
+            let tip_end = metrics["H_tip_end"]
+                .as_u64()
+                .with_context(|| format!("pre-funding B0 H_tip_end missing for {label}"))?;
+            if metrics["birthday"] != 0
+                || metrics["detected_outputs"] != 0
+                || metrics["spendable_outputs"] != 0
+                || metrics["available_microtari"] != 0
+                || metrics["history_transactions"] != 0
+                || metrics["max_height"].as_u64() != Some(tip_end)
+                || metrics["scan_reached_tip"] != true
+                || metrics["tip_lag_blocks"] != 0
+                || metrics["tip_lag_tolerance_blocks"] != 0
+            {
+                bail!("pre-funding B0 exact empty-tip verification failed for {label}");
+            }
+            for metric in [
+                "T_scan_ms",
+                "blocks_per_sec",
+                "H_tip_start",
+                "H_tip_end",
+                "peak_rss_bytes",
+                "peak_cpu_percent",
+            ] {
+                if !metrics[metric].is_number() {
+                    bail!("pre-funding B0 metric {metric} missing for {label}");
+                }
+            }
+            if repetition.wall_ms != metrics["T_scan_ms"].as_u64().map(u128::from)
+                || repetition.fee_microtari != Some(0)
+                || repetition.success_count != 1
+                || repetition.failure_count != 0
+            {
+                bail!("pre-funding B0 repetition accounting failed for {label}");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1203,9 +1502,16 @@ mod tests {
         unsafe { env::set_var(&config.seeds.wallet_password_env, "test-only") };
 
         let profile = dir.path().join("must-not-exist.json");
-        let error = run_profile(&config, &profile, false, false)
-            .await
-            .expect_err("relative runtime paths must fail the strict run gate");
+        let error = run_profile(
+            &config,
+            &profile,
+            false,
+            false,
+            Path::new("missing-b0.json"),
+            Path::new("missing-s0.json"),
+        )
+        .await
+        .expect_err("relative runtime paths must fail the strict run gate");
 
         for material in generated.addresses.values() {
             // SAFETY: restore the test-specific process environment immediately.

@@ -28,7 +28,8 @@ not hide.
   directory, and B0 changes the mnemonic itself so the encoded birthday is `0`.
 - Completed repetitions must record wall time, explicit fees (including zero),
   and either final-balance reconciliation or a precise unavailable reason. S0
-  pre-run funding timing and per-transaction confirmation timing are never
+  funding timing is captured by the two-phase `fund-s0` gate; per-transaction
+  confirmation timing is measured at first observed `C_min` proof and never
   inferred from the enclosing scenario wall.
 - The live runner uses substantive `src/live_minotari/{mode1,mode2,mode3,scan,
   verification}.rs` modules for mode paths, fresh scans, and independent chain
@@ -170,7 +171,7 @@ Strict scanner validation is now part of the evidence. Mode 2 and PP companion
 B0/S2/S3/S6/S7 scans can return from the pinned minotari scanner far below the
 local base-node tip. The harness records `tip_lag_blocks`,
 `tip_lag_tolerance_blocks`, and `scan_reached_tip`, and marks those cells failed
-when `max_height + C_min < tip_end` rather than treating them as successful
+unless `max_height == tip_end` rather than treating confirmation-window lag as successful
 full-chain scans.
 
 The stale finding `mode2-single-recipient-library-limit` has been superseded.

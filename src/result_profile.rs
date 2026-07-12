@@ -114,6 +114,17 @@ pub enum CellStatus {
     Partial,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S0FundingTransactionEvidence {
+    pub tx_id: String,
+    pub fee_microtari: u64,
+    pub construction_ms: u128,
+    pub broadcast_to_mempool_ms: u128,
+    pub broadcast_to_confirmed_at_c_min_ms: u128,
+    pub mined_height: u64,
+    pub tip_height_at_confirmation: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Repetition {
     pub run: u32,
@@ -783,6 +794,7 @@ mod tests {
             height: 707741,
             birthday: None,
             birthday_start_height: None,
+            ..crate::config::FundingRecord::default()
         });
         let profile = ResultProfile::new(&config, env_capture::capture());
         let json = serde_json::to_string(&profile).unwrap();

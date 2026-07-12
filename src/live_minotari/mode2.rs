@@ -222,13 +222,19 @@ pub(super) async fn annotate_mode2_live_scenarios(
         .into_iter()
         .take(s5_attempts as usize)
         .collect::<Vec<_>>();
+    let s5_recipient_set = s5_recipients.clone();
     let s5_balance_before = account_snapshot(&config.modes.new_wallet_database)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
+    let s5_unspent_before = spendable_output_count(&config.modes.new_wallet_database).ok();
     let s5_amount_microtari = request.amount.0;
     let s5_start = Instant::now();
     let mut s5 =
         run_send_attempts_to_recipients_sequential("new_wallet/S5", s5_recipients, request).await;
+    s5.extra_metrics.insert(
+        "recipient_set".to_string(),
+        serde_json::json!(s5_recipient_set),
+    );
     let s5_settle_note = if s5.tx_ids.is_empty() {
         None
     } else {
@@ -266,6 +272,10 @@ pub(super) async fn annotate_mode2_live_scenarios(
         s5_balance_after,
         u64::from(s5.success_count).saturating_mul(s5_amount_microtari),
         s5.fee_microtari,
+    );
+    s5.extra_metrics.insert(
+        "unspent_before".to_string(),
+        serde_json::json!(s5_unspent_before),
     );
     s5.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -360,6 +370,24 @@ fn record_mode2_verification_loop_metrics(
     attempts: u32,
     wall_ms: u128,
 ) {
+    let confirmed_observed_ms = summary.wall_ms.saturating_add(wall_ms);
+    for timing in &mut summary.tx_timings {
+        let confirmed = timing
+            .get("tx_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|tx_id| {
+                summary
+                    .tx_infos
+                    .iter()
+                    .any(|tx| tx.tx_id == tx_id && tx.confirmed)
+            });
+        if confirmed && let Some(map) = timing.as_object_mut() {
+            map.insert(
+                "broadcast_to_confirmed_at_c_min_ms".to_string(),
+                serde_json::json!(confirmed_observed_ms),
+            );
+        }
+    }
     summary.extra_metrics.insert(
         "verification_loop".to_string(),
         serde_json::json!({
@@ -703,6 +731,7 @@ async fn run_mode2_s1_rounds(
             "target_utxos_after": round.target_utxos_after,
             "success_count": round_summary.success_count,
             "failure_count": round_summary.failure_count,
+            "total_fee_microtari": round_summary.fee_microtari,
             "settle_note": settle_note,
             "observed_unspent_count": observed_utxos,
             "fee_only_balance_delta_ok": fee_only_balance_delta_ok,

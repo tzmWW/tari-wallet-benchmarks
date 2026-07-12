@@ -39,6 +39,28 @@ pub enum Command {
         fresh_data_dir: bool,
         #[arg(long)]
         yes: bool,
+        /// Immutable checkpoint produced before any benchmark address is
+        /// funded. Required for the funded B0->S0 continuation.
+        #[arg(long)]
+        b0_profile: PathBuf,
+        #[arg(long)]
+        s0_evidence: PathBuf,
+    },
+    PrepareB0 {
+        #[arg(long, default_value = "harness.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        profile: PathBuf,
+    },
+    FundS0 {
+        #[arg(long, default_value = "harness.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        source_db: PathBuf,
+        #[arg(long)]
+        b0_profile: PathBuf,
+        #[arg(long)]
+        evidence_out: PathBuf,
     },
     FundOneSided {
         #[arg(long, default_value = "harness.toml")]

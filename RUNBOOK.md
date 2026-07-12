@@ -47,6 +47,38 @@ Git. Do not commit it.
 
 ## Fund wallets
 
+### Required B0-before-funding sequence
+
+For a candidate run, the three benchmark seeds must still be never-funded when
+B0 starts. Use a prefunding config with the final live shape and paths but no
+`[funding.*]` tables:
+
+```sh
+source .secrets/seeds.env
+cargo run --features live-minotari -- prepare-b0 \
+  --config harness-prefunding.toml \
+  --profile candidates/prefunding-b0.json
+
+cargo run --features live-minotari -- fund-s0 \
+  --config harness-prefunding.toml \
+  --source-db .bench-data/funding-source/wallet.db \
+  --b0-profile candidates/prefunding-b0.json \
+  --evidence-out candidates/s0-funding.json
+```
+
+`prepare-b0` rewrites each actual benchmark mnemonic to encoded birthday `0`,
+wipes its scan directory, and requires wallet height exactly equal to the moving
+tip with zero history, outputs, UTXOs, and balance. It records `T_scan`,
+blocks/sec, `H_tip_start`, `H_tip_end`, peak RSS, and peak CPU. `fund-s0`
+refuses an existing S0 wallet DB, initializes all three at the same measured
+`H_birth`, submits one three-recipient `A_fund` transaction, and waits for
+independent `C_min` proof while recording construction, mempool, confirmation,
+fee, mined-height, and tip evidence.
+
+Copy those measured fields into all three funded `[funding.*]` records. The
+funded `run` command requires both `--b0-profile` and `--s0-evidence`; it rejects
+address, commit, funding-height, birthday, timing, or transaction mismatches.
+
 For a submission-clean run, fund each generated address with exactly one
 spendable `A_fund` output from `harness.toml` (`10000 T` by default). Funding is
 intentionally outside the measured benchmark. Wait until the funding output has
@@ -238,7 +270,9 @@ mode3_worker_sleep_secs = 10    # PP worker cadence during live runs
 PROFILE="candidates/esmeralda-$(date -u +%Y%m%dT%H%M%SZ).json"
 cargo run --features live-minotari -- run \
   --config harness.toml \
-  --profile "$PROFILE"
+  --profile "$PROFILE" \
+  --b0-profile candidates/prefunding-b0.json \
+  --s0-evidence candidates/s0-funding.json
 ```
 
 The result profile is written atomically and does not contain seed phrases or
@@ -297,8 +331,8 @@ profile shape and can exercise Mode 2 plus PP companion fresh scan paths when
 pinned minotari HTTP scanner, which can return from a full-chain scan with a DB
 height far below the base-node tip because of an upstream downloader/processor
 completion race. The harness therefore records `tip_lag_blocks`,
-`tip_lag_tolerance_blocks`, and `scan_reached_tip`, and marks the scan failed if
-`max_height + C_min < tip_end`. `scan_to_tip` uses bounded partial scan chunks to
+`tip_lag_tolerance_blocks`, and `scan_reached_tip`, and requires
+`max_height == tip_end`. `scan_to_tip` uses bounded partial scan chunks to
 improve progress before recording the observation, but a below-tip scan remains a
 failed benchmark measurement. These fresh scan cells deliberately wipe their
 local databases per repetition, so they are long-running and print per-cell
@@ -454,9 +488,9 @@ S5 throughput ratios only from complete source arms.
 Each transaction observation carries the submitted transaction or PP batch
 identity when the surface returned one. `confirmation_ms` is recorded only for
 an independently measured per-transaction dispatch-to-`C_min` interval. The
-scenario wall is not copied into each row. Missing timing surfaces, including
-the pre-run S0 funding broadcast permitted by the bounty, are null with an
-explicit unavailable reason.
+scenario wall is not copied into each row. Missing timing surfaces are null with
+an explicit unavailable reason. S0 is measured by `fund-s0`, including
+broadcast acceptance and independent confirmation at `C_min`.
 Environment capture includes OS, CPU, memory, disk kind/name, base-node host, and
 whether the base-node path is local or remote.
 

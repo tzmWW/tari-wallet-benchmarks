@@ -160,7 +160,7 @@ pub struct FundingConfig {
     pub payment_processor: Option<FundingRecord>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FundingRecord {
     pub amount: String,
     pub tx_id: String,
@@ -169,6 +169,14 @@ pub struct FundingRecord {
     pub birthday: Option<u16>,
     #[serde(default)]
     pub birthday_start_height: Option<u64>,
+    #[serde(default)]
+    pub construction_ms: Option<u128>,
+    #[serde(default)]
+    pub broadcast_to_mempool_ms: Option<u128>,
+    #[serde(default)]
+    pub broadcast_to_confirmed_at_c_min_ms: Option<u128>,
+    #[serde(default)]
+    pub tip_height_at_confirmation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,14 +200,30 @@ impl Default for TimeoutConfig {
 
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
+        Self::load_with_validation(path, true)
+    }
+
+    pub fn load_prefunding_b0(path: &Path) -> anyhow::Result<Self> {
+        Self::load_with_validation(path, false)
+    }
+
+    fn load_with_validation(path: &Path, require_live_funding: bool) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)?;
         let mut config: Self = toml::from_str(&text)?;
         config.resolve_runtime_paths(&std::env::current_dir()?)?;
-        config.validate()?;
+        config.validate_with_live_funding(require_live_funding)?;
         Ok(config)
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.validate_with_live_funding(true)
+    }
+
+    pub fn validate_prefunding_b0(&self) -> anyhow::Result<()> {
+        self.validate_with_live_funding(false)
+    }
+
+    fn validate_with_live_funding(&self, require_live_funding: bool) -> anyhow::Result<()> {
         if self.network.name.to_lowercase() != "esmeralda" {
             bail!("network.name must be esmeralda");
         }
@@ -251,21 +275,30 @@ impl Config {
         if self.benchmark.settle_cooldown_secs == 0 {
             bail!("benchmark.settle_cooldown_secs must be greater than 0");
         }
-        if self.benchmark.mode1_live_topology && self.funding.old_wallet.is_none() {
+        if require_live_funding
+            && self.benchmark.mode1_live_topology
+            && self.funding.old_wallet.is_none()
+        {
             bail!("funding.old_wallet must be set when benchmark.mode1_live_topology=true");
         }
-        if (self.benchmark.mode2_live_scenarios || self.benchmark.mode2_send_smoke)
+        if require_live_funding
+            && (self.benchmark.mode2_live_scenarios || self.benchmark.mode2_send_smoke)
             && self.funding.new_wallet.is_none()
         {
             bail!("funding.new_wallet must be set when Mode 2 live sends are enabled");
         }
-        if self.benchmark.mode3_live_topology && self.funding.payment_processor.is_none() {
+        if require_live_funding
+            && self.benchmark.mode3_live_topology
+            && self.funding.payment_processor.is_none()
+        {
             bail!("funding.payment_processor must be set when benchmark.mode3_live_topology=true");
         }
         self.a_fund()?;
         self.fee_rate()?;
         self.funding.validate()?;
-        self.funding.validate_live_birthdays(&self.benchmark)?;
+        if require_live_funding {
+            self.funding.validate_live_birthdays(&self.benchmark)?;
+        }
         Ok(())
     }
 
@@ -700,6 +733,7 @@ mod tests {
             height: 707741,
             birthday: None,
             birthday_start_height: None,
+            ..FundingRecord::default()
         });
         cfg.validate().unwrap();
         assert_eq!(cfg.funding.as_map()["new_wallet"].height, 707741);
@@ -805,6 +839,7 @@ mod tests {
             height: 700_000,
             birthday: None,
             birthday_start_height: None,
+            ..FundingRecord::default()
         });
 
         let error = cfg.validate().unwrap_err().to_string();
@@ -814,6 +849,23 @@ mod tests {
         record.birthday = Some(1_600);
         record.birthday_start_height = Some(690_000);
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn prefunding_b0_validation_allows_live_shape_without_funding() {
+        let mut cfg = Config::default();
+        cfg.benchmark.mode1_live_topology = true;
+        cfg.benchmark.mode2_live_scenarios = true;
+        cfg.benchmark.mode3_live_topology = true;
+        cfg.benchmark.live_fresh_scan_cells = true;
+
+        assert!(cfg.validate_prefunding_b0().is_ok());
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("funding.old_wallet")
+        );
     }
 
     #[test]

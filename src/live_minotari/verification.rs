@@ -120,6 +120,19 @@ pub(super) async fn wait_for_mode1_summary_verification(
         }
         interval.tick().await;
     }
+    let confirmed_observed_ms = summary.wall_ms.saturating_add(start.elapsed().as_millis());
+    for timing in &mut summary.tx_timings {
+        let confirmed = timing
+            .get("tx_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|tx_id| latest.iter().any(|tx| tx.tx_id == tx_id && tx.confirmed));
+        if confirmed && let Some(map) = timing.as_object_mut() {
+            map.insert(
+                "broadcast_to_confirmed_at_c_min_ms".to_string(),
+                serde_json::json!(confirmed_observed_ms),
+            );
+        }
+    }
     summary.tx_infos.extend(latest);
     summary.backfill_verified_fee_total();
 }

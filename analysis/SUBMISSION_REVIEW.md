@@ -63,9 +63,9 @@ This is the final status review for
   must fund fresh seeds and pass `preflight --check-funds`.
 - Cleanup and recoup work must never delete useful proof artifacts or stage
   ignored secrets/DBs/logs.
-- S0 funding occurs before the measured run, as the bounty permits. The profile
-  records its tx/height/birthday and explicitly marks broadcast/confirmation
-  timing unavailable rather than fabricating per-transaction durations.
+- S0 is the measured bridge between the immutable pre-funding B0 checkpoint and
+  funded continuation. `fund-s0` initializes fresh wallet dirs, records
+  `H_birth`, and measures broadcast acceptance plus independent `C_min` timing.
 
 ## Final Publish Gate
 

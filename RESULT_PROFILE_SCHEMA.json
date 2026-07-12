@@ -295,9 +295,21 @@
         "birthday_start_height": {
           "$ref": "#/$defs/nullable_integer"
         },
+        "broadcast_to_confirmed_at_c_min_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "broadcast_to_mempool_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "construction_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
         "height": {
           "minimum": 0,
           "type": "integer"
+        },
+        "tip_height_at_confirmation": {
+          "$ref": "#/$defs/nullable_integer"
         },
         "tx_id": {
           "minLength": 1,

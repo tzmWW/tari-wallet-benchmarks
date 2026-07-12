@@ -45,11 +45,60 @@ async fn main() -> anyhow::Result<()> {
             profile,
             fresh_data_dir,
             yes,
+            b0_profile,
+            s0_evidence,
         } => {
             let config =
                 Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
             enforce_esmeralda(&config)?;
-            run_profile(&config, &profile, fresh_data_dir, yes).await?;
+            run_profile(
+                &config,
+                &profile,
+                fresh_data_dir,
+                yes,
+                &b0_profile,
+                &s0_evidence,
+            )
+            .await?;
+        }
+        Command::PrepareB0 { config, profile } => {
+            let config = Config::load_prefunding_b0(&config)
+                .with_context(|| format!("loading {}", config.display()))?;
+            enforce_esmeralda(&config)?;
+            #[cfg(feature = "live-minotari")]
+            {
+                wallet_bench::runner::prepare_b0_profile(&config, &profile).await?;
+            }
+            #[cfg(not(feature = "live-minotari"))]
+            {
+                let _ = profile;
+                anyhow::bail!("prepare-b0 requires --features live-minotari");
+            }
+        }
+        Command::FundS0 {
+            config,
+            source_db,
+            b0_profile,
+            evidence_out,
+        } => {
+            let config = Config::load_prefunding_b0(&config)
+                .with_context(|| format!("loading {}", config.display()))?;
+            enforce_esmeralda(&config)?;
+            #[cfg(feature = "live-minotari")]
+            {
+                wallet_bench::runner::fund_s0_from_checkpoint(
+                    &config,
+                    &source_db,
+                    &b0_profile,
+                    &evidence_out,
+                )
+                .await?;
+            }
+            #[cfg(not(feature = "live-minotari"))]
+            {
+                let _ = (source_db, b0_profile, evidence_out);
+                anyhow::bail!("fund-s0 requires --features live-minotari");
+            }
         }
         Command::FundOneSided {
             config,

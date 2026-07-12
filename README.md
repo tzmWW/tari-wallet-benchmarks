@@ -47,15 +47,29 @@ cargo run -- addresses --config harness.toml --out .secrets/seeds.env
 The fetch script installs `tools/minotari`, `tools/minotari_console_wallet`, and
 `tools/minotari_node` from the pinned source revisions.
 
-Then fund each printed address with one clean `A_fund` Esmeralda UTXO, run
-`preflight`, and execute the baseline run:
+The final workflow is deliberately two-phase: capture B0 against the never-funded
+benchmark seeds first, then let the harness initialize the three fresh S0 wallet
+directories and fund them while measuring mempool and `C_min` timing. A funded
+continuation cannot run without both immutable evidence files:
 
 ```sh
 source .secrets/seeds.env
+cargo run --features live-minotari -- prepare-b0 \
+  --config harness-prefunding.toml \
+  --profile candidates/prefunding-b0.json
+cargo run --features live-minotari -- fund-s0 \
+  --config harness-prefunding.toml \
+  --source-db .bench-data/funding-source/wallet.db \
+  --b0-profile candidates/prefunding-b0.json \
+  --evidence-out candidates/s0-funding.json
+# Add the measured tx/height/birthday/timing fields from s0-funding.json to
+# all three [funding.*] records, then use the funded harness.toml.
 cargo run --features live-minotari -- preflight --config harness.toml
 cargo run --features live-minotari -- preflight --config harness.toml --check-funds
 PROFILE="candidates/esmeralda-$(date -u +%Y%m%dT%H%M%SZ).json"
-cargo run --features live-minotari -- run --config harness.toml --profile "$PROFILE"
+cargo run --features live-minotari -- run --config harness.toml --profile "$PROFILE" \
+  --b0-profile candidates/prefunding-b0.json \
+  --s0-evidence candidates/s0-funding.json
 cargo run -- validate-profile --profile "$PROFILE" --submission
 cargo run -- summarize-profile --profile "$PROFILE" --out "${PROFILE%.json}.md"
 ```

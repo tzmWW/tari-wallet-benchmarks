@@ -61,7 +61,12 @@ pub(super) async fn start_mode1_console_wallet_with_recovery(
         .append(true)
         .open(&stderr_path)?;
     let grpc_bind = grpc_bind_multiaddr(&config.modes.old_wallet_grpc_address)?;
-    let birthday = mode1_wallet_birthday(old_seed);
+    let birthday = config
+        .funding
+        .old_wallet
+        .as_ref()
+        .and_then(|funding| funding.birthday)
+        .unwrap_or_else(|| mode1_wallet_birthday(old_seed));
     // Console-wallet seed recovery reads the birthday embedded in the mnemonic.
     let recovery_seed_words = seed_words_with_birthday(&old_seed.seed_words, birthday)
         .context("encoding Mode 1 console-wallet recovery seed birthday")?;
@@ -260,10 +265,12 @@ pub(super) async fn wait_for_mode1_scan_to_tip(
     process: &mut Mode1ConsoleProcess,
     client: &mut WalletGrpcClient<tonic::transport::Channel>,
     target_tip: Option<u64>,
+    moving_tip_base_url: Option<&str>,
     timeout: Duration,
     no_progress_timeout: Duration,
 ) -> anyhow::Result<u64> {
     let start = Instant::now();
+    let mut target_tip = target_tip;
     let mut last_progress = Instant::now();
     let mut interval = time::interval(Duration::from_secs(5));
     let mut last_scanned_height = None;
@@ -327,6 +334,16 @@ pub(super) async fn wait_for_mode1_scan_to_tip(
         last_scanned_height = Some(scanned_height);
         let target = target_tip.unwrap_or_else(|| scanned_height.saturating_add(1));
         if scanned_height >= target {
+            if let Some(base_url) = moving_tip_base_url {
+                let latest = base_node_tip_height(base_url).await?;
+                if scanned_height < latest {
+                    println!(
+                        "mode1 fresh scan reached fixed target {target}; continuing to moving tip {latest}"
+                    );
+                    target_tip = Some(latest);
+                    continue;
+                }
+            }
             return Ok(scanned_height);
         }
         if last_progress.elapsed() > no_progress_timeout {
@@ -560,6 +577,7 @@ async fn run_mode1_send_cells(
     );
     let s5_recipients = derive_distinct_recipient_pool(config.benchmark.s5_m)?;
     let s5_balance_before = mode1_available_balance(&mut context.client).await.ok();
+    let s5_unspent_before = mode1_unspent_count(&mut context.client).await.ok();
     let mut s5 = run_mode1_s5(
         config,
         &mut context.client,
@@ -568,6 +586,10 @@ async fn run_mode1_send_cells(
         fee_rate,
     )
     .await;
+    s5.extra_metrics.insert(
+        "recipient_set".to_string(),
+        serde_json::json!(s5_recipients),
+    );
     let s5_balance_after = mode1_available_balance(&mut context.client).await.ok();
     let s5_success_payments = s5.attempted_payments.saturating_sub(s5.failure_count);
     add_balance_reconciliation_metrics(
@@ -576,6 +598,10 @@ async fn run_mode1_send_cells(
         s5_balance_after,
         u64::from(s5_success_payments).saturating_mul(amount.0),
         s5.fee_microtari,
+    );
+    s5.extra_metrics.insert(
+        "unspent_before".to_string(),
+        serde_json::json!(s5_unspent_before),
     );
     s5.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -711,6 +737,9 @@ async fn run_mode1_s1(
                 "observed_unspent_count": observed_utxos,
                 "balance_after_microtari": balance_after,
                 "verified_count": round_summary.tx_infos.iter().filter(|tx| tx.confirmed).count(),
+                "total_fee_microtari": round_summary.fee_microtari,
+                "success_count": round_summary.success_count,
+                "failure_count": round_summary.failure_count,
                 "fee_only_balance_delta_ok": balance_delta_matches_fees,
                 "wall_ms": round_summary.wall_ms
             }),

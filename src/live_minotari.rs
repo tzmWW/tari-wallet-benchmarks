@@ -46,9 +46,8 @@ mod verification;
 use mode1::{
     STEALTH_OUTPUT_GRAMS, annotate_mode1_console_wallet, exact_no_change_split,
     exact_pp_split_with_change, grpc_bind_multiaddr, mode1_scan_grpc_address, mode1_unspent_count,
-    mode1_wallet_birthday, old_wallet_base_path, send_mode1_operator_one_sided,
-    start_mode1_console_wallet_with_recovery, wait_for_mode1_grpc_address,
-    wait_for_mode1_scan_to_tip,
+    old_wallet_base_path, send_mode1_operator_one_sided, start_mode1_console_wallet_with_recovery,
+    wait_for_mode1_grpc_address, wait_for_mode1_scan_to_tip,
 };
 use mode2::{
     annotate_mode2_live_scenarios, annotate_mode2_send_smoke, base_node_endpoint_url,
@@ -359,10 +358,11 @@ pub async fn annotate_profile_with_library_smoke(
     book: &AddressBook,
     profile: &mut ResultProfile,
     partial_profile_path: Option<&Path>,
+    prefunding_b0_imported: bool,
 ) -> anyhow::Result<()> {
     if !config.benchmark.live_fresh_scan_cells {
         annotate_fresh_scan_cells_disabled(profile);
-    } else {
+    } else if !prefunding_b0_imported {
         run_b0_fresh_scan_for_mode(config, profile, book, "old_wallet").await?;
     }
     if config.benchmark.mode1_live_topology {
@@ -372,7 +372,7 @@ pub async fn annotate_profile_with_library_smoke(
     }
     write_profile_checkpoint(profile, partial_profile_path, "old_wallet")?;
 
-    if config.benchmark.live_fresh_scan_cells {
+    if config.benchmark.live_fresh_scan_cells && !prefunding_b0_imported {
         run_b0_fresh_scan_for_mode(config, profile, book, "new_wallet").await?;
     }
     annotate_mode2_s0(config, book, profile).await?;
@@ -402,7 +402,7 @@ pub async fn annotate_profile_with_library_smoke(
     }
     write_profile_checkpoint(profile, partial_profile_path, "new_wallet")?;
 
-    if config.benchmark.live_fresh_scan_cells {
+    if config.benchmark.live_fresh_scan_cells && !prefunding_b0_imported {
         run_b0_fresh_scan_for_mode(config, profile, book, "payment_processor").await?;
     }
     write_profile_checkpoint(profile, partial_profile_path, "fresh_scans")?;
@@ -413,6 +413,33 @@ pub async fn annotate_profile_with_library_smoke(
         annotate_mode3_disabled(profile);
     }
     write_profile_checkpoint(profile, partial_profile_path, "payment_processor")?;
+    Ok(())
+}
+
+pub async fn annotate_prefunding_b0(
+    config: &Config,
+    book: &AddressBook,
+    profile: &mut ResultProfile,
+) -> anyhow::Result<()> {
+    if !config.benchmark.live_fresh_scan_cells {
+        bail!("prepare-b0 requires benchmark.live_fresh_scan_cells=true");
+    }
+    if config
+        .funding
+        .records()
+        .iter()
+        .any(|(_, record)| record.is_some())
+    {
+        bail!("prepare-b0 requires an unfunded config with no [funding.*] records");
+    }
+    for mode in ["old_wallet", "new_wallet", "payment_processor"] {
+        run_b0_fresh_scan_for_mode(config, profile, book, mode).await?;
+    }
+    profile.mark_checkpoint_stage("prefunding_b0");
+    profile.config.insert(
+        "prefunding_b0_checkpoint".to_string(),
+        serde_json::json!(true),
+    );
     Ok(())
 }
 
@@ -757,11 +784,12 @@ fn add_s0_funding_observation(
             "tx_id": funding.map(|record| record.tx_id.as_str()),
             "mined_height": funding.map(|record| record.height),
             "birthday": funding.and_then(|record| record.birthday).or(wallet_birthday),
+            "H_birth": funding.and_then(|record| record.birthday).or(wallet_birthday),
             "birthday_start_height": funding.and_then(|record| record.birthday_start_height),
-            "broadcast_to_mempool_ms": null,
-            "broadcast_to_mempool_unavailable_reason": "S0 funding is performed before the benchmark run, as allowed by the bounty seed strategy",
-            "broadcast_to_confirmed_at_c_min_ms": null,
-            "broadcast_to_confirmed_unavailable_reason": "pre-run funding has no harness-observed broadcast timestamp"
+            "construction_ms": funding.and_then(|record| record.construction_ms),
+            "broadcast_to_mempool_ms": funding.and_then(|record| record.broadcast_to_mempool_ms),
+            "broadcast_to_confirmed_at_c_min_ms": funding.and_then(|record| record.broadcast_to_confirmed_at_c_min_ms),
+            "tip_height_at_confirmation": funding.and_then(|record| record.tip_height_at_confirmation)
         }),
     );
 }
@@ -902,6 +930,7 @@ struct Mode2KernelQuery {
     fee_microtari: Option<u64>,
 }
 
+#[derive(serde::Serialize)]
 struct BatchSendSummary {
     configured_batch: u32,
     attempted: u32,
@@ -956,6 +985,7 @@ struct Mode1TransferSummary {
     extra_metrics: serde_json::Map<String, serde_json::Value>,
 }
 
+#[derive(serde::Serialize)]
 struct Mode1BatchSummary {
     configured_batch: u32,
     attempted_batches: u32,
@@ -1030,6 +1060,7 @@ struct PpChainProof {
     min_confirmations: u64,
 }
 
+#[derive(serde::Serialize)]
 struct PpBatchSummary {
     configured_batch: u32,
     attempted_batches: u32,
@@ -1349,6 +1380,24 @@ impl PpScenarioSummary {
                     "PP independent chain verification failed: {error:#}"
                 )),
             }
+            let confirmed_observed_ms = self
+                .construction_complete_ms
+                .last()
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(start.elapsed().as_millis());
+            for timing in &mut self.tx_timings {
+                let confirmed = timing
+                    .get("batch_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|batch_id| self.chain_proofs.contains_key(batch_id));
+                if confirmed && let Some(map) = timing.as_object_mut() {
+                    map.insert(
+                        "broadcast_to_confirmed_at_c_min_ms".to_string(),
+                        serde_json::json!(confirmed_observed_ms),
+                    );
+                }
+            }
             self.db_snapshot = Some(snapshot);
         }
         let pending_no_progress = timed_out
@@ -1460,6 +1509,7 @@ impl PpScenarioSummary {
             "accepted_batches": self.accepted_batches,
             "accepted_payments": self.accepted_payments,
             "failed_batches": self.failed_batches,
+            "batch_summaries": self.batch_summaries,
             "batch_ids": self.batch_ids,
             "payment_ids": self.payment_ids,
             "tx_timings": self.tx_timings,
@@ -1509,7 +1559,7 @@ impl PpScenarioSummary {
                     Some(
                         "payment-processor acceptance precedes worker broadcast and exposes no per-batch mempool timestamp",
                     ),
-                    None,
+                    timing_u128(timing, "broadcast_to_confirmed_at_c_min_ms"),
                     proof.map(|proof| proof.fee_microtari),
                     terminal_outcome,
                     (terminal_outcome != "confirmed")
@@ -1876,6 +1926,10 @@ impl Mode1TransferSummary {
             "attempted_payments".to_string(),
             serde_json::json!(self.attempted_payments),
         );
+        metrics.insert(
+            "batch_summaries".to_string(),
+            serde_json::json!(self.batch_summaries),
+        );
         metrics.insert("tx_ids".to_string(), serde_json::json!(self.tx_ids));
         metrics.insert("tx_timings".to_string(), serde_json::json!(self.tx_timings));
         metrics.insert(
@@ -1919,7 +1973,7 @@ impl Mode1TransferSummary {
                     timing_u128(timing, "construction_complete_ms"),
                     None,
                     Some("console-wallet gRPC does not expose a per-transaction mempool timestamp"),
-                    None,
+                    timing_u128(timing, "broadcast_to_confirmed_at_c_min_ms"),
                     verified.and_then(|tx| tx.fee_microtari),
                     if confirmed { "confirmed" } else { "timed_out" },
                     (!confirmed).then(|| errors.next().cloned()).flatten(),
@@ -2140,6 +2194,10 @@ impl ScenarioSendSummary {
             serde_json::json!("wallet_db_observed"),
         );
         metrics.insert("attempted".to_string(), serde_json::json!(self.attempted));
+        metrics.insert(
+            "batch_summaries".to_string(),
+            serde_json::json!(self.batch_summaries),
+        );
         metrics.insert("tx_ids".to_string(), serde_json::json!(self.tx_ids));
         metrics.insert("tx_timings".to_string(), serde_json::json!(self.tx_timings));
         metrics.insert(
@@ -2202,14 +2260,18 @@ impl ScenarioSendSummary {
                     tx_id,
                     timing_u128(timing, "construction_ms"),
                     timing_u128(timing, "broadcast_to_mempool_ms"),
-                    None,
-                    Some(
-                        "base-node submission exposes acceptance but not a per-transaction mempool timestamp",
-                    ),
-                    None,
-                    verified
-                        .and_then(|tx| tx.fee_microtari)
-                        .or_else(|| timing.get("fee_microtari").and_then(serde_json::Value::as_u64)),
+                    Some(accepted),
+                    Some(if accepted {
+                        "base-node submit_transaction accepted the transaction"
+                    } else {
+                        "base-node submit_transaction rejected the transaction"
+                    }),
+                    timing_u128(timing, "broadcast_to_confirmed_at_c_min_ms"),
+                    verified.and_then(|tx| tx.fee_microtari).or_else(|| {
+                        timing
+                            .get("fee_microtari")
+                            .and_then(serde_json::Value::as_u64)
+                    }),
                     terminal_outcome,
                     rejection.or_else(|| (!confirmed).then(|| errors.next().cloned()).flatten()),
                     verified.and_then(|tx| tx.mined_height),
@@ -2570,6 +2632,157 @@ pub async fn fund_one_sided_outputs(
     Ok(())
 }
 
+pub async fn fund_s0_outputs(
+    config: &Config,
+    source_db: &Path,
+    recipients: &[String],
+) -> anyhow::Result<crate::result_profile::S0FundingTransactionEvidence> {
+    if recipients.len() != 3 {
+        bail!("S0 funding requires exactly three wallet-mode recipients");
+    }
+    if !source_db.exists() {
+        bail!("source DB not found at {}", source_db.display());
+    }
+    let request = OwnedOneSidedSendRequest {
+        db_path: source_db.to_path_buf(),
+        password: wallet_password(&config.seeds.wallet_password_env)?,
+        base_node_url: config.network.base_node_http_url.clone(),
+        recipient: recipients[0].clone(),
+        amount: config.a_fund()?,
+        fee_rate: config.fee_rate()?,
+        seconds_to_lock: config.timeouts.transaction_lock_secs,
+        confirmation_window: config.benchmark.c_min,
+        request_timeout: Duration::from_secs(30),
+    };
+    let total_start = Instant::now();
+    let outcome =
+        construct_sign_broadcast_one_sided_multi_recipient_owned(request, recipients.to_vec())
+            .await?;
+    if !outcome.accepted {
+        bail!("S0 funding transaction was not accepted");
+    }
+    let broadcast_to_mempool_ms = outcome
+        .broadcast_to_mempool_ms
+        .context("S0 funding did not record broadcast-to-mempool time")?;
+    let tx_id = outcome
+        .tx_id
+        .parse::<u64>()
+        .context("parsing S0 funding tx id")?;
+    let timeout = config.timeout(config.timeouts.confirmation_secs);
+    let confirmation_start = Instant::now();
+    let client = base_node_http_client()?;
+    let mut interval = time::interval(Duration::from_secs(5));
+    let (mined_height, tip_height) = loop {
+        interval.tick().await;
+        if confirmation_start.elapsed() >= timeout {
+            bail!("S0 funding transaction did not reach C_min within {timeout:?}");
+        }
+        let conn = Connection::open(source_db)?;
+        let row = mode2_completed_transaction_row(&conn, tx_id as i64)?
+            .context("S0 funding transaction missing from source DB")?;
+        let kernel = mode2_kernel_query_from_serialized_transaction(&row.serialized_transaction)?;
+        let response =
+            query_mode2_transaction(&client, &config.network.base_node_http_url, &kernel).await?;
+        let tip =
+            base_node_tip_height_with_client(&client, &config.network.base_node_http_url).await?;
+        let (_, confirmed) =
+            mode2_transaction_query_status(&response, Some(tip), config.benchmark.c_min);
+        if confirmed {
+            break (
+                response
+                    .mined_height
+                    .context("confirmed S0 funding query omitted mined height")?,
+                tip,
+            );
+        }
+    };
+    Ok(crate::result_profile::S0FundingTransactionEvidence {
+        tx_id: outcome.tx_id,
+        fee_microtari: outcome.fee_microtari,
+        construction_ms: outcome.construction_ms,
+        broadcast_to_mempool_ms,
+        broadcast_to_confirmed_at_c_min_ms: total_start
+            .elapsed()
+            .as_millis()
+            .saturating_sub(outcome.construction_ms),
+        mined_height,
+        tip_height_at_confirmation: tip_height,
+    })
+}
+
+pub async fn initialize_s0_wallets(
+    config: &Config,
+    book: &AddressBook,
+) -> anyhow::Result<(u16, u64)> {
+    let birthday = current_birthday();
+    let birthday_timestamp = u64::from(birthday.saturating_sub(2))
+        .saturating_mul(24 * 60 * 60)
+        .saturating_add(1_640_995_200);
+    let birthday_start_height: u64 = base_node_http_client()?
+        .get(format!(
+            "{}/get_height_at_time?time={birthday_timestamp}",
+            config.network.base_node_http_url.trim_end_matches('/')
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let old = book
+        .addresses
+        .get(WalletRole::OldWallet.label())
+        .context("old wallet seed missing")?;
+    let new = book
+        .addresses
+        .get(WalletRole::NewWallet.label())
+        .context("new wallet seed missing")?;
+    let pp = book
+        .addresses
+        .get(WalletRole::PaymentProcessor.label())
+        .context("payment processor seed missing")?;
+    let old_db = old_wallet_base_path(config).join("esmeralda/data/wallet/db/console_wallet.db");
+    let new_db = config.modes.new_wallet_database.clone();
+    let pp_db = payment_processor::payment_receiver_db_path(config);
+    for (label, path) in [
+        ("old_wallet", &old_db),
+        ("new_wallet", &new_db),
+        ("payment_processor", &pp_db),
+    ] {
+        if path.exists() {
+            bail!(
+                "S0 requires a fresh wallet data dir; {label} DB already exists at {}",
+                path.display()
+            );
+        }
+    }
+    let password_env = &config.seeds.wallet_password_env;
+    ensure_signing_wallet(
+        &new_db,
+        &seed_words_with_birthday(&new.seed_words, birthday)?,
+        password_env,
+    )?;
+    ensure_signing_wallet(
+        &pp_db,
+        &seed_words_with_birthday(&pp.seed_words, birthday)?,
+        password_env,
+    )?;
+    let mut old_with_birthday = old.clone();
+    old_with_birthday.seed_words = seed_words_with_birthday(&old.seed_words, birthday)?;
+    old_with_birthday.birthday = birthday;
+    let mut context =
+        start_mode1_console_wallet_with_recovery(config, &old_with_birthday, false, 0).await?;
+    let actual = context
+        .client
+        .get_address(grpc::Empty {})
+        .await?
+        .into_inner()
+        .one_sided_address;
+    if !mode1_address_matches_seed(&actual, old)? {
+        bail!("S0 old-wallet initialization produced the wrong address");
+    }
+    Ok((birthday, birthday_start_height))
+}
+
 async fn finalize_transaction_and_broadcast_without_retry(
     sender: &TransactionSender,
     signed: SignedOneSidedTransactionResult,
@@ -2757,9 +2970,8 @@ impl FreshScanSpec {
     fn seed(self, funded_seed_words: Option<&str>) -> anyhow::Result<CipherSeed> {
         match self.wallet_state {
             FreshScanWalletState::EmptyGenesis => {
-                let mut seed = CipherSeed::random();
-                seed.change_birthday(0);
-                Ok(seed)
+                let words = funded_seed_words.context("fresh benchmark seed words missing")?;
+                seed_from_words_with_birthday(words, 0)
             }
             FreshScanWalletState::FundedGenesis => {
                 let words = funded_seed_words.context("funded seed words missing")?;
@@ -2930,14 +3142,22 @@ fn scan_expectations_from_profile(
         ScanCheckpoint::Empty => ScanExpectations {
             expected_outputs: Some(0),
             expected_available_microtari: Some(0),
+            expected_history_transactions: Some(0),
         },
         ScanCheckpoint::PostS1 => scenario_scan_expectations(profile, mode, ScenarioName::S1)
-            .with_fallback_outputs(Some(u64::from(config.benchmark.volume_target))),
+            .with_fallback_outputs(Some(u64::from(config.benchmark.volume_target)))
+            .with_expected_history(verified_history_count(profile, mode, &[ScenarioName::S1])),
         ScanCheckpoint::PostS1Partial => {
             scenario_scan_expectations(profile, mode, ScenarioName::S1)
         }
         ScanCheckpoint::PostS5Complete | ScanCheckpoint::PostS5Partial => {
-            scenario_scan_expectations(profile, mode, ScenarioName::S5)
+            scenario_scan_expectations(profile, mode, ScenarioName::S5).with_expected_history(
+                verified_history_count(
+                    profile,
+                    mode,
+                    &[ScenarioName::S1, ScenarioName::S4, ScenarioName::S5],
+                ),
+            )
         }
         ScanCheckpoint::PostS1Blocked | ScanCheckpoint::PostS5Blocked => {
             ScanExpectations::default()
@@ -2960,7 +3180,29 @@ fn scenario_scan_expectations(
         expected_available_microtari: metrics
             .get("balance_after_microtari")
             .and_then(serde_json::Value::as_u64),
+        expected_history_transactions: None,
     }
+}
+
+fn verified_history_count(
+    profile: &ResultProfile,
+    mode: &str,
+    scenarios: &[ScenarioName],
+) -> Option<u64> {
+    u64::try_from(
+        profile
+            .chain_verification
+            .verified_transactions
+            .iter()
+            .filter(|tx| {
+                tx.mode == mode
+                    && scenarios
+                        .iter()
+                        .any(|scenario| scenario.as_str() == tx.scenario)
+            })
+            .count(),
+    )
+    .ok()
 }
 
 fn scenario_metrics<'a>(
@@ -2983,6 +3225,11 @@ impl ScanExpectations {
         if self.expected_outputs.is_none() {
             self.expected_outputs = fallback;
         }
+        self
+    }
+
+    fn with_expected_history(mut self, expected: Option<u64>) -> Self {
+        self.expected_history_transactions = expected;
         self
     }
 }
@@ -3044,6 +3291,7 @@ impl ScanToTipReport {
 struct ScanExpectations {
     expected_outputs: Option<u64>,
     expected_available_microtari: Option<u64>,
+    expected_history_transactions: Option<u64>,
 }
 
 struct ScanMeasurement {
@@ -3055,6 +3303,7 @@ struct ScanMeasurement {
     tip_start: Option<u64>,
     tip_end: Option<u64>,
     detected_outputs: u64,
+    history_transactions: u64,
     spendable_outputs: u64,
     resource_peaks: ResourcePeaks,
     expectations: ScanExpectations,
@@ -3088,6 +3337,7 @@ impl ScanMeasurement {
             }
         });
         serde_json::json!({
+            "T_scan_ms": self.wall_ms,
             "mode": mode,
             "scenario": spec.scenario.as_str(),
             "verification_source": "wallet_scan_observed",
@@ -3095,18 +3345,23 @@ impl ScanMeasurement {
             "expected_outputs": self.expectations.expected_outputs,
             "outputs_match_expected": self.expectations.expected_outputs.map(|expected| expected == self.spendable_outputs),
             "expected_available_microtari": self.expectations.expected_available_microtari,
+            "expected_history_transactions": self.expectations.expected_history_transactions,
             "balance_matches_expected": self.expectations.expected_available_microtari.map(|expected| expected == self.available_microtari),
             "balance_delta_microtari": self.expectations.expected_available_microtari.map(|expected| i128::from(expected) - i128::from(self.available_microtari)),
             "birthday": self.birthday,
             "birthday_start_height": self.birthday_start_height,
             "tip_start": self.tip_start,
             "tip_end": self.tip_end,
+            "H_tip_start": self.tip_start,
+            "H_tip_end": self.tip_end,
             "tip_lag_blocks": self.tip_lag_blocks(),
             "tip_lag_tolerance_blocks": self.tip_lag_tolerance_blocks,
             "scan_reached_tip": self.scan_reached_tip(),
             "blocks_scanned": blocks_scanned,
             "blocks_per_sec": blocks_per_sec,
             "detected_outputs": self.detected_outputs,
+            "history_transactions": self.history_transactions,
+            "history_matches_expected": self.expectations.expected_history_transactions.map(|expected| self.history_transactions >= expected),
             "spendable_outputs": self.spendable_outputs,
             "available_microtari": self.available_microtari,
             "max_height": self.max_height,
@@ -3129,11 +3384,15 @@ impl ScanMeasurement {
                 .expectations
                 .expected_available_microtari
                 .is_none_or(|expected| expected == self.available_microtari)
+            && self
+                .expectations
+                .expected_history_transactions
+                .is_none_or(|expected| self.history_transactions >= expected)
     }
 
     fn scan_verification_error(&self) -> String {
         format!(
-            "scan verification mismatch: max_height={} tip_end={:?} tip_lag_blocks={:?} tip_lag_tolerance_blocks={} expected_outputs={:?} spendable_outputs={} detected_outputs={} expected_available_microtari={:?} available_microtari={}",
+            "scan verification mismatch: max_height={} tip_end={:?} tip_lag_blocks={:?} tip_lag_tolerance_blocks={} expected_outputs={:?} spendable_outputs={} detected_outputs={} expected_available_microtari={:?} available_microtari={} expected_history_transactions={:?} history_transactions={}",
             self.max_height,
             self.tip_end,
             self.tip_lag_blocks(),
@@ -3142,7 +3401,9 @@ impl ScanMeasurement {
             self.spendable_outputs,
             self.detected_outputs,
             self.expectations.expected_available_microtari,
-            self.available_microtari
+            self.available_microtari,
+            self.expectations.expected_history_transactions,
+            self.history_transactions
         )
     }
 
@@ -3515,6 +3776,30 @@ mod tests {
     }
 
     #[test]
+    fn b0_reuses_the_benchmark_seed_with_encoded_birthday_zero() {
+        let seed = CipherSeed::random();
+        let words = crate::seeds::seed_words_from_seed(&seed).unwrap();
+        let spec = FreshScanSpec {
+            scenario: ScenarioName::B0,
+            wallet_state: FreshScanWalletState::EmptyGenesis,
+            checkpoint: ScanCheckpoint::Empty,
+        };
+        let b0_seed = spec.seed(Some(&words)).unwrap();
+        let original = crate::seeds::material_from_seed(
+            WalletRole::NewWallet,
+            "TEST_ORIGINAL".to_string(),
+            seed,
+        )
+        .unwrap();
+        let rewritten =
+            crate::seeds::material_from_seed(WalletRole::NewWallet, "TEST_B0".to_string(), b0_seed)
+                .unwrap();
+
+        assert_eq!(rewritten.birthday, 0);
+        assert_eq!(rewritten.address, original.address);
+    }
+
+    #[test]
     fn blocked_checkpoint_scan_records_failed_repetition() {
         let mut cell = ScenarioCell {
             scenario: ScenarioName::S6,
@@ -3675,6 +3960,7 @@ mod tests {
             tip_start: Some(711_300),
             tip_end: Some(711_305),
             detected_outputs: 1,
+            history_transactions: 1,
             spendable_outputs: 1,
             resource_peaks: ResourcePeaks::default(),
             expectations: ScanExpectations::default(),
@@ -3705,11 +3991,13 @@ mod tests {
             tip_start: Some(726_900),
             tip_end: Some(726_905),
             detected_outputs: 0,
+            history_transactions: 0,
             spendable_outputs: 0,
             resource_peaks: ResourcePeaks::default(),
             expectations: ScanExpectations {
                 expected_outputs: Some(0),
                 expected_available_microtari: Some(0),
+                expected_history_transactions: Some(0),
             },
             tip_lag_tolerance_blocks: 3,
             scan_no_progress_attempts: 2,
@@ -3727,7 +4015,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_verification_allows_confirmation_window_lag() {
+    fn scan_verification_requires_exact_tip_for_scan_scenarios() {
         let measurement = ScanMeasurement {
             birthday: 0,
             birthday_start_height: 0,
@@ -3737,19 +4025,21 @@ mod tests {
             tip_start: Some(726_900),
             tip_end: Some(726_905),
             detected_outputs: 0,
+            history_transactions: 0,
             spendable_outputs: 0,
             resource_peaks: ResourcePeaks::default(),
             expectations: ScanExpectations {
                 expected_outputs: Some(0),
                 expected_available_microtari: Some(0),
+                expected_history_transactions: Some(0),
             },
-            tip_lag_tolerance_blocks: 3,
+            tip_lag_tolerance_blocks: 0,
             scan_no_progress_attempts: 0,
             scan_stopped_without_progress: false,
             scan_last_more_blocks: None,
         };
 
-        assert!(measurement.scan_verification_ok());
+        assert!(!measurement.scan_verification_ok());
         assert_eq!(measurement.tip_lag_blocks(), Some(3));
         let metrics = measurement.metrics(
             "new_wallet",
@@ -3759,7 +4049,7 @@ mod tests {
                 checkpoint: ScanCheckpoint::Empty,
             },
         );
-        assert_eq!(metrics["scan_reached_tip"], serde_json::json!(true));
+        assert_eq!(metrics["scan_reached_tip"], serde_json::json!(false));
         assert_eq!(metrics["tip_lag_blocks"], serde_json::json!(3));
     }
 
