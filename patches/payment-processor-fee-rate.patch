@@ -23,3 +23,16 @@ index 0b3883c..0c3a8cc 100644
  
      for input in inputs {
          tx_builder.with_input(input.clone()).context("Failed to add input")?;
+@@ -379,7 +382,11 @@ async fn create_self_spend_step(
+     let total_input_value: MicroMinotari = inputs.iter().map(|p| p.value()).sum();
+     let fee_calc = Fee::new(TransactionWeight::latest());
+     let output_metadata_size = get_single_output_metadata_size(&fee_calc)?;
+-    let calculated_fee = fee_calc.calculate(MicroMinotari(FEE_PER_GRAM), 1, inputs.len(), 1, output_metadata_size);
++    let fee_per_gram = std::env::var("FEE_PER_GRAM")
++        .context("FEE_PER_GRAM must be set")?
++        .parse::<u64>()
++        .context("FEE_PER_GRAM must be an unsigned integer in microTari")?;
++    let calculated_fee = fee_calc.calculate(MicroMinotari(fee_per_gram), 1, inputs.len(), 1, output_metadata_size);
+ 
+     if calculated_fee >= total_input_value {
+         return Err(anyhow!(
