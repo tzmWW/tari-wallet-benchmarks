@@ -49,7 +49,8 @@ ast-grep scan
 
 The fetch scripts pin:
 
-- minotari CLI: `360c4848a54d65fd710266233cc9277b0f785e74`
+- minotari CLI/scanner: `tzmWW/minotari-cli@c2b8d7b65a3b4320d85b7ba118145d190c264777`
+  (upstream `360c4848a54d65fd710266233cc9277b0f785e74` plus fixed-range HTTP scanner completion ordering and clipping)
 - console wallet: `9f5adb7183dc2ec285f5c8fae05f4be9735d9749`
 - node: `v5.4.0`
 - payment processor: `f0572c98cbfac7377412dc6d4094c7d7dfc5de2c`

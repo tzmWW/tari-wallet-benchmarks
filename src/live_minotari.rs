@@ -102,6 +102,8 @@ pub async fn scan_wallet_db(
     db_path: &Path,
     seed_env: Option<&str>,
     birthday: Option<u16>,
+    target_height: Option<u64>,
+    target_hash: Option<&str>,
 ) -> anyhow::Result<()> {
     if let Some(seed_env) = seed_env {
         let seed_words = std::env::var(seed_env)
@@ -117,15 +119,41 @@ pub async fn scan_wallet_db(
             db_path.display()
         );
     }
-    let scan_report = scan_to_tip(
-        db_path,
-        &wallet_password(&config.seeds.wallet_password_env)?,
-        &config.network.base_node_http_url,
-        config.benchmark.scan_batch_size,
-        config.benchmark.c_min,
-        config.timeout(config.timeouts.scan_batch_secs),
-    )
-    .await?;
+    let password = wallet_password(&config.seeds.wallet_password_env)?;
+    let scan_report = match (target_height, target_hash) {
+        (Some(height), Some(hash)) => {
+            if hex::decode(hash).is_err() || hash.len() != 64 {
+                bail!("--target-hash must be a 32-byte hexadecimal block hash");
+            }
+            let mut progress = ScanProgress::default();
+            scan_to_fixed_tip(
+                db_path,
+                &password,
+                &config.network.base_node_http_url,
+                config.benchmark.scan_batch_size,
+                config.benchmark.c_min,
+                config.timeout(config.timeouts.scan_batch_secs),
+                ChainTipSnapshot {
+                    height,
+                    hash: hash.to_lowercase(),
+                },
+                &mut progress,
+            )
+            .await?
+        }
+        (None, None) => {
+            scan_to_tip(
+                db_path,
+                &password,
+                &config.network.base_node_http_url,
+                config.benchmark.scan_batch_size,
+                config.benchmark.c_min,
+                config.timeout(config.timeouts.scan_batch_secs),
+            )
+            .await?
+        }
+        _ => bail!("--target-height and --target-hash must be provided together"),
+    };
     let balance = account_balance(db_path)?;
     println!(
         "scan-wallet db={} wall_ms={} no_progress_attempts={} stopped_without_progress={} balance={}",
@@ -528,6 +556,7 @@ pub async fn scan_to_tip(
     scan_timeout: Duration,
 ) -> anyhow::Result<ScanToTipReport> {
     let target = base_node_tip_snapshot(base_url).await?;
+    let mut progress = ScanProgress::default();
     scan_to_fixed_tip(
         db_path,
         password,
@@ -536,6 +565,7 @@ pub async fn scan_to_tip(
         required_confirmations,
         scan_timeout,
         target,
+        &mut progress,
     )
     .await
 }
@@ -549,6 +579,7 @@ async fn scan_to_fixed_tip(
     required_confirmations: u64,
     scan_timeout: Duration,
     target: ChainTipSnapshot,
+    progress: &mut ScanProgress,
 ) -> anyhow::Result<ScanToTipReport> {
     let start = std::time::Instant::now();
     let target_tip = target.height;
@@ -569,16 +600,14 @@ async fn scan_to_fixed_tip(
             completion_hash: target.hash,
             max_height: cursor.max_height,
             cursor_hash: cursor.hash,
-            scan_invocations: 0,
-            no_progress_attempts: 0,
+            scan_invocations: progress.invocations,
+            no_progress_attempts: progress.no_progress_attempts,
             stopped_without_progress: false,
             last_more_blocks: Some(false),
         });
     }
 
     let deadline = time::Instant::now() + scan_timeout;
-    let mut scan_invocations = 0;
-    let mut no_progress_attempts = 0;
     let mut consecutive_no_progress = 0;
     let mut last_more_blocks = None;
     while cursor.max_height < target_tip {
@@ -601,7 +630,7 @@ async fn scan_to_fixed_tip(
             .await
             .context("wallet scan exceeded its total deadline")?
             .map_err(|error| anyhow::anyhow!("{error}"))?;
-        scan_invocations += 1;
+        progress.invocations += 1;
         last_more_blocks = Some(more_blocks);
         cursor = account_snapshot(db_path)?;
         if cursor.max_height > target_tip {
@@ -611,7 +640,7 @@ async fn scan_to_fixed_tip(
             );
         }
         if cursor.max_height == previous_height {
-            no_progress_attempts += 1;
+            progress.no_progress_attempts += 1;
             consecutive_no_progress += 1;
             if consecutive_no_progress >= 3 {
                 bail!(
@@ -641,8 +670,8 @@ async fn scan_to_fixed_tip(
         completion_hash: completion.hash,
         max_height: cursor.max_height,
         cursor_hash: cursor.hash,
-        scan_invocations,
-        no_progress_attempts,
+        scan_invocations: progress.invocations,
+        no_progress_attempts: progress.no_progress_attempts,
         stopped_without_progress: false,
         last_more_blocks,
     })
@@ -3705,6 +3734,12 @@ struct AccountSnapshot {
     max_height: u64,
     hash: Option<String>,
     available_microtari: u64,
+}
+
+#[derive(Default)]
+struct ScanProgress {
+    invocations: u64,
+    no_progress_attempts: u64,
 }
 
 #[derive(Debug, Clone)]

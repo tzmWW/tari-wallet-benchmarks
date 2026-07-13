@@ -83,6 +83,13 @@ pub enum Command {
         /// address is unchanged; this avoids unnecessary genesis recovery.
         #[arg(long)]
         birthday: Option<u16>,
+        /// Scan to this exact height instead of capturing the current tip.
+        /// Requires --target-hash.
+        #[arg(long, requires = "target_hash")]
+        target_height: Option<u64>,
+        /// Hex block hash for --target-height.
+        #[arg(long, requires = "target_height")]
+        target_hash: Option<String>,
     },
     RecoverMode1Wallet {
         #[arg(long, default_value = "harness.toml")]
@@ -122,4 +129,37 @@ pub enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_scan_target_requires_height_and_hash() {
+        assert!(
+            Cli::try_parse_from([
+                "wallet-bench",
+                "scan-wallet",
+                "--db",
+                "wallet.db",
+                "--target-height",
+                "100",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "wallet-bench",
+                "scan-wallet",
+                "--db",
+                "wallet.db",
+                "--target-height",
+                "100",
+                "--target-hash",
+                &"aa".repeat(32),
+            ])
+            .is_ok()
+        );
+    }
 }

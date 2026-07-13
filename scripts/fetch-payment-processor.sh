@@ -4,7 +4,7 @@ set -euo pipefail
 CACHE_DIR="${1:-.bench-cache}"
 TOOLS_DIR="${2:-tools}"
 PP_REV="f0572c98cbfac7377412dc6d4094c7d7dfc5de2c"
-MINOTARI_REV="360c4848a54d65fd710266233cc9277b0f785e74"
+MINOTARI_REV="c2b8d7b65a3b4320d85b7ba118145d190c264777"
 TARI_CONSOLE_WALLET_REV="9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
 TARI_NODE_REV="v5.4.0"
 PP_DIR="${CACHE_DIR}/minotari_payment_processor"

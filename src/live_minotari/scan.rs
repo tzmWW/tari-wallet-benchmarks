@@ -485,6 +485,7 @@ async fn run_library_fresh_scan(
     let tip_start = Some(target.height);
     let tip_tolerance = 0;
     let scan_started = Instant::now();
+    let mut progress = ScanProgress::default();
     let (scan_result, resource_peaks) = with_resource_sampling(
         Some(std::process::id()),
         scan_to_fixed_tip(
@@ -495,6 +496,7 @@ async fn run_library_fresh_scan(
             tip_tolerance,
             config.timeout(config.timeouts.startup_secs),
             target.clone(),
+            &mut progress,
         ),
     )
     .await;
@@ -518,8 +520,8 @@ async fn run_library_fresh_scan(
                 base_node_tip_snapshot(&config.network.base_node_http_url)
                     .await
                     .unwrap_or_else(|_| target.clone()),
-                0,
-                u64::from(account.max_height == 0),
+                progress.invocations,
+                progress.no_progress_attempts,
                 true,
                 None,
                 Some(format!("{error:#}")),

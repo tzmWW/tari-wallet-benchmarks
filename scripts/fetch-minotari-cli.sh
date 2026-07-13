@@ -3,7 +3,7 @@ set -euo pipefail
 
 CACHE_DIR="${1:-.bench-cache}"
 TOOLS_DIR="${2:-tools}"
-MINOTARI_REV="360c4848a54d65fd710266233cc9277b0f785e74"
+MINOTARI_REV="c2b8d7b65a3b4320d85b7ba118145d190c264777"
 TARI_CONSOLE_WALLET_REV="9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
 TARI_NODE_REV="v5.4.0"
 MINOTARI_DIR="${CACHE_DIR}/minotari-cli"
@@ -12,10 +12,13 @@ TARI_DIR="${CACHE_DIR}/tari"
 mkdir -p "${CACHE_DIR}" "${TOOLS_DIR}"
 
 if [ ! -d "${MINOTARI_DIR}/.git" ]; then
-  git clone https://github.com/tari-project/minotari-cli.git "${MINOTARI_DIR}"
+  git clone https://github.com/tzmWW/minotari-cli.git "${MINOTARI_DIR}"
 fi
 
-git -C "${MINOTARI_DIR}" fetch --tags origin
+if ! git -C "${MINOTARI_DIR}" remote get-url fork >/dev/null 2>&1; then
+  git -C "${MINOTARI_DIR}" remote add fork https://github.com/tzmWW/minotari-cli.git
+fi
+git -C "${MINOTARI_DIR}" fetch --tags fork
 git -C "${MINOTARI_DIR}" checkout "${MINOTARI_REV}"
 if [ -n "$(git -C "${MINOTARI_DIR}" status --porcelain --untracked-files=all)" ]; then
   printf 'minotari-cli source tree is dirty; use a fresh cache directory\n' >&2

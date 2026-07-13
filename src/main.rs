@@ -125,6 +125,8 @@ async fn execute(cli: Cli) -> anyhow::Result<()> {
             db,
             seed_env,
             birthday,
+            target_height,
+            target_hash,
         } => {
             let config =
                 Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
@@ -136,12 +138,14 @@ async fn execute(cli: Cli) -> anyhow::Result<()> {
                     &db,
                     seed_env.as_deref(),
                     birthday,
+                    target_height,
+                    target_hash.as_deref(),
                 )
                 .await?;
             }
             #[cfg(not(feature = "live-minotari"))]
             {
-                let _ = (db, seed_env, birthday);
+                let _ = (db, seed_env, birthday, target_height, target_hash);
                 anyhow::bail!("scan-wallet requires --features live-minotari");
             }
         }
