@@ -1,85 +1,117 @@
 # Tari Wallet Benchmarks
 
-Standalone reproducible wallet performance harness for
-`tari-project/wallet-benchmarks`.
+Reproducible Esmeralda benchmark harness for:
 
-The harness targets Esmeralda only and models the three required wallet surfaces:
+- `minotari_console_wallet` over gRPC
+- the `minotari` Rust library with offline signing
+- `minotari_payment_processor` batch payments
 
-- old wallet: `minotari_console_wallet` process managed by the harness
-- new wallet: `minotari` crate APIs for scan, selection, signing, and broadcast
-- payment processor: real `minotari_payment_processor` plus a parallel `minotari` payment-receiver wallet
+The canonical protocol is `B0,S0,S1,S2,S3,S4,S5,S6,S7`. Wallet rejection,
+locking, contention, stalls, and timeouts are measured outcomes. The harness
+does not retry scenario transactions or pre-partition UTXOs.
 
-Current implementation status: CLI/config/schema-v4/seed handling, Esmeralda
-guarding, result-profile generation, PP environment/API contract, static
-"no hidden wallet pain" rules, and live evidence paths for all three wallet
-surfaces are in place. The harness writes per-stage checkpoint profiles during
-live runs, supports `preflight --check-funds` for wallet DB UTXO audits, and
-separates the configured send repetition count from long fresh-scan repetitions
-via `scan_repetitions`. Current live stateful send cells still emit one observed
-repetition per scenario. It also includes `fund-one-sided` for operator-controlled
-Esmeralda funding from a recovered minotari signing wallet; the final benchmark
-starting state should still be one clean `A_fund` UTXO per mode. Mode 2 submitted
-transactions are independently queried through the public base-node
-`/transactions` endpoint by extracting kernel signature data from the wallet DB's
-serialized transaction. Top-level chain verification rows are emitted only for
-mined transactions that are at least `C_min` deep; PP rows additionally require
-the real signed-transaction kernel and independent base-node proof. Result profiles include
-computed scan/S5 deltas, strict S0 checks, scan resource peaks, per-scenario
-balance reconciliation, and S5 per-arm metrics. Each mode is dispatched in the
-canonical `B0, S0, S1, S2, S3, S4, S5, S6, S7` order. Every scan repetition
-wipes its wallet data directory; B0 rewrites the mnemonic's encoded birthday to
-`0`, S2/S3 run after a valid S1 checkpoint, and S6/S7 run after S5. Mode 1 scan cells use real
-`minotari_console_wallet --recovery`; Mode 2 and PP companion scans use fresh
-minotari scanner databases. The July 2 profile is historical, non-promotable
-evidence: schema-v4 submission validation is required before a candidate can be
-accepted. The harness preserves real pending-funds, locked-change, PP contention,
-and below-tip scanner failures rather than hiding them.
+## Prerequisites
 
-Start by generating fundable addresses:
+- Rust stable with `rustfmt` and `clippy`
+- Git, Bash, `curl`, `lsof`, `sqlite3`, `protobuf-compiler`, and standard C/C++ build tools
+- Node.js/npm only for installing `@ast-grep/cli`
+- An unpruned, synchronized Esmeralda HTTP wallet-query endpoint
+- A public Esmeralda authority endpoint
+- A separate funded source wallet DB for the one external S0 funding transaction
+
+macOS:
 
 ```sh
-cp harness.toml.example harness.toml
-scripts/fetch-minotari-cli.sh .bench-cache tools
-export HARNESS_WALLET_PW='replace-with-a-long-local-password'
-cargo run -- addresses --config harness.toml --out .secrets/seeds.env
+xcode-select --install
+brew install rustup git protobuf sqlite3 node
+rustup default stable
+rustup component add rustfmt clippy
+npm install --global @ast-grep/cli
 ```
 
-The fetch script installs `tools/minotari`, `tools/minotari_console_wallet`, and
-`tools/minotari_node` from the pinned source revisions.
-
-The final workflow is deliberately two-phase: capture B0 against the never-funded
-benchmark seeds first, then let the harness initialize the three fresh S0 wallet
-directories and fund them while measuring mempool and `C_min` timing. A funded
-continuation cannot run without both immutable evidence files:
+Ubuntu/Debian:
 
 ```sh
-source .secrets/seeds.env
-cargo run --features live-minotari -- prepare-b0 \
-  --config harness-prefunding.toml \
+sudo apt-get update
+sudo apt-get install -y build-essential clang cmake git curl lsof protobuf-compiler sqlite3 nodejs npm
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup component add rustfmt clippy
+npm install --global @ast-grep/cli
+```
+
+## Fresh Clone
+
+```sh
+git clone https://github.com/tzmWW/tari-wallet-benchmarks.git
+cd tari-wallet-benchmarks
+scripts/fetch-minotari-cli.sh .bench-cache tools
+scripts/fetch-payment-processor.sh .bench-cache tools
+cargo build --release --features live-minotari
+cp harness-prefunding.toml harness.toml
+```
+
+Before using the template, replace `REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY` with the
+actual identity of the local node. Canonical live configuration rejects a remote
+scan endpoint, a local authority endpoint, or identical scan/authority URLs.
+
+The second fetch script applies the tracked PP fee patch and writes
+`tools/build-manifest.json`. Preflight verifies every source revision, the patch
+SHA-256, and each runtime binary SHA-256.
+
+For a local node, set `network.base_node_http_url` to its HTTP endpoint and set
+`network.mode1_base_node_service_peer` to `public_key::multiaddr`. Keep
+`network.authority_http_url` on public Esmeralda. The harness requires an
+archival selected endpoint, compares its finalized hash with the authority, and
+rejects stale local nodes.
+
+## Candidate Workflow
+
+Use a new `paths.data_dir` and new seed env file for every candidate.
+
+```sh
+mkdir -p .secrets candidates
+cargo run --release -- addresses \
+  --config harness.toml \
+  --out .secrets/candidate.env
+set -a
+. .secrets/candidate.env
+set +a
+export HARNESS_WALLET_PW='choose-a-local-password'
+
+cargo run --release --features live-minotari -- prepare-b0 \
+  --config harness.toml \
   --profile candidates/prefunding-b0.json
-cargo run --features live-minotari -- fund-s0 \
-  --config harness-prefunding.toml \
-  --source-db .bench-data/funding-source/wallet.db \
+
+cargo run --release --features live-minotari -- fund-s0 \
+  --config harness.toml \
+  --source-db /absolute/path/to/source-wallet.db \
   --b0-profile candidates/prefunding-b0.json \
   --evidence-out candidates/s0-funding.json
-# Add the measured tx/height/birthday/timing fields from s0-funding.json to
-# all three [funding.*] records, then use the funded harness.toml.
-cargo run --features live-minotari -- preflight --config harness.toml
-cargo run --features live-minotari -- preflight --config harness.toml --check-funds
-PROFILE="candidates/esmeralda-$(date -u +%Y%m%dT%H%M%SZ).json"
-cargo run --features live-minotari -- run --config harness.toml --profile "$PROFILE" \
+
+cargo run --release --features live-minotari -- run \
+  --config harness.toml \
   --b0-profile candidates/prefunding-b0.json \
-  --s0-evidence candidates/s0-funding.json
-cargo run -- validate-profile --profile "$PROFILE" --submission
-cargo run -- summarize-profile --profile "$PROFILE" --out "${PROFILE%.json}.md"
+  --s0-evidence candidates/s0-funding.json \
+  --profile candidates/esmeralda-baseline.json
+
+cargo run --release -- validate-profile \
+  --profile candidates/esmeralda-baseline.json \
+  --submission
+cargo run --release -- summarize-profile \
+  --profile candidates/esmeralda-baseline.json \
+  --out candidates/esmeralda-baseline.md
 ```
 
-Full operator detail is in [RUNBOOK.md](RUNBOOK.md).
+`fund-s0` writes a broadcast checkpoint atomically before waiting for `C_min`.
+If interrupted, rerun the identical command: it observes the same transaction
+and never submits another. `run` imports funding height, birthday, timing, fee,
+and attribution directly from this evidence; do not add `[funding.*]` TOML.
 
-Result profiles contain no seeds or passwords. A candidate is promotable only
-after `validate-profile --submission` passes; this requires all 27 cells,
-canonical 512-output S1 evidence, zero live caps, independent `C_min` chain
-proofs, the recorded canonical scenario order, explicit fees and final-balance
-evidence for every completed repetition, and no fabricated incomplete-arm S5 comparison. Fund fresh seeds rather
-than restoring or repairing spent benchmark DBs, then pass
-`preflight --check-funds` before spending.
+The source wallet funds the three benchmark wallets. It is not itself measured,
+and its shared funding fee is disclosed but not deducted from any mode balance.
+
+Do not use old namespaces, copied wallet DBs, or `--fresh-data-dir`. The harness
+locks the candidate namespace, rejects dirty PP/signer state, stores child logs
+under the namespace, and terminates managed process groups on SIGINT/SIGTERM.
+
+See `RUNBOOK.md` for protocol and recovery details.
