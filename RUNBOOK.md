@@ -70,12 +70,19 @@ cargo run --release -- addresses --config harness.toml --out .secrets/candidate.
 set -a; . .secrets/candidate.env; set +a
 export HARNESS_WALLET_PW='local-password'
 
-cargo run --release --features live-minotari -- prepare-b0 \
+cargo run --release --features live-minotari -- baseline-workflow \
   --config harness.toml \
-  --profile candidates/prefunding-b0.json
+  --source-db /absolute/path/to/source-wallet.db \
+  --b0-profile candidates/prefunding-b0.json \
+  --s0-evidence candidates/s0-funding.json \
+  --profile candidates/esmeralda-baseline.json \
+  --summary candidates/esmeralda-baseline.md
 ```
 
-`prepare-b0` binds the harness commit, resolved protocol, timeouts, topology,
+`baseline-workflow` runs launch-invariant disk and build-manifest verification
+once. Stage-sensitive port, endpoint, wallet-state, identity, and selected-chain
+checks still run immediately before the stages they protect. `prepare-b0` binds
+the harness commit, resolved protocol, timeouts, topology,
 seed/address fingerprints, host/disk environment, endpoint identity, source
 revisions, binary/patch hashes, and scan batch size. Because the console wallet
 does not expose a stop-height API, its persisted completion cursor establishes
@@ -84,7 +91,8 @@ anchor. `prepare-b0` therefore requires `scan_repetitions = 1` and fails before
 scanning otherwise. Every B0 scan must recover zero outputs, balance, and history
 there.
 
-Fund from a distinct, already spendable source wallet DB:
+If the process is interrupted after B0, resume the same funding transaction with
+the standalone stage command:
 
 ```sh
 cargo run --release --features live-minotari -- fund-s0 \
@@ -94,24 +102,22 @@ cargo run --release --features live-minotari -- fund-s0 \
   --evidence-out candidates/s0-funding.json
 ```
 
-The command creates fresh benchmark wallet DBs at one measured birthday and
+The funding stage creates fresh benchmark wallet DBs at one measured birthday and
 broadcasts one three-recipient transaction. It atomically records the tx ID and
 broadcast timing before confirmation polling. Repeating the command resumes that
-tx. Once confirmed, the evidence records mined height, `C_min` tip, fee, and
-birthday start height.
+tx. Once confirmed, it synchronizes all three recipient DBs and requires the
+strict one-output/`A_fund` readiness gate before proceeding. Evidence records the
+mined height, `C_min` tip, signed-kernel fee, and birthday start height.
 
 ## Candidate Run
 
 No funding values are copied into TOML. The run derives them from evidence and
 executes strict non-spending checks before starting scenarios.
 
-```sh
-cargo run --release --features live-minotari -- run \
-  --config harness.toml \
-  --b0-profile candidates/prefunding-b0.json \
-  --s0-evidence candidates/s0-funding.json \
-  --profile candidates/esmeralda-baseline.json
-```
+The workflow proceeds to the candidate run only after recipient readiness. The
+standalone `prepare-b0`, `fund-s0`, and `run` commands remain available for
+diagnosis and documented interrupted-funding recovery; each performs its own
+launch checks when invoked separately.
 
 Each non-B0 scan captures one immutable target height/hash. Library-backed scans
 continue toward that same target when the pinned scanner returns before queued

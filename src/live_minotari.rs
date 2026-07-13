@@ -3170,7 +3170,7 @@ pub async fn observe_s0_funding(
     let confirmation_start = Instant::now();
     let client = base_node_http_client()?;
     let mut interval = time::interval(Duration::from_secs(5));
-    let (mined_height, tip_height) = loop {
+    let (mined_height, tip_height, fee_microtari) = loop {
         interval.tick().await;
         if confirmation_start.elapsed() >= timeout {
             bail!("S0 funding transaction did not reach C_min within {timeout:?}");
@@ -3179,6 +3179,9 @@ pub async fn observe_s0_funding(
         let row = mode2_completed_transaction_row(&conn, tx_id as i64)?
             .context("S0 funding transaction missing from source DB")?;
         let kernel = mode2_kernel_query_from_serialized_transaction(&row.serialized_transaction)?;
+        let kernel_fee = kernel
+            .fee_microtari
+            .context("S0 funding transaction kernel omitted fee")?;
         let response =
             query_mode2_transaction(&client, &config.network.base_node_http_url, &kernel).await?;
         let tip =
@@ -3191,12 +3194,13 @@ pub async fn observe_s0_funding(
                     .mined_height
                     .context("confirmed S0 funding query omitted mined height")?,
                 tip,
+                kernel_fee,
             );
         }
     };
     Ok(crate::result_profile::S0FundingTransactionEvidence {
         tx_id: submission.tx_id.clone(),
-        fee_microtari: submission.fee_microtari,
+        fee_microtari,
         construction_ms: submission.construction_ms,
         broadcast_to_mempool_ms: submission.broadcast_to_mempool_ms,
         broadcast_to_confirmed_at_c_min_ms: chrono::Utc::now()
@@ -3206,6 +3210,68 @@ pub async fn observe_s0_funding(
         mined_height,
         tip_height_at_confirmation: tip_height,
     })
+}
+
+pub async fn synchronize_s0_recipients(
+    config: &Config,
+    book: &AddressBook,
+    birthday: u16,
+    funding_height: u64,
+) -> anyhow::Result<()> {
+    let old = book
+        .addresses
+        .get(WalletRole::OldWallet.label())
+        .context("old wallet seed missing")?;
+    let mut old_with_birthday = old.clone();
+    old_with_birthday.seed_words = seed_words_with_birthday(&old.seed_words, birthday)?;
+    old_with_birthday.birthday = birthday;
+    let mut context = start_mode1_console_wallet_with_recovery(
+        config,
+        &old_with_birthday,
+        false,
+        config.a_fund()?.0,
+    )
+    .await
+    .context("synchronizing funded Mode 1 recipient")?;
+    let actual = context
+        .client
+        .get_address(grpc::Empty {})
+        .await?
+        .into_inner()
+        .one_sided_address;
+    if !mode1_address_matches_seed(&actual, old)? {
+        bail!("funded Mode 1 recipient opened with the wrong address");
+    }
+    context.process.shutdown().await?;
+
+    let password = wallet_password(&config.seeds.wallet_password_env)?;
+    let payment_receiver_db = payment_processor::payment_receiver_db_path(config);
+    for (label, db_path) in [
+        ("new_wallet", config.modes.new_wallet_database.as_path()),
+        ("payment_processor", payment_receiver_db.as_path()),
+    ] {
+        let report = scan_to_tip(
+            db_path,
+            &password,
+            &config.network.base_node_http_url,
+            config.benchmark.scan_batch_size,
+            config.benchmark.c_min,
+            config.timeout(config.timeouts.scan_batch_secs),
+        )
+        .await
+        .with_context(|| format!("synchronizing funded {label} recipient"))?;
+        if report.max_height < funding_height {
+            bail!(
+                "funded {label} recipient stopped at {}, below funding height {funding_height}",
+                report.max_height
+            );
+        }
+        println!(
+            "S0 recipient sync {label}: scanned_height={} target={} invocations={}",
+            report.max_height, report.target_tip, report.scan_invocations
+        );
+    }
+    Ok(())
 }
 
 pub async fn initialize_s0_wallets(
@@ -3308,7 +3374,14 @@ async fn finalize_signed_transaction_and_broadcast_without_retry(
 ) -> anyhow::Result<OneSidedSendOutcome> {
     persist_signed_transaction(db_pool, account_id, pending_tx_id, &signed)?;
     let tx_id = signed.signed_transaction.tx_id;
-    let fee_microtari = signed.request.info.fee.0;
+    let fee_microtari = signed
+        .signed_transaction
+        .transaction
+        .body()
+        .kernels()
+        .iter()
+        .map(|kernel| kernel.fee.0)
+        .sum();
     let broadcast_start = Instant::now();
     let submission = submit_transaction_without_retry(
         request.base_node_url,

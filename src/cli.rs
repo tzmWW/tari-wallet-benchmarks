@@ -42,6 +42,22 @@ pub enum Command {
         #[arg(long)]
         s0_evidence: PathBuf,
     },
+    /// Run B0, S0 funding, the uncapped benchmark, validation, and summary in
+    /// one process. Launch-invariant disk and build checks execute once.
+    BaselineWorkflow {
+        #[arg(long, default_value = "harness.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        source_db: PathBuf,
+        #[arg(long)]
+        b0_profile: PathBuf,
+        #[arg(long)]
+        s0_evidence: PathBuf,
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        summary: PathBuf,
+    },
     PrepareB0 {
         #[arg(long, default_value = "harness.toml")]
         config: PathBuf,

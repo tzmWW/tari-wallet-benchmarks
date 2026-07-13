@@ -72,6 +72,7 @@ pub async fn preflight(
         mode1_db.clone(),
         mode2_db.clone(),
         payment_receiver_db.clone(),
+        true,
     )?;
     if check_funds {
         if mode1_db.is_none() {
@@ -99,6 +100,7 @@ fn preflight_checks(
     mode1_db: Option<PathBuf>,
     mode2_db: Option<PathBuf>,
     payment_receiver_db: Option<PathBuf>,
+    verify_manifest: bool,
 ) -> anyhow::Result<()> {
     require_env(&config.seeds.wallet_password_env)?;
     let mut missing = Vec::new();
@@ -134,7 +136,9 @@ fn preflight_checks(
     if !missing.is_empty() {
         bail!("preflight failed:\n{}", missing.join("\n"));
     }
-    verify_build_manifest(config)?;
+    if verify_manifest {
+        verify_build_manifest(config)?;
+    }
 
     if check_funds {
         let paths = live_wallet_paths(config, mode1_db, mode2_db, payment_receiver_db);
@@ -148,11 +152,22 @@ fn preflight_checks(
 /// Runs the fail-closed, non-spending readiness gate used by `run` before a
 /// result profile or any live topology is created.
 pub async fn preflight_for_live_run(config: &Config, book: &AddressBook) -> anyhow::Result<()> {
+    preflight_for_live_run_inner(config, book, true).await
+}
+
+async fn preflight_for_live_run_inner(
+    config: &Config,
+    book: &AddressBook,
+    run_launch_checks: bool,
+) -> anyhow::Result<()> {
     ensure_runtime_paths_are_absolute(config)?;
     check_harness_worktree_clean()?;
-    check_disk_space(config)?;
+    if run_launch_checks {
+        check_disk_space(config)?;
+    }
     check_listen_ports_available(config)?;
-    preflight_checks(config, book, true, None, None, None).context("strict live-run preflight")?;
+    preflight_checks(config, book, true, None, None, None, run_launch_checks)
+        .context("strict live-run preflight")?;
     verify_mode1_wallet_identity(config, book).await?;
     let paths = live_wallet_paths(config, None, None, None);
     check_selected_chain_readiness(config, &paths)
@@ -180,12 +195,29 @@ pub async fn run_profile(
     b0_profile_path: &Path,
     s0_evidence_path: &Path,
 ) -> anyhow::Result<()> {
+    run_profile_inner(
+        config,
+        profile_path,
+        b0_profile_path,
+        s0_evidence_path,
+        true,
+    )
+    .await
+}
+
+async fn run_profile_inner(
+    config: &Config,
+    profile_path: &Path,
+    b0_profile_path: &Path,
+    s0_evidence_path: &Path,
+    run_launch_checks: bool,
+) -> anyhow::Result<()> {
     ensure_runtime_paths_are_absolute(config)?;
     let config = config_with_s0_evidence(config, s0_evidence_path)?;
     let config = &config;
     let _namespace_lock = RunNamespaceLock::acquire(&config.paths.data_dir)?;
     let book = AddressBook::load_required(config)?;
-    preflight_for_live_run(config, &book).await?;
+    preflight_for_live_run_inner(config, &book, run_launch_checks).await?;
 
     let mut profile = ResultProfile::new(
         config,
@@ -281,14 +313,25 @@ pub async fn run_profile(
 
 #[cfg(feature = "live-minotari")]
 pub async fn prepare_b0_profile(config: &Config, profile_path: &Path) -> anyhow::Result<()> {
+    prepare_b0_profile_inner(config, profile_path, true).await
+}
+
+#[cfg(feature = "live-minotari")]
+async fn prepare_b0_profile_inner(
+    config: &Config,
+    profile_path: &Path,
+    run_launch_checks: bool,
+) -> anyhow::Result<()> {
     config.validate_prefunding_b0()?;
     let _namespace_lock = RunNamespaceLock::acquire(&config.paths.data_dir)?;
     check_harness_worktree_clean()?;
     let book = AddressBook::load_required(config)?;
     ensure_runtime_paths_are_absolute(config)?;
-    check_disk_space(config)?;
+    if run_launch_checks {
+        check_disk_space(config)?;
+    }
     check_listen_ports_available(config)?;
-    preflight_checks(config, &book, false, None, None, None)?;
+    preflight_checks(config, &book, false, None, None, None, run_launch_checks)?;
     check_endpoint_authority(config).await?;
     let mut profile = ResultProfile::new(
         config,
@@ -345,6 +388,17 @@ pub async fn fund_s0_from_checkpoint(
     b0_profile_path: &Path,
     evidence_path: &Path,
 ) -> anyhow::Result<()> {
+    fund_s0_from_checkpoint_inner(config, source_db, b0_profile_path, evidence_path, true).await
+}
+
+#[cfg(feature = "live-minotari")]
+async fn fund_s0_from_checkpoint_inner(
+    config: &Config,
+    source_db: &Path,
+    b0_profile_path: &Path,
+    evidence_path: &Path,
+    run_launch_checks: bool,
+) -> anyhow::Result<()> {
     config.validate_prefunding_b0()?;
     let _namespace_lock = RunNamespaceLock::acquire(&config.paths.data_dir)?;
     check_harness_worktree_clean()?;
@@ -381,9 +435,11 @@ pub async fn fund_s0_from_checkpoint(
         bail!("fund-s0 requires a completed pre-funding B0 checkpoint");
     }
     ensure_runtime_paths_are_absolute(config)?;
-    check_disk_space(config)?;
+    if run_launch_checks {
+        check_disk_space(config)?;
+    }
     check_listen_ports_available(config)?;
-    preflight_checks(config, &book, false, None, None, None)?;
+    preflight_checks(config, &book, false, None, None, None, run_launch_checks)?;
     check_endpoint_authority(config).await?;
     let mut addresses = std::collections::BTreeMap::new();
     let recipients = [
@@ -416,13 +472,6 @@ pub async fn fund_s0_from_checkpoint(
         {
             bail!("existing S0 evidence does not match this B0 continuation");
         }
-        if existing.status == "confirmed" && existing.transaction.is_some() {
-            println!(
-                "S0 funding evidence is already confirmed at {}",
-                evidence_path.display()
-            );
-            return Ok(());
-        }
         existing
     } else {
         let (birthday, birthday_start_height) =
@@ -450,13 +499,64 @@ pub async fn fund_s0_from_checkpoint(
         .await?;
         broadcast_evidence.context("S0 broadcast callback did not persist evidence")?
     };
-    let transaction =
-        crate::live_minotari::observe_s0_funding(config, source_db, &evidence.submission).await?;
-    check_endpoint_authority(config).await?;
-    evidence.status = "confirmed".to_string();
-    evidence.transaction = Some(transaction);
-    write_json_atomic(evidence_path, &evidence)?;
-    println!("wrote S0 funding evidence {}", evidence_path.display());
+    if evidence.status != "confirmed" || evidence.transaction.is_none() {
+        let transaction =
+            crate::live_minotari::observe_s0_funding(config, source_db, &evidence.submission)
+                .await?;
+        check_endpoint_authority(config).await?;
+        evidence.status = "confirmed".to_string();
+        evidence.transaction = Some(transaction);
+        write_json_atomic(evidence_path, &evidence)?;
+        println!("wrote S0 funding evidence {}", evidence_path.display());
+    } else {
+        println!(
+            "S0 funding evidence is already confirmed at {}; verifying recipient readiness",
+            evidence_path.display()
+        );
+    }
+    let transaction = evidence
+        .transaction
+        .as_ref()
+        .context("confirmed S0 evidence has no transaction")?;
+    let funded_config = config_with_s0_evidence(config, evidence_path)?;
+    crate::live_minotari::synchronize_s0_recipients(
+        &funded_config,
+        &book,
+        evidence.birthday,
+        transaction.mined_height,
+    )
+    .await?;
+    preflight_for_live_run_inner(&funded_config, &book, false)
+        .await
+        .context("post-funding recipient readiness")?;
+    println!("S0 recipient readiness PASS");
+    Ok(())
+}
+
+#[cfg(feature = "live-minotari")]
+pub async fn run_baseline_workflow(
+    config: &Config,
+    source_db: &Path,
+    b0_profile_path: &Path,
+    evidence_path: &Path,
+    profile_path: &Path,
+    summary_path: &Path,
+) -> anyhow::Result<()> {
+    config.validate_prefunding_b0()?;
+    ensure_runtime_paths_are_absolute(config)?;
+    check_harness_worktree_clean()?;
+    let book = AddressBook::load_required(config)?;
+    check_disk_space(config)?;
+    preflight_checks(config, &book, false, None, None, None, true)?;
+    println!("baseline workflow launch preflight PASS");
+
+    prepare_b0_profile_inner(config, b0_profile_path, false).await?;
+    fund_s0_from_checkpoint_inner(config, source_db, b0_profile_path, evidence_path, false).await?;
+    run_profile_inner(config, profile_path, b0_profile_path, evidence_path, false).await?;
+    profile_validation::validate_path(profile_path, true)?;
+    println!("profile PASS: {}", profile_path.display());
+    profile_validation::write_summary(profile_path, summary_path)?;
+    println!("wrote {}", summary_path.display());
     Ok(())
 }
 

@@ -57,6 +57,35 @@ async fn execute(cli: Cli) -> anyhow::Result<()> {
             enforce_esmeralda(&config)?;
             run_profile(&config, &profile, &b0_profile, &s0_evidence).await?;
         }
+        Command::BaselineWorkflow {
+            config,
+            source_db,
+            b0_profile,
+            s0_evidence,
+            profile,
+            summary,
+        } => {
+            let config = Config::load_prefunding_b0(&config)
+                .with_context(|| format!("loading {}", config.display()))?;
+            enforce_esmeralda(&config)?;
+            #[cfg(feature = "live-minotari")]
+            {
+                wallet_bench::runner::run_baseline_workflow(
+                    &config,
+                    &source_db,
+                    &b0_profile,
+                    &s0_evidence,
+                    &profile,
+                    &summary,
+                )
+                .await?;
+            }
+            #[cfg(not(feature = "live-minotari"))]
+            {
+                let _ = (source_db, b0_profile, s0_evidence, profile, summary);
+                anyhow::bail!("baseline-workflow requires --features live-minotari");
+            }
+        }
         Command::PrepareB0 { config, profile } => {
             let config = Config::load_prefunding_b0(&config)
                 .with_context(|| format!("loading {}", config.display()))?;

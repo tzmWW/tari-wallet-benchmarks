@@ -78,34 +78,20 @@ set -a
 set +a
 export HARNESS_WALLET_PW='choose-a-local-password'
 
-cargo run --release --features live-minotari -- prepare-b0 \
-  --config harness.toml \
-  --profile candidates/prefunding-b0.json
-
-cargo run --release --features live-minotari -- fund-s0 \
+cargo run --release --features live-minotari -- baseline-workflow \
   --config harness.toml \
   --source-db /absolute/path/to/source-wallet.db \
   --b0-profile candidates/prefunding-b0.json \
-  --evidence-out candidates/s0-funding.json
-
-cargo run --release --features live-minotari -- run \
-  --config harness.toml \
-  --b0-profile candidates/prefunding-b0.json \
   --s0-evidence candidates/s0-funding.json \
-  --profile candidates/esmeralda-baseline.json
-
-cargo run --release -- validate-profile \
   --profile candidates/esmeralda-baseline.json \
-  --submission
-cargo run --release -- summarize-profile \
-  --profile candidates/esmeralda-baseline.json \
-  --out candidates/esmeralda-baseline.md
+  --summary candidates/esmeralda-baseline.md
 ```
 
-`fund-s0` writes a broadcast checkpoint atomically before waiting for `C_min`.
-If interrupted, rerun the identical command: it observes the same transaction
-and never submits another. `run` imports funding height, birthday, timing, fee,
-and attribution directly from this evidence; do not add `[funding.*]` TOML.
+The workflow performs disk/build-manifest checks once, then runs B0, resumable S0
+funding, recipient synchronization/readiness, the benchmark, submission
+validation, and summary generation in one process. `fund-s0` still writes a
+broadcast checkpoint atomically before waiting for `C_min`; the standalone stage
+commands remain available for diagnosis and interrupted-funding recovery.
 
 The source wallet funds the three benchmark wallets. It is not itself measured,
 and its shared funding fee is disclosed but not deducted from any mode balance.
