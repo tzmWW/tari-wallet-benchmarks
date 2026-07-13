@@ -172,9 +172,14 @@ pub async fn recover_mode1_console_wallet(config: &Config) -> anyhow::Result<()>
         .addresses
         .get(WalletRole::OldWallet.label())
         .context("old wallet seed material missing")?;
-    let mut context =
-        start_mode1_console_wallet_with_recovery(config, old_seed, true, config.a_fund()?.0)
-            .await?;
+    let wallet_db = old_wallet_base_path(config).join("esmeralda/data/wallet/db/console_wallet.db");
+    let mut context = start_mode1_console_wallet_with_recovery(
+        config,
+        old_seed,
+        mode1_recovery_required(&wallet_db),
+        config.a_fund()?.0,
+    )
+    .await?;
     let spendable_count = mode1_unspent_count(&mut context.client).await.ok();
     let balance = context
         .balance
@@ -182,9 +187,7 @@ pub async fn recover_mode1_console_wallet(config: &Config) -> anyhow::Result<()>
         .context("Mode 1 balance missing after recovery")?;
     println!(
         "recover-mode1-wallet db={} birthday={} available={} pending_in={} pending_out={} spendable_count={:?}",
-        old_wallet_base_path(config)
-            .join("esmeralda/data/wallet/db/console_wallet.db")
-            .display(),
+        wallet_db.display(),
         context.birthday,
         balance.available_balance,
         balance.pending_incoming_balance,
@@ -192,6 +195,10 @@ pub async fn recover_mode1_console_wallet(config: &Config) -> anyhow::Result<()>
         spendable_count
     );
     Ok(())
+}
+
+fn mode1_recovery_required(wallet_db: &Path) -> bool {
+    !wallet_db.exists()
 }
 
 pub async fn sweep_mode1_console_wallet(
@@ -4064,6 +4071,15 @@ mod tests {
         modes::ModeName,
         result_profile::{ResultProfile, empty_mode_profile},
     };
+
+    #[test]
+    fn mode1_operator_recovery_resumes_an_existing_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("console_wallet.db");
+        assert!(mode1_recovery_required(&db));
+        std::fs::write(&db, []).unwrap();
+        assert!(!mode1_recovery_required(&db));
+    }
 
     #[test]
     fn s1_round_plan_reaches_512_without_cap() {
