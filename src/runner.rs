@@ -82,6 +82,9 @@ pub async fn preflight(
                 "old_wallet: custom --mode1-db audit skips gRPC identity proof; use the configured DB for strict live-run readiness"
             );
         }
+        if mode2_db.is_none() && payment_receiver_db.is_none() {
+            refresh_library_wallets_before_selected_chain_check(config).await?;
+        }
         let paths = live_wallet_paths(config, mode1_db, mode2_db, payment_receiver_db);
         check_selected_chain_readiness(config, &paths).await?;
     }
