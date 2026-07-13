@@ -368,7 +368,7 @@ pub async fn annotate_profile_with_library_smoke(
     if !config.benchmark.live_fresh_scan_cells {
         annotate_fresh_scan_cells_disabled(profile);
     } else if !prefunding_b0_imported {
-        run_b0_fresh_scan_for_mode(config, profile, book, "old_wallet").await?;
+        run_b0_fresh_scan_for_mode(config, profile, book, "old_wallet", None).await?;
     }
     if config.benchmark.mode1_live_topology {
         annotate_mode1_console_wallet(config, book, profile).await?;
@@ -378,7 +378,7 @@ pub async fn annotate_profile_with_library_smoke(
     write_profile_checkpoint(profile, partial_profile_path, "old_wallet")?;
 
     if config.benchmark.live_fresh_scan_cells && !prefunding_b0_imported {
-        run_b0_fresh_scan_for_mode(config, profile, book, "new_wallet").await?;
+        run_b0_fresh_scan_for_mode(config, profile, book, "new_wallet", None).await?;
     }
     let mode2_s0_ok = annotate_mode2_s0(config, book, profile).await?;
     if !mode2_s0_ok {
@@ -423,7 +423,7 @@ pub async fn annotate_profile_with_library_smoke(
     write_profile_checkpoint(profile, partial_profile_path, "new_wallet")?;
 
     if config.benchmark.live_fresh_scan_cells && !prefunding_b0_imported {
-        run_b0_fresh_scan_for_mode(config, profile, book, "payment_processor").await?;
+        run_b0_fresh_scan_for_mode(config, profile, book, "payment_processor", None).await?;
     }
     write_profile_checkpoint(profile, partial_profile_path, "fresh_scans")?;
 
@@ -444,6 +444,11 @@ pub async fn annotate_prefunding_b0(
     if !config.benchmark.live_fresh_scan_cells {
         bail!("prepare-b0 requires benchmark.live_fresh_scan_cells=true");
     }
+    if config.benchmark.scan_repetitions != 1 {
+        bail!(
+            "prepare-b0 requires benchmark.scan_repetitions=1 because the console wallet cannot replay an immutable stop height"
+        );
+    }
     if config
         .funding
         .records()
@@ -452,8 +457,13 @@ pub async fn annotate_prefunding_b0(
     {
         bail!("prepare-b0 requires an unfunded config with no [funding.*] records");
     }
-    for mode in ["old_wallet", "new_wallet", "payment_processor"] {
-        run_b0_fresh_scan_for_mode(config, profile, book, mode).await?;
+    // The console wallet has no stop-height API. Its persisted completion
+    // cursor establishes B0's anchor; both library scanners must reach the
+    // exact same height and hash.
+    run_b0_fresh_scan_for_mode(config, profile, book, "old_wallet", None).await?;
+    let target = scan_target_from_profile(profile, "old_wallet", ScenarioName::B0)?;
+    for mode in ["new_wallet", "payment_processor"] {
+        run_b0_fresh_scan_for_mode(config, profile, book, mode, Some(target.clone())).await?;
     }
     profile.mark_checkpoint_stage("prefunding_b0");
     profile.config.insert(
@@ -542,40 +552,85 @@ async fn scan_to_fixed_tip(
 ) -> anyhow::Result<ScanToTipReport> {
     let start = std::time::Instant::now();
     let target_tip = target.height;
-    let initial_height = account_snapshot(db_path)
-        .map(|snapshot| snapshot.max_height)
-        .unwrap_or_default();
-    if initial_height >= target_tip {
+    let mut cursor = account_snapshot(db_path).unwrap_or_default();
+    if cursor.max_height > target_tip {
+        bail!(
+            "wallet scan cursor {} already exceeds fixed target {target_tip}",
+            cursor.max_height
+        );
+    }
+    if cursor.max_height == target_tip {
+        require_cursor_hash(&cursor, &target)?;
         return Ok(ScanToTipReport {
             wall_ms: start.elapsed().as_millis(),
             target_tip,
             target_hash: target.hash.clone(),
             completion_tip: target_tip,
             completion_hash: target.hash,
-            max_height: initial_height,
+            max_height: cursor.max_height,
+            cursor_hash: cursor.hash,
+            scan_invocations: 0,
             no_progress_attempts: 0,
             stopped_without_progress: false,
             last_more_blocks: Some(false),
         });
     }
 
-    let max_blocks = target_tip.saturating_sub(initial_height);
-    let scan = Scanner::new(
-        password,
-        base_url,
-        db_path.to_path_buf(),
-        batch_size,
-        required_confirmations,
-    )
-    .account("default")
-    .mode(ScanMode::Partial { max_blocks })
-    .run();
-    let (_, more_blocks) = time::timeout(scan_timeout, scan)
-        .await
-        .context("wallet scan exceeded its total deadline")?
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let last_height = account_snapshot(db_path)?.max_height;
-    let stopped_without_progress = last_height < target_tip;
+    let deadline = time::Instant::now() + scan_timeout;
+    let mut scan_invocations = 0;
+    let mut no_progress_attempts = 0;
+    let mut consecutive_no_progress = 0;
+    let mut last_more_blocks = None;
+    while cursor.max_height < target_tip {
+        let remaining = deadline
+            .checked_duration_since(time::Instant::now())
+            .context("wallet scan exceeded its total deadline")?;
+        let previous_height = cursor.max_height;
+        let max_blocks = target_tip - previous_height;
+        let scan = Scanner::new(
+            password,
+            base_url,
+            db_path.to_path_buf(),
+            batch_size,
+            required_confirmations,
+        )
+        .account("default")
+        .mode(ScanMode::Partial { max_blocks })
+        .run();
+        let (_, more_blocks) = time::timeout(remaining, scan)
+            .await
+            .context("wallet scan exceeded its total deadline")?
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        scan_invocations += 1;
+        last_more_blocks = Some(more_blocks);
+        cursor = account_snapshot(db_path)?;
+        if cursor.max_height > target_tip {
+            bail!(
+                "wallet scan overshot fixed target {target_tip}: persisted cursor {}",
+                cursor.max_height
+            );
+        }
+        if cursor.max_height == previous_height {
+            no_progress_attempts += 1;
+            consecutive_no_progress += 1;
+            if consecutive_no_progress >= 3 {
+                bail!(
+                    "wallet scanner returned three times without progress below fixed target {target_tip} (cursor {})",
+                    cursor.max_height
+                );
+            }
+        } else {
+            consecutive_no_progress = 0;
+        }
+    }
+    require_cursor_hash(&cursor, &target)?;
+    let canonical_hash = base_node_header_hash(base_url, target_tip).await?;
+    if canonical_hash != target.hash {
+        bail!(
+            "fixed scan target {target_tip} was invalidated: expected hash {}, selected chain has {canonical_hash}",
+            target.hash
+        );
+    }
     let completion = base_node_tip_snapshot(base_url).await?;
 
     Ok(ScanToTipReport {
@@ -584,15 +639,60 @@ async fn scan_to_fixed_tip(
         target_hash: target.hash,
         completion_tip: completion.height,
         completion_hash: completion.hash,
-        max_height: last_height,
-        no_progress_attempts: u64::from(last_height <= initial_height),
-        stopped_without_progress,
-        last_more_blocks: Some(more_blocks),
+        max_height: cursor.max_height,
+        cursor_hash: cursor.hash,
+        scan_invocations,
+        no_progress_attempts,
+        stopped_without_progress: false,
+        last_more_blocks,
     })
 }
 
-#[derive(Debug, Clone)]
-struct ChainTipSnapshot {
+fn require_cursor_hash(cursor: &AccountSnapshot, target: &ChainTipSnapshot) -> anyhow::Result<()> {
+    if cursor.hash.as_deref() != Some(target.hash.as_str()) {
+        bail!(
+            "wallet scan cursor hash mismatch at fixed target {}: expected {}, observed {}",
+            target.height,
+            target.hash,
+            cursor.hash.as_deref().unwrap_or("missing")
+        );
+    }
+    Ok(())
+}
+
+fn scan_target_from_profile(
+    profile: &ResultProfile,
+    mode: &str,
+    scenario: ScenarioName,
+) -> anyhow::Result<ChainTipSnapshot> {
+    let repetition = profile.modes[mode].scenarios[scenario.as_str()]
+        .repetitions
+        .first()
+        .with_context(|| format!("{mode}/{} scan repetition missing", scenario.as_str()))?;
+    if repetition.status != CellStatus::Ok {
+        bail!(
+            "{mode}/{} did not establish a valid scan target: {}",
+            scenario.as_str(),
+            repetition.error.as_deref().unwrap_or("verification failed")
+        );
+    }
+    let metrics = repetition
+        .metrics
+        .as_ref()
+        .with_context(|| format!("{mode}/{} scan metrics missing", scenario.as_str()))?;
+    Ok(ChainTipSnapshot {
+        height: metrics["H_tip_end"]
+            .as_u64()
+            .with_context(|| format!("{mode}/{} target height missing", scenario.as_str()))?,
+        hash: metrics["H_tip_target_hash"]
+            .as_str()
+            .with_context(|| format!("{mode}/{} target hash missing", scenario.as_str()))?
+            .to_string(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ChainTipSnapshot {
     height: u64,
     hash: String,
 }
@@ -625,6 +725,30 @@ async fn base_node_tip_snapshot(base_url: &str) -> anyhow::Result<ChainTipSnapsh
         height,
         hash: hex::encode(hash),
     })
+}
+
+pub(super) async fn base_node_header_hash(base_url: &str, height: u64) -> anyhow::Result<String> {
+    let mut url = url::Url::parse(base_url)?.join("/get_header_by_height")?;
+    url.query_pairs_mut()
+        .append_pair("height", &height.to_string());
+    let value: serde_json::Value = base_node_http_client()?
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let hash = value["hash"]
+        .as_array()
+        .context("header response is missing hash")?
+        .iter()
+        .map(|byte| {
+            byte.as_u64()
+                .and_then(|byte| u8::try_from(byte).ok())
+                .context("header hash contains a non-byte value")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(hex::encode(hash))
 }
 
 fn annotate_fresh_scan_cells_disabled(profile: &mut ResultProfile) {
@@ -3576,8 +3700,10 @@ impl ScanExpectations {
     }
 }
 
+#[derive(Default)]
 struct AccountSnapshot {
     max_height: u64,
+    hash: Option<String>,
     available_microtari: u64,
 }
 
@@ -3589,6 +3715,8 @@ pub struct ScanToTipReport {
     pub completion_tip: u64,
     pub completion_hash: String,
     pub max_height: u64,
+    pub cursor_hash: Option<String>,
+    pub scan_invocations: u64,
     pub no_progress_attempts: u64,
     pub stopped_without_progress: bool,
     pub last_more_blocks: Option<bool>,
@@ -3619,6 +3747,14 @@ impl ScanToTipReport {
         metrics.insert(
             "scan_max_height".to_string(),
             serde_json::json!(self.max_height),
+        );
+        metrics.insert(
+            "scan_cursor_hash".to_string(),
+            serde_json::json!(self.cursor_hash),
+        );
+        metrics.insert(
+            "scan_invocations".to_string(),
+            serde_json::json!(self.scan_invocations),
         );
         metrics.insert(
             "scan_no_progress_attempts".to_string(),
@@ -3656,6 +3792,7 @@ struct ScanMeasurement {
     birthday: u16,
     birthday_start_height: u64,
     max_height: u64,
+    cursor_hash: Option<String>,
     available_microtari: u64,
     tip_start: Option<u64>,
     tip_end: Option<u64>,
@@ -3670,6 +3807,7 @@ struct ScanMeasurement {
     resource_peaks: ResourcePeaks,
     expectations: ScanExpectations,
     tip_lag_tolerance_blocks: u64,
+    scan_invocations: u64,
     scan_no_progress_attempts: u64,
     scan_stopped_without_progress: bool,
     scan_last_more_blocks: Option<bool>,
@@ -3728,12 +3866,14 @@ impl ScanMeasurement {
             "H_tip_start": self.tip_start,
             "H_tip_end": self.tip_end,
             "H_tip_target_hash": self.tip_target_hash,
+            "H_scan_cursor_hash": self.cursor_hash,
             "H_tip_completion": self.tip_completion,
             "H_tip_completion_hash": self.tip_completion_hash,
             "tip_drift_blocks": self.tip_completion.zip(self.tip_end).map(|(completion, target)| completion.saturating_sub(target)),
             "tip_lag_blocks": self.tip_lag_blocks(),
             "tip_lag_tolerance_blocks": self.tip_lag_tolerance_blocks,
             "scan_reached_tip": self.scan_reached_tip(),
+            "scan_invocations": self.scan_invocations,
             "blocks_scanned": blocks_scanned,
             "blocks_per_sec": blocks_per_sec,
             "detected_outputs": self.detected_outputs,
@@ -3757,6 +3897,7 @@ impl ScanMeasurement {
     fn scan_verification_ok(&self) -> bool {
         self.scan_error.is_none()
             && self.scan_reached_tip()
+            && self.cursor_hash == self.tip_target_hash
             && self
                 .expectations
                 .expected_outputs
@@ -3802,11 +3943,8 @@ impl ScanMeasurement {
     }
 
     fn scan_reached_tip(&self) -> bool {
-        self.tip_end.is_none_or(|tip| {
-            self.max_height
-                .saturating_add(self.tip_lag_tolerance_blocks)
-                >= tip
-        })
+        self.tip_end
+            .is_none_or(|tip| self.max_height == tip && self.tip_lag_tolerance_blocks == 0)
     }
 }
 
@@ -4339,6 +4477,7 @@ mod tests {
             birthday: 1_635,
             birthday_start_height: 700_000,
             max_height: 711_305,
+            cursor_hash: Some("target".to_string()),
             wall_ms: 10_000,
             available_microtari: 1,
             tip_start: Some(711_300),
@@ -4354,6 +4493,7 @@ mod tests {
             resource_peaks: ResourcePeaks::default(),
             expectations: ScanExpectations::default(),
             tip_lag_tolerance_blocks: 3,
+            scan_invocations: 1,
             scan_no_progress_attempts: 0,
             scan_stopped_without_progress: false,
             scan_last_more_blocks: None,
@@ -4376,6 +4516,7 @@ mod tests {
             birthday: 0,
             birthday_start_height: 0,
             max_height: 627_100,
+            cursor_hash: Some("partial".to_string()),
             wall_ms: 10_000,
             available_microtari: 0,
             tip_start: Some(726_900),
@@ -4396,6 +4537,7 @@ mod tests {
                 ..ScanExpectations::default()
             },
             tip_lag_tolerance_blocks: 3,
+            scan_invocations: 1,
             scan_no_progress_attempts: 2,
             scan_stopped_without_progress: true,
             scan_last_more_blocks: Some(true),
@@ -4417,6 +4559,7 @@ mod tests {
             birthday: 0,
             birthday_start_height: 0,
             max_height: 726_902,
+            cursor_hash: Some("partial".to_string()),
             wall_ms: 10_000,
             available_microtari: 0,
             tip_start: Some(726_900),
@@ -4437,6 +4580,7 @@ mod tests {
                 ..ScanExpectations::default()
             },
             tip_lag_tolerance_blocks: 0,
+            scan_invocations: 1,
             scan_no_progress_attempts: 0,
             scan_stopped_without_progress: false,
             scan_last_more_blocks: None,
@@ -4455,6 +4599,43 @@ mod tests {
         );
         assert_eq!(metrics["scan_reached_tip"], serde_json::json!(false));
         assert_eq!(metrics["tip_lag_blocks"], serde_json::json!(3));
+    }
+
+    #[test]
+    fn scan_verification_rejects_overshoot_and_cursor_hash_mismatch() {
+        let mut measurement = ScanMeasurement {
+            birthday: 0,
+            birthday_start_height: 0,
+            max_height: 101,
+            cursor_hash: Some("target".to_string()),
+            wall_ms: 1,
+            available_microtari: 0,
+            tip_start: Some(100),
+            tip_end: Some(100),
+            tip_target_hash: Some("target".to_string()),
+            tip_completion: Some(101),
+            tip_completion_hash: Some("completion".to_string()),
+            detected_outputs: 0,
+            history_transactions: 0,
+            history_tx_ids: BTreeSet::new(),
+            recovered_output_commitments: BTreeSet::new(),
+            spendable_outputs: 0,
+            resource_peaks: ResourcePeaks::default(),
+            expectations: ScanExpectations::default(),
+            tip_lag_tolerance_blocks: 0,
+            scan_invocations: 1,
+            scan_no_progress_attempts: 0,
+            scan_stopped_without_progress: false,
+            scan_last_more_blocks: None,
+            scan_error: None,
+        };
+
+        assert!(!measurement.scan_verification_ok());
+        measurement.max_height = 100;
+        measurement.cursor_hash = Some("other".to_string());
+        assert!(!measurement.scan_verification_ok());
+        measurement.cursor_hash = Some("target".to_string());
+        assert!(measurement.scan_verification_ok());
     }
 
     #[test]

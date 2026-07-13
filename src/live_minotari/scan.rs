@@ -93,6 +93,7 @@ pub(super) async fn run_b0_fresh_scan_for_mode(
     profile: &mut ResultProfile,
     book: &AddressBook,
     mode: &str,
+    target: Option<ChainTipSnapshot>,
 ) -> anyhow::Result<()> {
     let spec = FreshScanSpec {
         scenario: ScenarioName::B0,
@@ -102,7 +103,8 @@ pub(super) async fn run_b0_fresh_scan_for_mode(
     match mode {
         "old_wallet" => {
             if let Some(seed) = book.addresses.get(WalletRole::OldWallet.label()) {
-                run_mode1_fresh_scan_for_cell(config, profile, seed, spec).await?;
+                run_mode1_fresh_scan_for_cell_with_target(config, profile, seed, spec, target)
+                    .await?;
             }
         }
         "new_wallet" => {
@@ -110,14 +112,16 @@ pub(super) async fn run_b0_fresh_scan_for_mode(
                 .addresses
                 .get(WalletRole::NewWallet.label())
                 .map(|seed| seed.seed_words.as_str());
-            run_library_fresh_scan_for_cell(config, profile, mode, seed, spec).await?;
+            run_library_fresh_scan_for_cell_with_target(config, profile, mode, seed, spec, target)
+                .await?;
         }
         "payment_processor" => {
             let seed = book
                 .addresses
                 .get(WalletRole::PaymentProcessor.label())
                 .map(|seed| seed.seed_words.as_str());
-            run_library_fresh_scan_for_cell(config, profile, mode, seed, spec).await?;
+            run_library_fresh_scan_for_cell_with_target(config, profile, mode, seed, spec, target)
+                .await?;
         }
         _ => bail!("unsupported B0 mode {mode}"),
     }
@@ -131,6 +135,25 @@ pub(super) async fn run_library_fresh_scan_for_cell(
     funded_seed_words: Option<&str>,
     spec: FreshScanSpec,
 ) -> anyhow::Result<()> {
+    run_library_fresh_scan_for_cell_with_target(
+        config,
+        profile,
+        mode,
+        funded_seed_words,
+        spec,
+        None,
+    )
+    .await
+}
+
+async fn run_library_fresh_scan_for_cell_with_target(
+    config: &Config,
+    profile: &mut ResultProfile,
+    mode: &str,
+    funded_seed_words: Option<&str>,
+    spec: FreshScanSpec,
+    target: Option<ChainTipSnapshot>,
+) -> anyhow::Result<()> {
     let expectations = scan_expectations_from_profile(profile, mode, spec, config);
     let Some(cell) = profile
         .modes
@@ -143,7 +166,16 @@ pub(super) async fn run_library_fresh_scan_for_cell(
         record_blocked_checkpoint_scan(cell, spec);
         return Ok(());
     }
-    run_library_fresh_scan_cell(config, mode, funded_seed_words, spec, expectations, cell).await
+    run_library_fresh_scan_cell(
+        config,
+        mode,
+        funded_seed_words,
+        spec,
+        expectations,
+        target,
+        cell,
+    )
+    .await
 }
 
 pub(super) async fn run_mode1_checkpoint_scan_cells(
@@ -176,6 +208,16 @@ pub(super) async fn run_mode1_fresh_scan_for_cell(
     old_seed: &crate::seeds::SeedMaterial,
     spec: FreshScanSpec,
 ) -> anyhow::Result<()> {
+    run_mode1_fresh_scan_for_cell_with_target(config, profile, old_seed, spec, None).await
+}
+
+async fn run_mode1_fresh_scan_for_cell_with_target(
+    config: &Config,
+    profile: &mut ResultProfile,
+    old_seed: &crate::seeds::SeedMaterial,
+    spec: FreshScanSpec,
+    target: Option<ChainTipSnapshot>,
+) -> anyhow::Result<()> {
     let expectations = scan_expectations_from_profile(profile, "old_wallet", spec, config);
     let Some(cell) = profile
         .modes
@@ -188,7 +230,7 @@ pub(super) async fn run_mode1_fresh_scan_for_cell(
         record_blocked_checkpoint_scan(cell, spec);
         return Ok(());
     }
-    run_mode1_fresh_scan_cell(config, old_seed, spec, expectations, cell).await
+    run_mode1_fresh_scan_cell(config, old_seed, spec, expectations, target, cell).await
 }
 
 pub(super) fn record_blocked_checkpoint_scan(cell: &mut ScenarioCell, spec: FreshScanSpec) {
@@ -261,6 +303,7 @@ async fn run_library_fresh_scan_cell(
     funded_seed_words: Option<&str>,
     spec: FreshScanSpec,
     expectations: ScanExpectations,
+    target: Option<ChainTipSnapshot>,
     cell: &mut ScenarioCell,
 ) -> anyhow::Result<()> {
     for run in 1..=config.benchmark.scan_repetitions {
@@ -278,18 +321,24 @@ async fn run_library_fresh_scan_cell(
             run,
             funded_seed_words,
             expectations.clone(),
+            target.clone(),
         )
         .await;
         match scan {
             Ok(measurement) => {
+                let verification_ok = measurement.scan_verification_ok();
                 println!(
-                    "live scan {mode}/{} run {run} ok: wall_ms={} max_height={} available_microtari={}",
+                    "live scan {mode}/{} run {run} {}: wall_ms={} max_height={} available_microtari={}",
                     spec.scenario.as_str(),
+                    if verification_ok {
+                        "verified"
+                    } else {
+                        "verification failed"
+                    },
                     measurement.wall_ms,
                     measurement.max_height,
                     measurement.available_microtari
                 );
-                let verification_ok = measurement.scan_verification_ok();
                 cell.record_repetition(Repetition {
                     run,
                     status: if verification_ok {
@@ -336,6 +385,7 @@ async fn run_mode1_fresh_scan_cell(
     old_seed: &crate::seeds::SeedMaterial,
     spec: FreshScanSpec,
     expectations: ScanExpectations,
+    target: Option<ChainTipSnapshot>,
     cell: &mut ScenarioCell,
 ) -> anyhow::Result<()> {
     for run in 1..=config.benchmark.scan_repetitions {
@@ -346,17 +396,30 @@ async fn run_mode1_fresh_scan_cell(
             config.benchmark.scan_repetitions,
             spec.birthday()
         );
-        let scan = run_mode1_fresh_scan(config, old_seed, spec, run, expectations.clone()).await;
+        let scan = run_mode1_fresh_scan(
+            config,
+            old_seed,
+            spec,
+            run,
+            expectations.clone(),
+            target.clone(),
+        )
+        .await;
         match scan {
             Ok(measurement) => {
+                let verification_ok = measurement.scan_verification_ok();
                 println!(
-                    "live scan old_wallet/{} run {run} ok: wall_ms={} max_height={} available_microtari={}",
+                    "live scan old_wallet/{} run {run} {}: wall_ms={} max_height={} available_microtari={}",
                     spec.scenario.as_str(),
+                    if verification_ok {
+                        "verified"
+                    } else {
+                        "verification failed"
+                    },
                     measurement.wall_ms,
                     measurement.max_height,
                     measurement.available_microtari
                 );
-                let verification_ok = measurement.scan_verification_ok();
                 cell.record_repetition(Repetition {
                     run,
                     status: if verification_ok {
@@ -405,6 +468,7 @@ async fn run_library_fresh_scan(
     run: u32,
     funded_seed_words: Option<&str>,
     expectations: ScanExpectations,
+    target: Option<ChainTipSnapshot>,
 ) -> anyhow::Result<ScanMeasurement> {
     let db_path = fresh_scan_db_path(config, mode, spec, run);
     reset_sqlite_files(&db_path)?;
@@ -414,7 +478,10 @@ async fn run_library_fresh_scan(
     init_with_seed_words(seed, &password, &db_path, Some("default"))
         .context("initializing fresh scan wallet")?;
 
-    let target = base_node_tip_snapshot(&config.network.base_node_http_url).await?;
+    let target = match target {
+        Some(target) => target,
+        None => base_node_tip_snapshot(&config.network.base_node_http_url).await?,
+    };
     let tip_start = Some(target.height);
     let tip_tolerance = 0;
     let scan_started = Instant::now();
@@ -432,29 +499,32 @@ async fn run_library_fresh_scan(
     )
     .await;
     let account = account_snapshot(&db_path)?;
-    let (wall_ms, completion, no_progress, stopped, more_blocks, scan_error) = match scan_result {
-        Ok(report) => (
-            report.wall_ms,
-            ChainTipSnapshot {
-                height: report.completion_tip,
-                hash: report.completion_hash,
-            },
-            report.no_progress_attempts,
-            report.stopped_without_progress,
-            report.last_more_blocks,
-            None,
-        ),
-        Err(error) => (
-            scan_started.elapsed().as_millis(),
-            base_node_tip_snapshot(&config.network.base_node_http_url)
-                .await
-                .unwrap_or_else(|_| target.clone()),
-            u64::from(account.max_height == 0),
-            true,
-            None,
-            Some(format!("{error:#}")),
-        ),
-    };
+    let (wall_ms, completion, scan_invocations, no_progress, stopped, more_blocks, scan_error) =
+        match scan_result {
+            Ok(report) => (
+                report.wall_ms,
+                ChainTipSnapshot {
+                    height: report.completion_tip,
+                    hash: report.completion_hash,
+                },
+                report.scan_invocations,
+                report.no_progress_attempts,
+                report.stopped_without_progress,
+                report.last_more_blocks,
+                None,
+            ),
+            Err(error) => (
+                scan_started.elapsed().as_millis(),
+                base_node_tip_snapshot(&config.network.base_node_http_url)
+                    .await
+                    .unwrap_or_else(|_| target.clone()),
+                0,
+                u64::from(account.max_height == 0),
+                true,
+                None,
+                Some(format!("{error:#}")),
+            ),
+        };
     let detected_outputs = detected_output_count(&db_path).unwrap_or_default();
     let history_transactions = history_transaction_count(&db_path).unwrap_or_default();
     let history_tx_ids = history_transaction_ids(&db_path).unwrap_or_default();
@@ -466,6 +536,7 @@ async fn run_library_fresh_scan(
         birthday: spec.birthday(),
         birthday_start_height: resolved_birthday_start_height(config, mode, spec),
         max_height: account.max_height,
+        cursor_hash: account.hash,
         available_microtari: account.available_microtari,
         tip_start,
         tip_end: Some(target.height),
@@ -480,6 +551,7 @@ async fn run_library_fresh_scan(
         resource_peaks,
         expectations,
         tip_lag_tolerance_blocks: tip_tolerance,
+        scan_invocations,
         scan_no_progress_attempts: no_progress,
         scan_stopped_without_progress: stopped,
         scan_last_more_blocks: more_blocks,
@@ -493,6 +565,7 @@ async fn run_mode1_fresh_scan(
     spec: FreshScanSpec,
     run: u32,
     expectations: ScanExpectations,
+    requested_target: Option<ChainTipSnapshot>,
 ) -> anyhow::Result<ScanMeasurement> {
     let base_path = fresh_console_base_path(config, spec, run);
     reset_dir(&base_path)?;
@@ -517,8 +590,8 @@ async fn run_mode1_fresh_scan(
         spec.birthday()
     );
 
-    let target = base_node_tip_snapshot(&config.network.base_node_http_url).await?;
-    let tip_start = Some(target.height);
+    let launch_tip = base_node_tip_snapshot(&config.network.base_node_http_url).await?;
+    let tip_start = Some(launch_tip.height);
     let start = Instant::now();
     let mut command = Command::new(&config.paths.minotari_console_wallet);
     command
@@ -544,14 +617,14 @@ async fn run_mode1_fresh_scan(
         wait_for_mode1_scan_to_tip(
             &mut process,
             &mut client,
-            target.height,
+            requested_target.as_ref().unwrap_or(&launch_tip).height,
             config.timeout(config.timeouts.startup_secs),
             config.timeout(config.timeouts.scan_batch_secs),
         ),
     )
     .await;
     let scan_error = scan_result.as_ref().err().map(|error| format!("{error:#}"));
-    let max_height = match scan_result {
+    let grpc_height = match scan_result {
         Ok(height) => height,
         Err(_) => client
             .get_state(grpc::GetStateRequest {})
@@ -567,12 +640,47 @@ async fn run_mode1_fresh_scan(
         .map(|response| response.into_inner().available_balance)
         .unwrap_or_default();
     let wallet_db = base_path.join("esmeralda/data/wallet/db/console_wallet.db");
+    let cursor = mode1_scan_cursor(&wallet_db).unwrap_or(AccountSnapshot {
+        max_height: grpc_height,
+        hash: None,
+        available_microtari,
+    });
+    let max_height = cursor.max_height;
     let detected_outputs = detected_output_count(&wallet_db).unwrap_or_default();
     let history_transactions = history_transaction_count(&wallet_db).unwrap_or_default();
     let history_tx_ids = history_transaction_ids(&wallet_db).unwrap_or_default();
     let recovered_output_commitments = recovered_output_commitments(&wallet_db).unwrap_or_default();
     let spendable_outputs = mode1_unspent_count(&mut client).await.unwrap_or_default();
     let completion = base_node_tip_snapshot(&config.network.base_node_http_url).await?;
+    let target = requested_target.unwrap_or_else(|| ChainTipSnapshot {
+        height: cursor.max_height,
+        hash: cursor.hash.clone().unwrap_or_default(),
+    });
+    let mut scan_error = scan_error;
+    if cursor.hash.as_deref() != Some(target.hash.as_str()) {
+        scan_error.get_or_insert_with(|| {
+            format!(
+                "console-wallet cursor hash mismatch at target {}: expected {}, observed {}",
+                target.height,
+                target.hash,
+                cursor.hash.as_deref().unwrap_or("missing")
+            )
+        });
+    }
+    match base_node_header_hash(&config.network.base_node_http_url, target.height).await {
+        Ok(hash) if hash == target.hash => {}
+        Ok(hash) => {
+            scan_error.get_or_insert_with(|| {
+                format!(
+                    "console-wallet target {} was invalidated: expected hash {}, selected chain has {hash}",
+                    target.height, target.hash
+                )
+            });
+        }
+        Err(error) => {
+            scan_error.get_or_insert_with(|| format!("verifying console-wallet target: {error:#}"));
+        }
+    }
     let tip_end = Some(target.height);
     process.shutdown().await?;
 
@@ -581,6 +689,7 @@ async fn run_mode1_fresh_scan(
         birthday: spec.birthday(),
         birthday_start_height: resolved_birthday_start_height(config, "old_wallet", spec),
         max_height,
+        cursor_hash: cursor.hash,
         available_microtari,
         tip_start,
         tip_end,
@@ -595,6 +704,7 @@ async fn run_mode1_fresh_scan(
         resource_peaks,
         expectations,
         tip_lag_tolerance_blocks: 0,
+        scan_invocations: 1,
         scan_no_progress_attempts: 0,
         scan_stopped_without_progress: scan_error.is_some() || max_height < target.height,
         scan_last_more_blocks: None,
@@ -726,15 +836,30 @@ pub(super) fn account_snapshot(db_path: &Path) -> anyhow::Result<AccountSnapshot
         .next()
         .context("no account")?;
     let balance = get_balance(&conn, account.id)?;
-    let max_height = get_latest_scanned_tip_block_by_account(&conn, account.id)?
-        .map(|tip| tip.height)
-        .unwrap_or_default();
+    let tip = get_latest_scanned_tip_block_by_account(&conn, account.id)?;
+    let max_height = tip.as_ref().map(|tip| tip.height).unwrap_or_default();
+    let hash = tip.map(|tip| hex::encode(tip.hash));
     let balance = serde_json::to_value(balance)?;
     let available_microtari = amount_field_as_microtari(&balance, "available").unwrap_or_default();
 
     Ok(AccountSnapshot {
         max_height,
+        hash,
         available_microtari,
+    })
+}
+
+fn mode1_scan_cursor(db_path: &Path) -> anyhow::Result<AccountSnapshot> {
+    let conn = Connection::open(db_path)?;
+    let (height, hash): (i64, Vec<u8>) = conn.query_row(
+        "SELECT height, header_hash FROM scanned_blocks ORDER BY height DESC LIMIT 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(AccountSnapshot {
+        max_height: u64::try_from(height).context("console-wallet cursor height is negative")?,
+        hash: Some(hex::encode(hash)),
+        available_microtari: 0,
     })
 }
 

@@ -705,6 +705,7 @@ fn validate_prefunding_b0_metrics(profile: &ResultProfile) -> anyhow::Result<()>
     if !profile.funding.is_empty() {
         bail!("pre-funding B0 checkpoint must not contain funding records");
     }
+    let mut shared_target: Option<(u64, &str)> = None;
     for mode in ModeName::ALL {
         let label = mode.as_str();
         let cell = &profile.modes[label].scenarios[ScenarioName::B0.as_str()];
@@ -719,6 +720,20 @@ fn validate_prefunding_b0_metrics(profile: &ResultProfile) -> anyhow::Result<()>
             let tip_end = metrics["H_tip_end"]
                 .as_u64()
                 .with_context(|| format!("pre-funding B0 H_tip_end missing for {label}"))?;
+            let target_hash = metrics["H_tip_target_hash"]
+                .as_str()
+                .with_context(|| format!("pre-funding B0 target hash missing for {label}"))?;
+            if let Some(expected) = shared_target {
+                if expected != (tip_end, target_hash) {
+                    bail!(
+                        "pre-funding B0 modes do not share one scan target: expected {}:{}, {label} has {tip_end}:{target_hash}",
+                        expected.0,
+                        expected.1
+                    );
+                }
+            } else {
+                shared_target = Some((tip_end, target_hash));
+            }
             if metrics["birthday"] != 0
                 || metrics["detected_outputs"] != 0
                 || metrics["spendable_outputs"] != 0
@@ -728,7 +743,7 @@ fn validate_prefunding_b0_metrics(profile: &ResultProfile) -> anyhow::Result<()>
                 || metrics["scan_reached_tip"] != true
                 || metrics["tip_lag_blocks"] != 0
                 || metrics["tip_lag_tolerance_blocks"] != 0
-                || metrics["H_tip_target_hash"].as_str().is_none()
+                || metrics["H_scan_cursor_hash"].as_str() != Some(target_hash)
                 || metrics["H_tip_completion"].as_u64().is_none()
                 || metrics["H_tip_completion_hash"].as_str().is_none()
             {
@@ -741,6 +756,7 @@ fn validate_prefunding_b0_metrics(profile: &ResultProfile) -> anyhow::Result<()>
                 "H_tip_end",
                 "peak_rss_bytes",
                 "peak_cpu_percent",
+                "scan_invocations",
             ] {
                 if !metrics[metric].is_number() {
                     bail!("pre-funding B0 metric {metric} missing for {label}");

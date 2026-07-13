@@ -763,8 +763,22 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
         (7, 64, 8, 512),
     ];
     let mut recipient_set: Option<Vec<Value>> = None;
+    let mut b0_target: Option<(u64, &str)> = None;
     for (mode, scenarios) in mode_scenarios(document)? {
         let b0 = &scenarios["B0"]["repetitions"][0]["metrics"];
+        let target_height = b0["H_tip_end"]
+            .as_u64()
+            .with_context(|| format!("submission B0 target height missing for {mode}"))?;
+        let target_hash = b0["H_tip_target_hash"]
+            .as_str()
+            .with_context(|| format!("submission B0 target hash missing for {mode}"))?;
+        if let Some(expected) = b0_target {
+            if expected != (target_height, target_hash) {
+                bail!("submission B0 modes do not share one target height and hash");
+            }
+        } else {
+            b0_target = Some((target_height, target_hash));
+        }
         if b0["birthday"] != 0
             || b0["detected_outputs"] != 0
             || b0["spendable_outputs"] != 0
@@ -773,7 +787,7 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
             || b0["max_height"] != b0["H_tip_end"]
             || b0["tip_lag_tolerance_blocks"] != 0
             || b0["scan_reached_tip"] != true
-            || b0["H_tip_target_hash"].as_str().is_none()
+            || b0["H_scan_cursor_hash"].as_str() != Some(target_hash)
             || b0["H_tip_completion"].as_u64().is_none()
             || b0["H_tip_completion_hash"].as_str().is_none()
         {
@@ -786,6 +800,7 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
             "H_tip_end",
             "peak_rss_bytes",
             "peak_cpu_percent",
+            "scan_invocations",
         ] {
             if !b0[key].is_number() {
                 bail!("submission B0 metric {key} missing for {mode}");
@@ -1007,6 +1022,8 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
                     || metrics["history_matches_expected"] != true
                     || metrics["history_identities_match_expected"] != true
                     || metrics["H_tip_target_hash"].as_str().is_none()
+                    || metrics["H_scan_cursor_hash"] != metrics["H_tip_target_hash"]
+                    || metrics["scan_invocations"].as_u64().is_none()
                     || metrics["H_tip_completion"].as_u64().is_none()
                     || metrics["H_tip_completion_hash"].as_str().is_none()
                 {
@@ -1484,12 +1501,14 @@ mod tests {
                     metrics: Some(json!({
                         "T_scan_ms": 10, "blocks_per_sec": 10.0,
                         "H_tip_start": 100, "H_tip_end": 100,
-                        "H_tip_target_hash": "aa", "H_tip_completion": 101,
+                        "H_tip_target_hash": "aa", "H_scan_cursor_hash": "aa",
+                        "H_tip_completion": 101,
                         "H_tip_completion_hash": "bb", "birthday": 0,
                         "detected_outputs": 0, "spendable_outputs": 0,
                         "available_microtari": 0, "history_transactions": 0,
                         "max_height": 100, "tip_lag_blocks": 0,
                         "tip_lag_tolerance_blocks": 0, "scan_reached_tip": true,
+                        "scan_invocations": 1,
                         "peak_rss_bytes": 1, "peak_cpu_percent": 1.0,
                         "balance_delta_microtari": 0
                     })),
@@ -1563,5 +1582,15 @@ mod tests {
         profile.mark_final();
         profile.refresh_computed_deltas();
         profile.validate_submission().unwrap();
+
+        let mut mismatched = serde_json::to_value(&profile).unwrap();
+        mismatched["modes"]["new_wallet"]["scenarios"]["B0"]["repetitions"][0]["metrics"]["H_tip_target_hash"] =
+            json!("different");
+        mismatched["modes"]["new_wallet"]["scenarios"]["B0"]["repetitions"][0]["metrics"]["H_scan_cursor_hash"] =
+            json!("different");
+        let error = validate_document(&mismatched, true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("do not share one target"));
     }
 }

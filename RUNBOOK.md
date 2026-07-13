@@ -76,9 +76,12 @@ cargo run --release --features live-minotari -- prepare-b0 \
 
 `prepare-b0` binds the harness commit, resolved protocol, timeouts, topology,
 seed/address fingerprints, host/disk environment, endpoint identity, source
-revisions, binary/patch hashes, scan batch size, and each fixed scan target
-height/hash. Every B0 scan must recover zero outputs, balance, and history at its
-captured target.
+revisions, binary/patch hashes, and scan batch size. Because the console wallet
+does not expose a stop-height API, its persisted completion cursor establishes
+one B0 anchor height/hash. Both library-backed scans must reach that exact same
+anchor. `prepare-b0` therefore requires `scan_repetitions = 1` and fails before
+scanning otherwise. Every B0 scan must recover zero outputs, balance, and history
+there.
 
 Fund from a distinct, already spendable source wallet DB:
 
@@ -109,10 +112,14 @@ cargo run --release --features live-minotari -- run \
   --profile candidates/esmeralda-baseline.json
 ```
 
-Each scan captures one immutable target height/hash and launches one scanner
-operation with `scan_batch_size`. It does not clamp, chase a moving tip, retry at
-one block, or sleep between retries. Completion tip/hash is recorded only as
-drift disclosure. Recovered transaction IDs, not only counts, are checked.
+Each non-B0 scan captures one immutable target height/hash. Library-backed scans
+continue toward that same target when the pinned scanner returns before queued
+blocks are persisted; they never replace it with a newer tip. Continuation is
+bounded by the original deadline and three consecutive no-progress returns.
+Overshoot, cursor-hash mismatch, target reorganization, or deadline expiry fails
+the cell. Completion tip/hash and scanner invocation count are recorded as drift
+and implementation evidence. Recovered transaction IDs, not only counts, are
+checked.
 
 S0 failure blocks S1. S1 halts at the first failed round. S4 emits one observation
 per requested call. S5 starts directly from disclosed post-S4 state. S6/S7 scan
