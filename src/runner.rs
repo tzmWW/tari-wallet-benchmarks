@@ -169,10 +169,23 @@ async fn preflight_for_live_run_inner(
     preflight_checks(config, book, true, None, None, None, run_launch_checks)
         .context("strict live-run preflight")?;
     verify_mode1_wallet_identity(config, book).await?;
+    refresh_library_wallets_before_selected_chain_check(config).await?;
     let paths = live_wallet_paths(config, None, None, None);
     check_selected_chain_readiness(config, &paths)
         .await
         .context("selected-chain live-run preflight")
+}
+
+#[cfg(feature = "live-minotari")]
+async fn refresh_library_wallets_before_selected_chain_check(
+    config: &Config,
+) -> anyhow::Result<()> {
+    crate::live_minotari::refresh_library_wallets_to_tip(config).await
+}
+
+#[cfg(not(feature = "live-minotari"))]
+async fn refresh_library_wallets_before_selected_chain_check(_: &Config) -> anyhow::Result<()> {
+    bail!("strict wallet cursor refresh requires --features live-minotari")
 }
 
 #[cfg(feature = "live-minotari")]

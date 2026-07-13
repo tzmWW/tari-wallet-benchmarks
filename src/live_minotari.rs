@@ -3281,6 +3281,31 @@ pub async fn synchronize_s0_recipients(
     Ok(())
 }
 
+pub async fn refresh_library_wallets_to_tip(config: &Config) -> anyhow::Result<()> {
+    let password = wallet_password(&config.seeds.wallet_password_env)?;
+    let payment_receiver_db = payment_processor::payment_receiver_db_path(config);
+    for (label, db_path) in [
+        ("new_wallet", config.modes.new_wallet_database.as_path()),
+        ("payment_processor", payment_receiver_db.as_path()),
+    ] {
+        let report = scan_to_tip(
+            db_path,
+            &password,
+            &config.network.base_node_http_url,
+            config.benchmark.scan_batch_size,
+            config.benchmark.c_min,
+            config.timeout(config.timeouts.scan_batch_secs),
+        )
+        .await
+        .with_context(|| format!("refreshing {label} before selected-chain preflight"))?;
+        println!(
+            "preflight cursor refresh {label}: scanned_height={} target={}",
+            report.max_height, report.target_tip
+        );
+    }
+    Ok(())
+}
+
 pub async fn initialize_s0_wallets(
     config: &Config,
     book: &AddressBook,
