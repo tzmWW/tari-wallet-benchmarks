@@ -21,6 +21,16 @@ fn example_config_loads() {
 }
 
 #[test]
+fn prefunding_template_loads_without_manual_funding_records() {
+    let config = Config::load_prefunding_b0(Path::new("harness-prefunding.toml")).unwrap();
+    assert!(config.funding.as_map().is_empty());
+    assert!(config.benchmark.live_fresh_scan_cells);
+    assert!(config.benchmark.mode1_live_topology);
+    assert!(config.benchmark.mode2_live_scenarios);
+    assert!(config.benchmark.mode3_live_topology);
+}
+
+#[test]
 fn schema_command_writes_json() {
     let tempdir = tempfile::tempdir().unwrap();
     let schema_path = tempdir.path().join("schema.json");

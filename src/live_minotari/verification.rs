@@ -7,16 +7,17 @@ use super::*;
 
 pub(super) async fn verify_mode1_transactions(
     client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    base_node_url: &str,
     tx_ids: &[String],
     scenario: ScenarioName,
     required_depth: u64,
-) -> anyhow::Result<Vec<VerifiedTransaction>> {
+) -> anyhow::Result<Mode1VerificationResult> {
     let ids = tx_ids
         .iter()
         .filter_map(|tx_id| tx_id.parse::<u64>().ok())
         .collect::<Vec<_>>();
     if ids.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Mode1VerificationResult::default());
     }
     let response = client
         .get_transaction_info(grpc::GetTransactionInfoRequest {
@@ -24,44 +25,61 @@ pub(super) async fn verify_mode1_transactions(
         })
         .await?
         .into_inner();
-    let tip_height = client
-        .get_state(grpc::GetStateRequest {})
-        .await
-        .ok()
-        .map(|response| response.into_inner().scanned_height);
-    Ok(response
-        .transactions
-        .into_iter()
-        .map(|info| {
-            let status_value = u32::try_from(info.status).unwrap_or_default();
-            let mined_height =
-                (info.mined_in_block_height > 0).then_some(info.mined_in_block_height);
-            let confirmations = mined_height
-                .zip(tip_height)
-                .map(|(mined, tip)| tip.saturating_sub(mined));
-            let confirmed = terminal_ok_status(status_value)
-                && confirmations.is_some_and(|depth| depth >= required_depth);
-            VerifiedTransaction {
-                tx_id: info.tx_id.to_string(),
-                status_value,
-                mode: "old_wallet".to_string(),
-                scenario: scenario.as_str().to_string(),
-                amount_microtari: Some(info.amount),
-                fee_microtari: Some(info.fee),
-                mined_height,
-                confirmations,
-                min_confirmations: Some(required_depth),
-                tip_height,
-                confirmed,
-            }
-        })
-        .collect())
+    let tip_height = base_node_tip_height(base_node_url).await.ok();
+    let mut result = Mode1VerificationResult::default();
+    for info in response.transactions {
+        let status_value = u32::try_from(info.status).unwrap_or_default();
+        let mined_height = (info.mined_in_block_height > 0).then_some(info.mined_in_block_height);
+        let confirmations = mined_height
+            .zip(tip_height)
+            .map(|(mined, tip)| tip.saturating_sub(mined));
+        let independently_mined = if terminal_ok_status(status_value) {
+            mode1_outputs_exist_at_height(
+                base_node_url,
+                info.mined_in_block_height,
+                &info.output_commitments,
+            )
+            .await
+            .unwrap_or(false)
+        } else {
+            false
+        };
+        let confirmed = terminal_ok_status(status_value)
+            && independently_mined
+            && confirmations.is_some_and(|depth| depth >= required_depth);
+        let tx_id = info.tx_id.to_string();
+        result.shapes.insert(
+            tx_id.clone(),
+            TransactionShape {
+                input_count: u32::try_from(info.input_commitments.len()).unwrap_or(u32::MAX),
+                total_output_count: u32::try_from(info.output_commitments.len())
+                    .unwrap_or(u32::MAX),
+                output_commitments: info.output_commitments.iter().map(hex::encode).collect(),
+            },
+        );
+        result.transactions.push(VerifiedTransaction {
+            tx_id,
+            status_value,
+            mode: "old_wallet".to_string(),
+            scenario: scenario.as_str().to_string(),
+            amount_microtari: Some(info.amount),
+            fee_microtari: Some(info.fee),
+            mined_height,
+            confirmations,
+            min_confirmations: Some(required_depth),
+            tip_height,
+            confirmed,
+        });
+    }
+    Ok(result)
 }
 
 pub(super) async fn wait_for_mode1_summary_verification(
     client: &mut WalletGrpcClient<tonic::transport::Channel>,
+    base_node_url: &str,
     summary: &mut Mode1TransferSummary,
     scenario: ScenarioName,
+    verification_start_offset_ms: u128,
     timeout: Duration,
     required_depth: u64,
 ) {
@@ -71,6 +89,7 @@ pub(super) async fn wait_for_mode1_summary_verification(
     let start = Instant::now();
     let mut interval = time::interval(Duration::from_secs(10));
     let mut latest = Vec::new();
+    let mut confirmed_at = BTreeMap::new();
     loop {
         let remaining = timeout.saturating_sub(start.elapsed());
         if remaining.is_zero() {
@@ -79,11 +98,24 @@ pub(super) async fn wait_for_mode1_summary_verification(
         let call_timeout = remaining.min(Duration::from_secs(30));
         match time::timeout(
             call_timeout,
-            verify_mode1_transactions(client, &summary.tx_ids, scenario, required_depth),
+            verify_mode1_transactions(
+                client,
+                base_node_url,
+                &summary.tx_ids,
+                scenario,
+                required_depth,
+            ),
         )
         .await
         {
-            Ok(Ok(verified)) => {
+            Ok(Ok(verification)) => {
+                let verified = verification.transactions;
+                summary.transaction_shapes.extend(verification.shapes);
+                let observed_at =
+                    verification_start_offset_ms.saturating_add(start.elapsed().as_millis());
+                for tx in verified.iter().filter(|tx| tx.confirmed) {
+                    confirmed_at.entry(tx.tx_id.clone()).or_insert(observed_at);
+                }
                 let all_terminal = !verified.is_empty()
                     && verified.len() >= summary.tx_ids.len()
                     && verified.iter().all(|tx| tx.confirmed);
@@ -120,21 +152,72 @@ pub(super) async fn wait_for_mode1_summary_verification(
         }
         interval.tick().await;
     }
-    let confirmed_observed_ms = summary.wall_ms.saturating_add(start.elapsed().as_millis());
     for timing in &mut summary.tx_timings {
-        let confirmed = timing
+        let confirmed_at_ms = timing
             .get("tx_id")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|tx_id| latest.iter().any(|tx| tx.tx_id == tx_id && tx.confirmed));
-        if confirmed && let Some(map) = timing.as_object_mut() {
+            .and_then(|tx_id| confirmed_at.get(tx_id).copied());
+        let submit_offset_ms = timing_u128(timing, "submit_offset_ms").unwrap_or_default();
+        if let Some(confirmed_at_ms) = confirmed_at_ms
+            && let Some(map) = timing.as_object_mut()
+        {
             map.insert(
                 "broadcast_to_confirmed_at_c_min_ms".to_string(),
-                serde_json::json!(confirmed_observed_ms),
+                serde_json::json!(confirmed_at_ms.saturating_sub(submit_offset_ms)),
             );
         }
     }
     summary.tx_infos.extend(latest);
     summary.backfill_verified_fee_total();
+}
+
+async fn mode1_outputs_exist_at_height(
+    base_node_url: &str,
+    mined_height: u64,
+    expected_commitments: &[Vec<u8>],
+) -> anyhow::Result<bool> {
+    if mined_height == 0 || expected_commitments.is_empty() {
+        return Ok(false);
+    }
+    let client = base_node_http_client()?;
+    let mut header_url = url::Url::parse(base_node_url)?.join("/get_header_by_height")?;
+    header_url
+        .query_pairs_mut()
+        .append_pair("height", &mined_height.to_string());
+    let header: serde_json::Value = client
+        .get(header_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let header_hash = header["hash"]
+        .as_array()
+        .context("Mode 1 header proof omitted hash")?
+        .iter()
+        .map(|byte| {
+            byte.as_u64()
+                .and_then(|byte| u8::try_from(byte).ok())
+                .context("Mode 1 header hash contains a non-byte value")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut outputs_url = url::Url::parse(base_node_url)?.join("/get_utxos_by_block")?;
+    outputs_url
+        .query_pairs_mut()
+        .append_pair("header_hash", &hex::encode(header_hash));
+    let block: tari_transaction_components::rpc::models::GetUtxosByBlockResponse = client
+        .get(outputs_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(expected_commitments.iter().all(|expected| {
+        block
+            .outputs
+            .iter()
+            .any(|output| output.commitment().as_bytes() == expected)
+    }))
 }
 
 pub(super) async fn verify_mode2_transactions_with_client(
@@ -157,6 +240,11 @@ pub(super) async fn verify_mode2_transactions_with_client(
             continue;
         };
         let row = mode2_completed_transaction_row(&conn, parsed as i64)?;
+        if let Some(row) = row.as_ref()
+            && let Ok(shape) = mode2_transaction_shape(&row.serialized_transaction)
+        {
+            result.transaction_shapes.insert(tx_id.clone(), shape);
+        }
         let (status_value, confirmed, mined_height, source, query_observation) = match row.as_ref()
         {
             Some(row) => {
@@ -333,6 +421,23 @@ pub(super) fn mode2_kernel_query_from_serialized_transaction(
             .to_vec(),
         excess_sig: kernel.excess_sig.get_signature().as_bytes().to_vec(),
         fee_microtari: Some(kernel.fee.0),
+    })
+}
+
+fn mode2_transaction_shape(serialized_transaction: &[u8]) -> anyhow::Result<TransactionShape> {
+    let transaction: Transaction = serde_json::from_slice(serialized_transaction)
+        .context("deserializing Mode 2 transaction shape")?;
+    Ok(TransactionShape {
+        input_count: u32::try_from(transaction.body().inputs().len())
+            .context("Mode 2 transaction input count exceeds u32")?,
+        total_output_count: u32::try_from(transaction.body().outputs().len())
+            .context("Mode 2 transaction output count exceeds u32")?,
+        output_commitments: transaction
+            .body()
+            .outputs()
+            .iter()
+            .map(|output| hex::encode(output.commitment().as_bytes()))
+            .collect(),
     })
 }
 

@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake lsof protobuf-compiler sqlite3
       - name: Install ast-grep
         run: npm install --global @ast-grep/cli
       - name: Format
@@ -20,7 +20,17 @@ jobs:
         run: cargo check --all-features
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Test
+      - name: Test default features
+        run: cargo test
+      - name: Test all features
         run: cargo test --all-features
       - name: ast-grep
         run: ast-grep scan
+      - name: Generated schema is current
+        run: cargo run -- schema --out RESULT_PROFILE_SCHEMA.json && git diff --exit-code -- RESULT_PROFILE_SCHEMA.json
+      - name: Validate committed baseline when present
+        run: if test -f baselines/esmeralda_baseline.json; then cargo run -- validate-profile --profile baselines/esmeralda_baseline.json --submission; fi
+      - name: Reject tracked secret artifacts
+        run: test -z "$(git ls-files '*.env' '*.db' '*.sqlite' '.secrets/**')"
+      - name: Diff hygiene
+        run: git diff --check

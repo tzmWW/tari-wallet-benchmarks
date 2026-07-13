@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
-    process::{ExitStatus, Stdio},
+    process::ExitStatus,
     time::{Duration, Instant},
 };
 
@@ -14,6 +14,8 @@ use tari_utilities::ByteArray;
 use tokio::{process::Command, time};
 
 use crate::{config::Config, seeds::SeedMaterial};
+
+pub use crate::managed_process::ManagedProcess;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentProcessorEnv {
@@ -96,6 +98,14 @@ pub fn build_env(config: &Config, pp_seed: &SeedMaterial) -> PaymentProcessorEnv
         "CONFIRMATION_CHECKER_REQUIRED_CONFIRMATIONS".to_string(),
         config.benchmark.c_min.to_string(),
     );
+    vars.insert(
+        "FEE_PER_GRAM".to_string(),
+        config
+            .fee_rate()
+            .expect("validated benchmark fee rate")
+            .0
+            .to_string(),
+    );
     vars.insert("ACCOUNTS__DEFAULT__NAME".to_string(), "default".to_string());
     vars.insert(
         "ACCOUNTS__DEFAULT__VIEW_KEY".to_string(),
@@ -130,10 +140,14 @@ pub async fn ensure_console_wallet_base(
 ) -> anyhow::Result<()> {
     let base_path = console_wallet_base_path(config);
     if console_wallet_db_path(&base_path).exists() {
-        return Ok(());
+        bail!(
+            "payment-processor signer DB already exists at {}; canonical runs require pristine signer state",
+            console_wallet_db_path(&base_path).display()
+        );
     }
     fs::create_dir_all(&base_path)?;
-    let output = Command::new(&config.paths.minotari_console_wallet)
+    let mut command = Command::new(&config.paths.minotari_console_wallet);
+    command
         .env("MINOTARI_WALLET_SEED_WORDS", &pp_seed.seed_words)
         .env("MINOTARI_WALLET_PASSWORD", password)
         .arg("--base-path")
@@ -144,17 +158,23 @@ pub async fn ensure_console_wallet_base(
         .arg("--command-mode-auto-exit")
         .arg("--skip-recovery")
         .arg("--command")
-        .arg("get-balance")
-        .output()
+        .arg("get-balance");
+    let mut process = ManagedProcess::spawn(
+        "mode3-signer-init",
+        command,
+        &config.paths.data_dir.join("logs"),
+    )?;
+    let status = process
+        .wait(config.timeout(config.timeouts.startup_secs))
         .await
         .context("initializing payment-processor console wallet signer base path")?;
 
-    if !output.status.success() {
+    if !status.success() {
         bail!(
-            "console wallet signer initialization failed: status={} stderr={} stdout={}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr),
-            String::from_utf8_lossy(&output.stdout)
+            "console wallet signer initialization failed: status={} stderr_log={} stdout_log={}",
+            status,
+            process.stderr_path.display(),
+            process.stdout_path.display()
         );
     }
     Ok(())
@@ -164,6 +184,10 @@ fn console_wallet_db_path(base_path: &Path) -> PathBuf {
     base_path
         .join("esmeralda")
         .join("data/wallet/db/console_wallet.db")
+}
+
+pub fn payment_processor_signer_db_path(config: &Config) -> PathBuf {
+    console_wallet_db_path(&console_wallet_base_path(config))
 }
 
 pub async fn start_payment_receiver(
@@ -195,7 +219,11 @@ pub async fn start_payment_receiver(
         .arg(config.benchmark.mode3_worker_sleep_secs.to_string())
         .arg("--api-port")
         .arg(api_port.to_string());
-    spawn_logged_process("mode3-payment-receiver", command)
+    ManagedProcess::spawn(
+        "mode3-payment-receiver",
+        command,
+        &config.paths.data_dir.join("logs"),
+    )
 }
 
 pub async fn start_payment_processor(
@@ -213,7 +241,11 @@ pub async fn start_payment_processor(
         .with_context(|| format!("creating PP database file {}", db_path.display()))?;
     let mut command = Command::new(&config.paths.payment_processor_binary);
     command.envs(&env.vars);
-    spawn_logged_process("mode3-payment-processor", command)
+    ManagedProcess::spawn(
+        "mode3-payment-processor",
+        command,
+        &config.paths.data_dir.join("logs"),
+    )
 }
 
 fn sqlite_url(path: &Path) -> String {
@@ -227,56 +259,6 @@ fn absolute_path(path: &Path) -> PathBuf {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
-    }
-}
-
-fn spawn_logged_process(label: &str, mut command: Command) -> anyhow::Result<ManagedProcess> {
-    fs::create_dir_all("logs")?;
-    let stdout_path = PathBuf::from("logs").join(format!("{label}.stdout.log"));
-    let stderr_path = PathBuf::from("logs").join(format!("{label}.stderr.log"));
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stdout_path)?;
-    let stderr = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stderr_path)?;
-    let child = command
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .with_context(|| format!("spawning {label}"))?;
-    Ok(ManagedProcess {
-        label: label.to_string(),
-        child,
-        stdout_path,
-        stderr_path,
-    })
-}
-
-pub struct ManagedProcess {
-    label: String,
-    child: tokio::process::Child,
-    pub stdout_path: PathBuf,
-    pub stderr_path: PathBuf,
-}
-
-impl ManagedProcess {
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-
-    pub fn try_wait(&mut self) -> anyhow::Result<Option<ExitStatus>> {
-        self.child
-            .try_wait()
-            .with_context(|| format!("checking {} process status", self.label))
-    }
-}
-
-impl Drop for ManagedProcess {
-    fn drop(&mut self) {
-        let _ = self.child.start_kill();
     }
 }
 
@@ -493,6 +475,9 @@ pub struct PaymentBatchSnapshot {
     pub fee_microtari: Option<u64>,
     pub kernel_excess_sig_nonce: Option<Vec<u8>>,
     pub kernel_excess_sig: Option<Vec<u8>>,
+    pub input_count: Option<u32>,
+    pub total_output_count: Option<u32>,
+    pub output_commitments: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -616,6 +601,11 @@ fn inspect_batches(conn: &Connection, ids: &[String]) -> anyhow::Result<Vec<Paym
             kernel_excess_sig_nonce: chain
                 .as_ref()
                 .map(|fields| fields.kernel_excess_sig_nonce.clone()),
+            input_count: chain.as_ref().map(|fields| fields.input_count),
+            total_output_count: chain.as_ref().map(|fields| fields.total_output_count),
+            output_commitments: chain
+                .as_ref()
+                .map(|fields| fields.output_commitments.clone()),
             kernel_excess_sig: chain.map(|fields| fields.kernel_excess_sig),
         })
     })?;
@@ -639,6 +629,9 @@ struct PaymentBatchChainFields {
     fee_microtari: u64,
     kernel_excess_sig_nonce: Vec<u8>,
     kernel_excess_sig: Vec<u8>,
+    input_count: u32,
+    total_output_count: u32,
+    output_commitments: Vec<String>,
 }
 
 fn payment_batch_chain_fields(json: &str) -> anyhow::Result<PaymentBatchChainFields> {
@@ -659,6 +652,19 @@ fn payment_batch_chain_fields(json: &str) -> anyhow::Result<PaymentBatchChainFie
         .as_bytes()
         .to_vec();
     let kernel_excess_sig = kernel.excess_sig.get_signature().as_bytes().to_vec();
+    let input_count = u32::try_from(signed.signed_transaction.transaction.body().inputs().len())
+        .context("PP transaction input count exceeds u32")?;
+    let total_output_count =
+        u32::try_from(signed.signed_transaction.transaction.body().outputs().len())
+            .context("PP transaction output count exceeds u32")?;
+    let output_commitments = signed
+        .signed_transaction
+        .transaction
+        .body()
+        .outputs()
+        .iter()
+        .map(|output| hex::encode(output.commitment().as_bytes()))
+        .collect();
     let chain_tx_id = format!(
         "{}:{}",
         hex::encode(&kernel_excess_sig_nonce),
@@ -669,6 +675,9 @@ fn payment_batch_chain_fields(json: &str) -> anyhow::Result<PaymentBatchChainFie
         fee_microtari: kernel.fee.0,
         kernel_excess_sig_nonce,
         kernel_excess_sig,
+        input_count,
+        total_output_count,
+        output_commitments,
     })
 }
 
@@ -860,6 +869,7 @@ mod tests {
             Some(&seed.private_view_key_hex)
         );
         assert!(env.vars.contains_key("CONSOLE_WALLET_PASSWORD"));
+        assert_eq!(env.vars.get("FEE_PER_GRAM").map(String::as_str), Some("5"));
     }
 
     #[test]

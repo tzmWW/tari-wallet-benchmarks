@@ -13,11 +13,17 @@ use wallet_bench::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    tokio::select! {
+        result = execute(cli) => result,
+        () = shutdown_signal() => anyhow::bail!("received shutdown signal; managed child groups were terminated"),
+    }
+}
 
+async fn execute(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Addresses { config, out } => {
-            let config =
-                Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
+            let config = Config::load_prefunding_b0(&config)
+                .with_context(|| format!("loading {}", config.display()))?;
             enforce_esmeralda(&config)?;
             generate_addresses(&config, &out)?;
         }
@@ -43,23 +49,13 @@ async fn main() -> anyhow::Result<()> {
         Command::Run {
             config,
             profile,
-            fresh_data_dir,
-            yes,
             b0_profile,
             s0_evidence,
         } => {
-            let config =
-                Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
+            let config = Config::load_prefunding_b0(&config)
+                .with_context(|| format!("loading {}", config.display()))?;
             enforce_esmeralda(&config)?;
-            run_profile(
-                &config,
-                &profile,
-                fresh_data_dir,
-                yes,
-                &b0_profile,
-                &s0_evidence,
-            )
-            .await?;
+            run_profile(&config, &profile, &b0_profile, &s0_evidence).await?;
         }
         Command::PrepareB0 { config, profile } => {
             let config = Config::load_prefunding_b0(&config)
@@ -212,4 +208,20 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate()).expect("installing SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = terminate.recv() => {},
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }

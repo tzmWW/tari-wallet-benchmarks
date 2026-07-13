@@ -6523,6 +6523,7 @@ dependencies = [
  "curve25519-dalek 5.0.0-pre.6",
  "hex",
  "jsonschema",
+ "libc",
  "minotari",
  "minotari_wallet_grpc_client",
  "predicates",

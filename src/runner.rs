@@ -1,21 +1,41 @@
 use std::{
     env, fs,
+    fs::OpenOptions,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use sha2::{Digest, Sha256};
 use sysinfo::Disks;
+#[cfg(feature = "live-minotari")]
+use sysinfo::{Pid, System};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct S0FundingEvidence {
     pub schema_version: u32,
     pub b0_run_id: String,
+    pub protocol_fingerprint: String,
+    pub status: String,
     pub addresses: std::collections::BTreeMap<String, String>,
     pub birthday: u16,
     pub birthday_start_height: u64,
-    pub transaction: crate::result_profile::S0FundingTransactionEvidence,
+    pub submission: crate::result_profile::S0FundingSubmissionEvidence,
+    pub transaction: Option<crate::result_profile::S0FundingTransactionEvidence>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BuildManifest {
+    schema_version: u32,
+    artifacts: std::collections::BTreeMap<String, BuildArtifact>,
+    payment_processor_patch_sha256: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BuildArtifact {
+    source_revision: String,
+    sha256: String,
 }
 
 use crate::{
@@ -97,6 +117,9 @@ fn preflight_checks(
     if let Err(error) = check_binary(&config.paths.minotari_binary, "minotari") {
         missing.push(error.to_string());
     }
+    if let Err(error) = check_binary(&config.paths.minotari_node, "minotari_node") {
+        missing.push(error.to_string());
+    }
     if let Err(error) = check_binary(
         &config.paths.payment_processor_binary,
         "minotari_payment_processor",
@@ -111,17 +134,13 @@ fn preflight_checks(
     if !missing.is_empty() {
         bail!("preflight failed:\n{}", missing.join("\n"));
     }
-    println!(
-        "binary paths are executable; embedded source revisions are not observable, configured pins: minotari_cli={} console_wallet={} payment_processor={}",
-        config.versions.minotari_cli_rev,
-        config.versions.tari_console_wallet_rev,
-        config.versions.payment_processor_rev
-    );
+    verify_build_manifest(config)?;
 
     if check_funds {
         let paths = live_wallet_paths(config, mode1_db, mode2_db, payment_receiver_db);
         check_live_funds_at_paths(config, &paths)?;
         check_live_wallet_identities(config, book, &paths)?;
+        check_payment_processor_pristine(config)?;
     }
     Ok(())
 }
@@ -130,6 +149,7 @@ fn preflight_checks(
 /// result profile or any live topology is created.
 pub async fn preflight_for_live_run(config: &Config, book: &AddressBook) -> anyhow::Result<()> {
     ensure_runtime_paths_are_absolute(config)?;
+    check_harness_worktree_clean()?;
     check_disk_space(config)?;
     check_listen_ports_available(config)?;
     preflight_checks(config, book, true, None, None, None).context("strict live-run preflight")?;
@@ -157,29 +177,35 @@ async fn verify_mode1_wallet_identity(_: &Config, _: &AddressBook) -> anyhow::Re
 pub async fn run_profile(
     config: &Config,
     profile_path: &Path,
-    fresh_data_dir: bool,
-    yes: bool,
     b0_profile_path: &Path,
     s0_evidence_path: &Path,
 ) -> anyhow::Result<()> {
+    ensure_runtime_paths_are_absolute(config)?;
+    let config = config_with_s0_evidence(config, s0_evidence_path)?;
+    let config = &config;
+    let _namespace_lock = RunNamespaceLock::acquire(&config.paths.data_dir)?;
     let book = AddressBook::load_required(config)?;
     preflight_for_live_run(config, &book).await?;
 
-    if fresh_data_dir {
-        reset_enabled_mode_dirs(config, yes)?;
-    }
-
     let mut profile = ResultProfile::new(
         config,
-        env_capture::capture_for_base_node(&config.network.base_node_http_url),
+        env_capture::capture_for_network(
+            &config.network.base_node_http_url,
+            &config.network.authority_http_url,
+            config.network.mode1_base_node_service_peer.as_deref(),
+        ),
     );
     #[cfg(feature = "live-minotari")]
     {
+        check_endpoint_authority(config).await?;
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
         let tip = fetch_chain_tip(&client, &config.network.base_node_http_url).await?;
         profile.set_tip_start(tip.height, Some(hex::encode(&tip.hash)));
+        let authority = fetch_chain_tip(&client, &config.network.authority_http_url).await?;
+        profile.base_node.authority_tip_start_height = Some(authority.height);
+        profile.base_node.authority_tip_start_hash = Some(hex::encode(authority.hash));
         profile.base_node.pruning_horizon = Some(tip.pruning_horizon);
         profile.base_node.is_synced = Some(tip.is_synced);
     }
@@ -194,6 +220,7 @@ pub async fn run_profile(
             .modes
             .insert(mode.as_str().to_string(), empty_mode_profile(mode, address));
     }
+    record_seed_fingerprints(&mut profile, &book);
 
     if let Some(pp_seed) = book.addresses.get(WalletRole::PaymentProcessor.label()) {
         let pp_env = payment_processor::build_env(config, pp_seed);
@@ -233,17 +260,21 @@ pub async fn run_profile(
 
     #[cfg(feature = "live-minotari")]
     {
+        check_endpoint_authority(config).await?;
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
         let tip = fetch_chain_tip(&client, &config.network.base_node_http_url).await?;
         profile.set_tip_end(tip.height, Some(hex::encode(&tip.hash)));
+        let authority = fetch_chain_tip(&client, &config.network.authority_http_url).await?;
+        profile.base_node.authority_tip_end_height = Some(authority.height);
+        profile.base_node.authority_tip_end_hash = Some(hex::encode(authority.hash));
         profile.base_node.pruning_horizon = Some(tip.pruning_horizon);
         profile.base_node.is_synced = Some(tip.is_synced);
         profile.mark_final();
     }
     profile.refresh_computed_deltas();
-    profile.write_validated_atomic(profile_path, false)?;
+    profile.write_validated_atomic(profile_path, true)?;
     println!("wrote {}", profile_path.display());
     Ok(())
 }
@@ -251,10 +282,21 @@ pub async fn run_profile(
 #[cfg(feature = "live-minotari")]
 pub async fn prepare_b0_profile(config: &Config, profile_path: &Path) -> anyhow::Result<()> {
     config.validate_prefunding_b0()?;
+    let _namespace_lock = RunNamespaceLock::acquire(&config.paths.data_dir)?;
+    check_harness_worktree_clean()?;
     let book = AddressBook::load_required(config)?;
+    ensure_runtime_paths_are_absolute(config)?;
+    check_disk_space(config)?;
+    check_listen_ports_available(config)?;
+    preflight_checks(config, &book, false, None, None, None)?;
+    check_endpoint_authority(config).await?;
     let mut profile = ResultProfile::new(
         config,
-        env_capture::capture_for_base_node(&config.network.base_node_http_url),
+        env_capture::capture_for_network(
+            &config.network.base_node_http_url,
+            &config.network.authority_http_url,
+            config.network.mode1_base_node_service_peer.as_deref(),
+        ),
     );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -264,6 +306,9 @@ pub async fn prepare_b0_profile(config: &Config, profile_path: &Path) -> anyhow:
         bail!("prepare-b0 requires a base node synchronized to tip");
     }
     profile.set_tip_start(tip.height, Some(hex::encode(&tip.hash)));
+    let authority = fetch_chain_tip(&client, &config.network.authority_http_url).await?;
+    profile.base_node.authority_tip_start_height = Some(authority.height);
+    profile.base_node.authority_tip_start_hash = Some(hex::encode(authority.hash));
     profile.base_node.pruning_horizon = Some(tip.pruning_horizon);
     profile.base_node.is_synced = Some(tip.is_synced);
     for mode in ModeName::ALL {
@@ -277,9 +322,14 @@ pub async fn prepare_b0_profile(config: &Config, profile_path: &Path) -> anyhow:
             .modes
             .insert(mode.as_str().to_string(), empty_mode_profile(mode, address));
     }
+    record_seed_fingerprints(&mut profile, &book);
     crate::live_minotari::annotate_prefunding_b0(config, &book, &mut profile).await?;
+    check_endpoint_authority(config).await?;
     let tip = fetch_chain_tip(&client, &config.network.base_node_http_url).await?;
     profile.set_tip_end(tip.height, Some(hex::encode(&tip.hash)));
+    let authority = fetch_chain_tip(&client, &config.network.authority_http_url).await?;
+    profile.base_node.authority_tip_end_height = Some(authority.height);
+    profile.base_node.authority_tip_end_hash = Some(hex::encode(authority.hash));
     profile.base_node.is_synced = Some(tip.is_synced);
     profile.refresh_computed_deltas();
     validate_prefunding_b0_metrics(&profile)?;
@@ -296,11 +346,31 @@ pub async fn fund_s0_from_checkpoint(
     evidence_path: &Path,
 ) -> anyhow::Result<()> {
     config.validate_prefunding_b0()?;
+    let _namespace_lock = RunNamespaceLock::acquire(&config.paths.data_dir)?;
+    check_harness_worktree_clean()?;
     let checkpoint = profile_validation::validate_path(b0_profile_path, false)?;
     validate_prefunding_b0_metrics(&checkpoint)?;
-    let current = ResultProfile::new(config, env_capture::capture());
+    let book = AddressBook::load_required(config)?;
+    let mut current = ResultProfile::new(
+        config,
+        env_capture::capture_for_network(
+            &config.network.base_node_http_url,
+            &config.network.authority_http_url,
+            config.network.mode1_base_node_service_peer.as_deref(),
+        ),
+    );
+    record_seed_fingerprints(&mut current, &book);
     if checkpoint.harness_git_commit != current.harness_git_commit {
         bail!("fund-s0 B0 checkpoint harness commit does not match this binary");
+    }
+    if checkpoint.config.get("protocol_fingerprint") != current.config.get("protocol_fingerprint")
+        || serde_json::to_value(&checkpoint.environment)?
+            != serde_json::to_value(&current.environment)?
+        || checkpoint.base_node.endpoint != current.base_node.endpoint
+        || checkpoint.base_node.configured_revision != current.base_node.configured_revision
+        || checkpoint.config.get("seed_fingerprints") != current.config.get("seed_fingerprints")
+    {
+        bail!("fund-s0 runtime fingerprint does not match the B0 checkpoint");
     }
     if checkpoint.profile_kind != ProfileKind::Checkpoint
         || !checkpoint
@@ -310,9 +380,11 @@ pub async fn fund_s0_from_checkpoint(
     {
         bail!("fund-s0 requires a completed pre-funding B0 checkpoint");
     }
-    let book = AddressBook::load_required(config)?;
-    let (birthday, birthday_start_height) =
-        crate::live_minotari::initialize_s0_wallets(config, &book).await?;
+    ensure_runtime_paths_are_absolute(config)?;
+    check_disk_space(config)?;
+    check_listen_ports_available(config)?;
+    preflight_checks(config, &book, false, None, None, None)?;
+    check_endpoint_authority(config).await?;
     let mut addresses = std::collections::BTreeMap::new();
     let recipients = [
         (ModeName::OldWallet, WalletRole::OldWallet),
@@ -334,23 +406,99 @@ pub async fn fund_s0_from_checkpoint(
         Ok(address)
     })
     .collect::<anyhow::Result<Vec<_>>>()?;
-    let transaction = crate::live_minotari::fund_s0_outputs(config, source_db, &recipients).await?;
-    let evidence = S0FundingEvidence {
-        schema_version: 1,
-        b0_run_id: checkpoint.run_id,
-        addresses,
-        birthday,
-        birthday_start_height,
-        transaction,
+    let protocol_fingerprint = config.protocol_fingerprint()?;
+    let mut evidence = if evidence_path.exists() {
+        let existing: S0FundingEvidence = serde_json::from_slice(&fs::read(evidence_path)?)?;
+        if existing.schema_version != 2
+            || existing.b0_run_id != checkpoint.run_id
+            || existing.protocol_fingerprint != protocol_fingerprint
+            || existing.addresses != addresses
+        {
+            bail!("existing S0 evidence does not match this B0 continuation");
+        }
+        if existing.status == "confirmed" && existing.transaction.is_some() {
+            println!(
+                "S0 funding evidence is already confirmed at {}",
+                evidence_path.display()
+            );
+            return Ok(());
+        }
+        existing
+    } else {
+        let (birthday, birthday_start_height) =
+            crate::live_minotari::initialize_s0_wallets(config, &book).await?;
+        let mut broadcast_evidence = None;
+        let b0_run_id = checkpoint.run_id.clone();
+        let evidence_addresses = addresses.clone();
+        let evidence_protocol_fingerprint = protocol_fingerprint.clone();
+        crate::live_minotari::submit_s0_outputs(config, source_db, &recipients, |submission| {
+            let evidence = S0FundingEvidence {
+                schema_version: 2,
+                b0_run_id,
+                protocol_fingerprint: evidence_protocol_fingerprint,
+                status: "broadcast".to_string(),
+                addresses: evidence_addresses,
+                birthday,
+                birthday_start_height,
+                submission: submission.clone(),
+                transaction: None,
+            };
+            write_json_atomic(evidence_path, &evidence)?;
+            broadcast_evidence = Some(evidence);
+            Ok(())
+        })
+        .await?;
+        broadcast_evidence.context("S0 broadcast callback did not persist evidence")?
     };
-    if let Some(parent) = evidence_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut bytes = serde_json::to_vec_pretty(&evidence)?;
-    bytes.push(b'\n');
-    fs::write(evidence_path, bytes)?;
+    let transaction =
+        crate::live_minotari::observe_s0_funding(config, source_db, &evidence.submission).await?;
+    check_endpoint_authority(config).await?;
+    evidence.status = "confirmed".to_string();
+    evidence.transaction = Some(transaction);
+    write_json_atomic(evidence_path, &evidence)?;
     println!("wrote S0 funding evidence {}", evidence_path.display());
     Ok(())
+}
+
+#[cfg(feature = "live-minotari")]
+fn write_json_atomic(path: &Path, value: &impl serde::Serialize) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("tmp");
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    fs::write(&temporary, bytes)?;
+    fs::rename(&temporary, path)?;
+    Ok(())
+}
+
+struct RunNamespaceLock {
+    path: PathBuf,
+}
+
+impl RunNamespaceLock {
+    fn acquire(data_dir: &Path) -> anyhow::Result<Self> {
+        fs::create_dir_all(data_dir)?;
+        let path = data_dir.join(".wallet-bench.lock");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| {
+                format!(
+                    "candidate namespace is already locked at {}; use a new namespace if a prior process did not exit cleanly",
+                    path.display()
+                )
+            })?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for RunNamespaceLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 fn import_prefunding_b0(
@@ -378,8 +526,28 @@ fn import_prefunding_b0(
     if checkpoint.harness_git_commit != profile.harness_git_commit {
         bail!("B0 checkpoint harness commit does not match the funded continuation");
     }
+    if checkpoint.config.get("protocol_fingerprint") != profile.config.get("protocol_fingerprint") {
+        bail!("B0 checkpoint protocol fingerprint does not match the funded continuation");
+    }
+    if checkpoint.config.get("harness_executable_sha256")
+        != profile.config.get("harness_executable_sha256")
+    {
+        bail!("B0 checkpoint harness executable does not match the funded continuation");
+    }
+    if serde_json::to_value(&checkpoint.environment)? != serde_json::to_value(&profile.environment)?
+    {
+        bail!("B0 checkpoint environment does not match the funded continuation");
+    }
+    if checkpoint.base_node.endpoint != profile.base_node.endpoint
+        || checkpoint.base_node.configured_revision != profile.base_node.configured_revision
+    {
+        bail!("B0 checkpoint base-node identity does not match the funded continuation");
+    }
     if checkpoint.network != profile.network {
         bail!("B0 checkpoint network does not match the funded continuation");
+    }
+    if checkpoint.config.get("seed_fingerprints") != profile.config.get("seed_fingerprints") {
+        bail!("B0 checkpoint seed fingerprints do not match the funded continuation");
     }
     let b0_tip_end = checkpoint
         .base_node
@@ -414,6 +582,8 @@ fn import_prefunding_b0(
     }
     profile.base_node.tip_start_height = checkpoint.base_node.tip_start_height;
     profile.base_node.tip_start_hash = checkpoint.base_node.tip_start_hash;
+    profile.base_node.authority_tip_start_height = checkpoint.base_node.authority_tip_start_height;
+    profile.base_node.authority_tip_start_hash = checkpoint.base_node.authority_tip_start_hash;
     profile.mark_checkpoint_stage("prefunding_b0");
     profile.config.insert(
         "prefunding_b0_checkpoint".to_string(),
@@ -426,6 +596,18 @@ fn import_prefunding_b0(
     Ok(())
 }
 
+fn record_seed_fingerprints(profile: &mut ResultProfile, book: &AddressBook) {
+    let fingerprints = book
+        .addresses
+        .iter()
+        .map(|(role, material)| (role.clone(), material.wallet_fingerprint_hex.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    profile.config.insert(
+        "seed_fingerprints".to_string(),
+        serde_json::json!(fingerprints),
+    );
+}
+
 fn validate_s0_funding_evidence(
     config: &Config,
     profile: &ResultProfile,
@@ -435,16 +617,20 @@ fn validate_s0_funding_evidence(
         .with_context(|| format!("reading S0 evidence {}", evidence_path.display()))?;
     let evidence: S0FundingEvidence = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing S0 evidence {}", evidence_path.display()))?;
-    if evidence.schema_version != 1
+    if evidence.schema_version != 2
+        || evidence.status != "confirmed"
         || profile.config.get("prefunding_b0_run_id")
             != Some(&serde_json::json!(evidence.b0_run_id))
     {
         bail!("S0 evidence does not continue the imported B0 checkpoint");
     }
-    if evidence
+    let transaction = evidence
         .transaction
+        .as_ref()
+        .context("S0 evidence has no confirmed transaction")?;
+    if transaction
         .tip_height_at_confirmation
-        .saturating_sub(evidence.transaction.mined_height)
+        .saturating_sub(transaction.mined_height)
         < config.benchmark.c_min
     {
         bail!("S0 evidence transaction did not reach C_min");
@@ -458,21 +644,61 @@ fn validate_s0_funding_evidence(
             .funding
             .get(label)
             .with_context(|| format!("funding record missing for {label}"))?;
-        if funding.tx_id != evidence.transaction.tx_id
-            || funding.height != evidence.transaction.mined_height
+        if funding.tx_id != transaction.tx_id
+            || funding.height != transaction.mined_height
             || funding.birthday != Some(evidence.birthday)
             || funding.birthday_start_height != Some(evidence.birthday_start_height)
-            || funding.construction_ms != Some(evidence.transaction.construction_ms)
-            || funding.broadcast_to_mempool_ms != Some(evidence.transaction.broadcast_to_mempool_ms)
+            || funding.construction_ms != Some(transaction.construction_ms)
+            || funding.broadcast_to_mempool_ms != Some(transaction.broadcast_to_mempool_ms)
             || funding.broadcast_to_confirmed_at_c_min_ms
-                != Some(evidence.transaction.broadcast_to_confirmed_at_c_min_ms)
-            || funding.tip_height_at_confirmation
-                != Some(evidence.transaction.tip_height_at_confirmation)
+                != Some(transaction.broadcast_to_confirmed_at_c_min_ms)
+            || funding.tip_height_at_confirmation != Some(transaction.tip_height_at_confirmation)
+            || funding.shared_funding_fee_microtari != Some(transaction.fee_microtari)
+            || funding.funding_fee_attribution.as_deref()
+                != Some("external_source_shared_not_deducted_from_mode_balance")
         {
             bail!("funding record does not match measured S0 evidence for {label}");
         }
     }
     Ok(())
+}
+
+fn config_with_s0_evidence(config: &Config, evidence_path: &Path) -> anyhow::Result<Config> {
+    let evidence: S0FundingEvidence = serde_json::from_slice(
+        &fs::read(evidence_path)
+            .with_context(|| format!("reading S0 evidence {}", evidence_path.display()))?,
+    )?;
+    if evidence.schema_version != 2 || evidence.status != "confirmed" {
+        bail!("S0 evidence must be a confirmed schema-v2 record");
+    }
+    if evidence.protocol_fingerprint != config.protocol_fingerprint()? {
+        bail!("S0 evidence protocol fingerprint does not match the run configuration");
+    }
+    let transaction = evidence
+        .transaction
+        .as_ref()
+        .context("S0 evidence has no confirmed transaction")?;
+    let record = crate::config::FundingRecord {
+        amount: config.benchmark.a_fund.clone(),
+        tx_id: transaction.tx_id.clone(),
+        height: transaction.mined_height,
+        birthday: Some(evidence.birthday),
+        birthday_start_height: Some(evidence.birthday_start_height),
+        construction_ms: Some(transaction.construction_ms),
+        broadcast_to_mempool_ms: Some(transaction.broadcast_to_mempool_ms),
+        broadcast_to_confirmed_at_c_min_ms: Some(transaction.broadcast_to_confirmed_at_c_min_ms),
+        tip_height_at_confirmation: Some(transaction.tip_height_at_confirmation),
+        shared_funding_fee_microtari: Some(transaction.fee_microtari),
+        funding_fee_attribution: Some(
+            "external_source_shared_not_deducted_from_mode_balance".to_string(),
+        ),
+    };
+    let mut resolved = config.clone();
+    resolved.funding.old_wallet = Some(record.clone());
+    resolved.funding.new_wallet = Some(record.clone());
+    resolved.funding.payment_processor = Some(record);
+    resolved.validate()?;
+    Ok(resolved)
 }
 
 fn validate_prefunding_b0_metrics(profile: &ResultProfile) -> anyhow::Result<()> {
@@ -502,6 +728,9 @@ fn validate_prefunding_b0_metrics(profile: &ResultProfile) -> anyhow::Result<()>
                 || metrics["scan_reached_tip"] != true
                 || metrics["tip_lag_blocks"] != 0
                 || metrics["tip_lag_tolerance_blocks"] != 0
+                || metrics["H_tip_target_hash"].as_str().is_none()
+                || metrics["H_tip_completion"].as_u64().is_none()
+                || metrics["H_tip_completion_hash"].as_str().is_none()
             {
                 bail!("pre-funding B0 exact empty-tip verification failed for {label}");
             }
@@ -524,38 +753,6 @@ fn validate_prefunding_b0_metrics(profile: &ResultProfile) -> anyhow::Result<()>
             {
                 bail!("pre-funding B0 repetition accounting failed for {label}");
             }
-        }
-    }
-    Ok(())
-}
-
-fn reset_enabled_mode_dirs(config: &Config, yes: bool) -> anyhow::Result<()> {
-    if !yes {
-        bail!("--fresh-data-dir deletes enabled mode data dirs; pass --yes to confirm");
-    }
-    let mut dirs = Vec::new();
-    if config.benchmark.mode1_live_topology {
-        dirs.push(config.paths.data_dir.join("old-wallet-console"));
-    }
-    if (config.benchmark.mode2_live_scenarios || config.benchmark.mode2_send_smoke)
-        && let Some(parent) = config.modes.new_wallet_database.parent()
-    {
-        dirs.push(parent.to_path_buf());
-    }
-    if config.benchmark.mode3_live_topology {
-        dirs.push(config.paths.data_dir.join("payment-processor"));
-        dirs.push(config.paths.data_dir.join("payment-receiver"));
-        dirs.push(
-            config
-                .paths
-                .data_dir
-                .join("payment-processor-console-wallet"),
-        );
-    }
-    for dir in dirs {
-        if dir.exists() {
-            println!("removing fresh data dir {}", dir.display());
-            fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
         }
     }
     Ok(())
@@ -755,6 +952,33 @@ fn check_live_wallet_identities(
     Ok(())
 }
 
+fn check_payment_processor_pristine(config: &Config) -> anyhow::Result<()> {
+    let signer = payment_processor::payment_processor_signer_db_path(config);
+    if signer.exists() {
+        bail!(
+            "payment-processor signer state already exists at {}; use a new candidate namespace",
+            signer.display()
+        );
+    }
+    let database = payment_processor::payment_processor_db_path(config);
+    if !database.exists() {
+        return Ok(());
+    }
+    let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    for table in ["payment_batches", "payments", "events"] {
+        if table_exists(&connection, table)? {
+            let count: i64 =
+                connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })?;
+            if count != 0 {
+                bail!("payment-processor operational table {table} contains {count} stale row(s)");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_minotari_wallet_identity(
     db_path: &Path,
     expected_fingerprint_hex: &str,
@@ -814,6 +1038,77 @@ struct FundingOutputProof {
     height: u64,
 }
 
+#[cfg(feature = "live-minotari")]
+async fn check_endpoint_authority(config: &Config) -> anyhow::Result<()> {
+    check_local_node_process_identity(config)?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let selected = fetch_chain_tip(&client, &config.network.base_node_http_url).await?;
+    let authority = fetch_chain_tip(&client, &config.network.authority_http_url).await?;
+    if !selected.is_synced || !authority.is_synced {
+        bail!("selected and authority endpoints must both report is_synced=true");
+    }
+    if selected.pruning_horizon != 0 {
+        bail!("selected scan endpoint must be archival (pruning_horizon=0)");
+    }
+    if selected.height.abs_diff(authority.height) > config.benchmark.c_min {
+        bail!("selected scan endpoint is stale relative to the authority endpoint");
+    }
+    let finalized_height = selected
+        .height
+        .min(authority.height)
+        .saturating_sub(config.benchmark.c_min);
+    let selected_hash = fetch_header_hash(
+        &client,
+        &config.network.base_node_http_url,
+        finalized_height,
+    )
+    .await?;
+    let authority_hash = fetch_header_hash(
+        &client,
+        &config.network.authority_http_url,
+        finalized_height,
+    )
+    .await?;
+    if selected_hash != authority_hash {
+        bail!("selected and authority endpoints disagree at finalized height {finalized_height}");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "live-minotari")]
+fn check_local_node_process_identity(config: &Config) -> anyhow::Result<()> {
+    let endpoint = url::Url::parse(&config.network.base_node_http_url)?;
+    let port = endpoint
+        .port_or_known_default()
+        .context("local base-node endpoint has no port")?;
+    let output = std::process::Command::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .output()
+        .context("querying local base-node listener with lsof")?;
+    if !output.status.success() {
+        bail!("no process is listening on the configured local base-node port {port}");
+    }
+    let pid = String::from_utf8(output.stdout)?
+        .lines()
+        .next()
+        .context("lsof returned no local base-node listener PID")?
+        .parse::<u32>()?;
+    let mut system = System::new_all();
+    system.refresh_all();
+    let executable = system
+        .process(Pid::from_u32(pid))
+        .and_then(|process| process.exe())
+        .context("could not resolve the local base-node listener executable")?;
+    if sha256_file(executable)? != sha256_file(&config.paths.minotari_node)? {
+        bail!(
+            "process listening on local base-node port {port} is not the build-manifest minotari_node"
+        );
+    }
+    Ok(())
+}
+
 async fn check_selected_chain_readiness(
     config: &Config,
     paths: &LiveWalletPaths,
@@ -837,6 +1132,41 @@ async fn check_selected_chain_readiness(
             "selected base-node tip hash has {} bytes, expected 32",
             tip.hash.len()
         );
+    }
+    let authority_tip = fetch_chain_tip(&client, &config.network.authority_http_url)
+        .await
+        .context("querying independent Esmeralda authority tip")?;
+    if !authority_tip.is_synced {
+        bail!("independent Esmeralda authority reports is_synced=false");
+    }
+    if tip.height.abs_diff(authority_tip.height) > config.benchmark.c_min {
+        bail!(
+            "selected base-node tip {} differs from authority tip {} by more than C_min={}",
+            tip.height,
+            authority_tip.height,
+            config.benchmark.c_min
+        );
+    }
+    let finalized_height = tip
+        .height
+        .min(authority_tip.height)
+        .saturating_sub(config.benchmark.c_min);
+    let selected_finalized_hash = fetch_header_hash(
+        &client,
+        &config.network.base_node_http_url,
+        finalized_height,
+    )
+    .await
+    .context("querying selected base-node finalized header")?;
+    let authority_finalized_hash = fetch_header_hash(
+        &client,
+        &config.network.authority_http_url,
+        finalized_height,
+    )
+    .await
+    .context("querying authority finalized header")?;
+    if selected_finalized_hash != authority_finalized_hash {
+        bail!("selected base node and authority disagree at finalized height {finalized_height}");
     }
 
     let checks = [
@@ -911,11 +1241,11 @@ async fn check_selected_chain_readiness(
         }
         match read_scanned_height(db_path) {
             Ok(scanned_height)
-                if scanned_height.saturating_add(config.settle_wait_blocks()) >= tip.height => {}
+                if scanned_height.saturating_add(config.benchmark.c_min) >= tip.height => {}
             Ok(scanned_height) => errors.push(format!(
-                "{label}: scanner height {scanned_height} is stale relative to selected-chain tip {} (allowed lag settle_wait_blocks={})",
+                "{label}: scanner height {scanned_height} is stale relative to selected-chain tip {} (allowed lag C_min={})",
                 tip.height,
-                config.settle_wait_blocks()
+                config.benchmark.c_min
             )),
             Err(error) => errors.push(format!("{label}: scanner-height proof failed: {error:#}")),
         }
@@ -924,10 +1254,13 @@ async fn check_selected_chain_readiness(
         bail!("selected-chain preflight failed:\n{}", errors.join("\n"));
     }
     println!(
-        "selected-chain proof PASS: tip={} hash={} pruning_horizon={} is_synced=true",
+        "selected-chain proof PASS: tip={} hash={} pruning_horizon={} authority_tip={} finalized_height={} finalized_hash={} is_synced=true",
         tip.height,
         hex::encode(tip.hash),
-        tip.pruning_horizon
+        tip.pruning_horizon,
+        authority_tip.height,
+        finalized_height,
+        hex::encode(selected_finalized_hash)
     );
     Ok(())
 }
@@ -1127,9 +1460,14 @@ fn ensure_runtime_paths_are_absolute(config: &Config) -> anyhow::Result<()> {
             "paths.minotari_binary",
             config.paths.minotari_binary.as_path(),
         ),
+        ("paths.minotari_node", config.paths.minotari_node.as_path()),
         (
             "paths.payment_processor_binary",
             config.paths.payment_processor_binary.as_path(),
+        ),
+        (
+            "paths.build_manifest",
+            config.paths.build_manifest.as_path(),
         ),
         (
             "modes.new_wallet_database",
@@ -1292,6 +1630,89 @@ fn check_binary(path: &Path, label: &str) -> anyhow::Result<()> {
     }
     if !path.is_absolute() {
         bail!("{label} binary path must be absolute: {}", path.display());
+    }
+    Ok(())
+}
+
+fn verify_build_manifest(config: &Config) -> anyhow::Result<()> {
+    let bytes = fs::read(&config.paths.build_manifest).with_context(|| {
+        format!(
+            "reading build manifest {} (rerun both fetch scripts)",
+            config.paths.build_manifest.display()
+        )
+    })?;
+    let manifest: BuildManifest =
+        serde_json::from_slice(&bytes).context("parsing build manifest")?;
+    if manifest.schema_version != 1 {
+        bail!(
+            "unsupported build manifest schema {}",
+            manifest.schema_version
+        );
+    }
+    let checks = [
+        (
+            "minotari",
+            config.paths.minotari_binary.as_path(),
+            config.versions.minotari_cli_rev.as_str(),
+        ),
+        (
+            "minotari_console_wallet",
+            config.paths.minotari_console_wallet.as_path(),
+            config.versions.tari_console_wallet_rev.as_str(),
+        ),
+        (
+            "minotari_payment_processor",
+            config.paths.payment_processor_binary.as_path(),
+            config.versions.payment_processor_rev.as_str(),
+        ),
+        (
+            "minotari_node",
+            config.paths.minotari_node.as_path(),
+            config.versions.base_node_rev.as_str(),
+        ),
+    ];
+    for (name, path, revision) in checks {
+        let artifact = manifest
+            .artifacts
+            .get(name)
+            .with_context(|| format!("build manifest is missing {name}"))?;
+        if artifact.source_revision != revision {
+            bail!(
+                "build manifest {name} revision {} does not match configured {revision}",
+                artifact.source_revision
+            );
+        }
+        let actual = sha256_file(path)?;
+        if actual != artifact.sha256 {
+            bail!("{name} SHA-256 does not match the build manifest");
+        }
+    }
+    let patch_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("patches/payment-processor-fee-rate.patch");
+    if sha256_file(&patch_path)? != manifest.payment_processor_patch_sha256 {
+        bail!("payment-processor patch SHA-256 does not match the build manifest");
+    }
+    println!("build manifest PASS: revisions, patch, and runtime binary SHA-256 values match");
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let bytes =
+        fs::read(path).with_context(|| format!("reading {} for SHA-256", path.display()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn check_harness_worktree_clean() -> anyhow::Result<()> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .context("checking harness git worktree")?;
+    if !output.status.success() {
+        bail!("could not verify the harness git worktree state");
+    }
+    if !output.stdout.is_empty() {
+        bail!("canonical candidate commands require a clean git worktree");
     }
     Ok(())
 }
@@ -1485,6 +1906,28 @@ mod tests {
         assert!(error.contains("does not match"));
     }
 
+    #[test]
+    fn payment_processor_preflight_rejects_stale_operational_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.paths.data_dir = dir.path().to_path_buf();
+        let database = payment_processor::payment_processor_db_path(&config);
+        fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let connection = Connection::open(database).unwrap();
+        connection
+            .execute("CREATE TABLE payment_batches (id TEXT)", [])
+            .unwrap();
+        connection
+            .execute("INSERT INTO payment_batches (id) VALUES ('stale')", [])
+            .unwrap();
+        drop(connection);
+
+        let error = check_payment_processor_pristine(&config)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("stale row"));
+    }
+
     #[tokio::test]
     async fn run_profile_invokes_strict_preflight_before_writing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1505,8 +1948,6 @@ mod tests {
         let error = run_profile(
             &config,
             &profile,
-            false,
-            false,
             Path::new("missing-b0.json"),
             Path::new("missing-s0.json"),
         )

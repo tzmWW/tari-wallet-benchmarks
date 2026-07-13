@@ -3,7 +3,9 @@ use std::{collections::BTreeSet, fs, path::Path};
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
 
-use super::{ProfileKind, REFERENCE_BASE_NODE_REVISION, RESULT_SCHEMA_VERSION, ResultProfile};
+use super::{
+    CellStatus, ProfileKind, REFERENCE_BASE_NODE_REVISION, RESULT_SCHEMA_VERSION, ResultProfile,
+};
 use crate::{
     modes::{ModeName, ScenarioName},
     versions::TX_MINED_CONFIRMED_STATUS,
@@ -60,12 +62,14 @@ pub fn schema_document() -> Value {
             "base_node": {
                 "type": "object", "additionalProperties": false,
                 "required": [
-                    "endpoint", "configured_revision", "observed_version", "version_observable",
+                    "endpoint", "authority_endpoint", "configured_revision", "observed_version", "version_observable",
                     "tip_start_height", "tip_start_hash", "tip_end_height", "tip_end_hash",
-                    "pruning_horizon", "is_synced"
+                    "pruning_horizon", "is_synced", "authority_tip_start_height",
+                    "authority_tip_start_hash", "authority_tip_end_height", "authority_tip_end_hash"
                 ],
                 "properties": {
                     "endpoint": {"type": "string", "minLength": 1},
+                    "authority_endpoint": {"type": "string", "minLength": 1},
                     "configured_revision": {"type": "string", "minLength": 1},
                     "observed_version": {"$ref": "#/$defs/nullable_string"},
                     "version_observable": {"type": "boolean"},
@@ -74,12 +78,16 @@ pub fn schema_document() -> Value {
                     "tip_end_height": {"$ref": "#/$defs/nullable_integer"},
                     "tip_end_hash": {"$ref": "#/$defs/nullable_string"},
                     "pruning_horizon": {"$ref": "#/$defs/nullable_integer"},
-                    "is_synced": {"type": ["boolean", "null"]}
+                    "is_synced": {"type": ["boolean", "null"]},
+                    "authority_tip_start_height": {"$ref": "#/$defs/nullable_integer"},
+                    "authority_tip_start_hash": {"$ref": "#/$defs/nullable_string"},
+                    "authority_tip_end_height": {"$ref": "#/$defs/nullable_integer"},
+                    "authority_tip_end_hash": {"$ref": "#/$defs/nullable_string"}
                 }
             },
             "environment": {
                 "type": "object", "additionalProperties": false,
-                "required": ["os", "cpu_brand", "physical_cores", "total_memory_bytes", "base_node_network_path"],
+                "required": ["os", "cpu_brand", "physical_cores", "total_memory_bytes", "base_node_network_path", "authority_network_path"],
                 "properties": {
                     "os": {"type": "string"},
                     "cpu_brand": {"type": "string"},
@@ -88,7 +96,10 @@ pub fn schema_document() -> Value {
                     "disk_kind": {"type": "string"},
                     "disk_name": {"type": "string"},
                     "base_node_host": {"type": "string"},
-                    "base_node_network_path": {"enum": ["local", "remote", "unknown"]}
+                    "base_node_network_path": {"enum": ["local", "remote", "unknown"]},
+                    "authority_host": {"type": "string"},
+                    "authority_network_path": {"enum": ["local", "remote", "unknown"]},
+                    "mode1_base_node_service_peer": {"type": "string"}
                 }
             },
             "config": {
@@ -96,7 +107,8 @@ pub fn schema_document() -> Value {
                 "required": [
                     "A_fund", "C_min", "volume_target", "doubling_rounds",
                     "fanout_outputs_per_tx", "concurrent_batches", "S4_T_budget_secs",
-                    "S5_M", "S5_K", "fee_rate", "repetitions", "scan_repetitions"
+                    "S5_M", "S5_K", "fee_rate", "scan_repetitions",
+                    "protocol_fingerprint"
                 ],
                 "properties": {
                     "A_fund": {"type": "string"},
@@ -112,8 +124,8 @@ pub fn schema_document() -> Value {
                     "S5_M": {"type": "integer", "minimum": 1},
                     "S5_K": {"type": "integer", "minimum": 1},
                     "fee_rate": {"type": "string"},
-                    "repetitions": {"type": "integer", "minimum": 1},
-                    "scan_repetitions": {"type": "integer", "minimum": 1}
+                    "scan_repetitions": {"type": "integer", "minimum": 1},
+                    "protocol_fingerprint": {"type": "string", "minLength": 64}
                 },
                 "additionalProperties": true
             },
@@ -129,7 +141,9 @@ pub fn schema_document() -> Value {
                     "construction_ms": {"$ref": "#/$defs/nullable_integer"},
                     "broadcast_to_mempool_ms": {"$ref": "#/$defs/nullable_integer"},
                     "broadcast_to_confirmed_at_c_min_ms": {"$ref": "#/$defs/nullable_integer"},
-                    "tip_height_at_confirmation": {"$ref": "#/$defs/nullable_integer"}
+                    "tip_height_at_confirmation": {"$ref": "#/$defs/nullable_integer"},
+                    "shared_funding_fee_microtari": {"$ref": "#/$defs/nullable_integer"},
+                    "funding_fee_attribution": {"$ref": "#/$defs/nullable_string"}
                 }
             },
             "funding": {
@@ -176,23 +190,38 @@ pub fn schema_document() -> Value {
             "transaction_observation": {
                 "type": "object", "additionalProperties": false,
                 "required": [
-                    "transaction_id", "construction_ms", "submission_ms", "mempool_available", "mempool_reason",
-                    "confirmation_ms", "fee_microtari", "terminal_outcome", "error",
-                    "mined_height", "tip_start_height", "tip_end_height"
+                    "transaction_id", "attempt_index", "batch_index", "submit_offset_ms",
+                    "construction_complete_offset_ms", "construction_ms", "submission_ms",
+                    "mempool_available", "mempool_reason", "confirmation_ms",
+                    "confirmation_timing_reason", "fee_microtari", "terminal_outcome", "error",
+                    "mined_height", "tip_start_height", "tip_end_height", "input_count",
+                    "total_output_count", "payment_output_count", "change_output_count",
+                    "output_commitments", "configured_batch"
                 ],
                 "properties": {
                     "transaction_id": {"$ref": "#/$defs/nullable_string"},
+                    "attempt_index": {"$ref": "#/$defs/nullable_integer"},
+                    "batch_index": {"$ref": "#/$defs/nullable_integer"},
+                    "submit_offset_ms": {"$ref": "#/$defs/nullable_integer"},
+                    "construction_complete_offset_ms": {"$ref": "#/$defs/nullable_integer"},
                     "construction_ms": {"$ref": "#/$defs/nullable_integer"},
                     "submission_ms": {"$ref": "#/$defs/nullable_integer"},
                     "mempool_available": {"type": ["boolean", "null"]},
                     "mempool_reason": {"$ref": "#/$defs/nullable_string"},
                     "confirmation_ms": {"$ref": "#/$defs/nullable_integer"},
+                    "confirmation_timing_reason": {"$ref": "#/$defs/nullable_string"},
                     "fee_microtari": {"$ref": "#/$defs/nullable_integer"},
-                    "terminal_outcome": {"enum": ["confirmed", "rejected", "timed_out", "unavailable"]},
+                    "terminal_outcome": {"enum": ["confirmed", "rejected", "stalled", "timed_out", "unavailable"]},
                     "error": {"$ref": "#/$defs/nullable_string"},
                     "mined_height": {"$ref": "#/$defs/nullable_integer"},
                     "tip_start_height": {"$ref": "#/$defs/nullable_integer"},
-                    "tip_end_height": {"$ref": "#/$defs/nullable_integer"}
+                    "tip_end_height": {"$ref": "#/$defs/nullable_integer"},
+                    "input_count": {"$ref": "#/$defs/nullable_integer"},
+                    "total_output_count": {"$ref": "#/$defs/nullable_integer"},
+                    "payment_output_count": {"$ref": "#/$defs/nullable_integer"},
+                    "change_output_count": {"$ref": "#/$defs/nullable_integer"},
+                    "output_commitments": {"type": "array", "items": {"type": "string"}},
+                    "configured_batch": {"$ref": "#/$defs/nullable_integer"}
                 }
             },
             "scenario": {
@@ -322,6 +351,9 @@ pub fn validate_profile(profile: &ResultProfile, _submission: bool) -> anyhow::R
     validate_identity(profile)?;
     validate_transactions(profile)?;
     validate_status_pairs(&document)?;
+    if profile.computed_deltas != super::computed_deltas(profile) {
+        bail!("computed_deltas do not match recomputed source scenario metrics");
+    }
     if profile.profile_kind == ProfileKind::Checkpoint && profile.run_complete {
         bail!("checkpoint profile must have run_complete=false");
     }
@@ -484,7 +516,6 @@ fn validate_reference_configuration(
         ("S4_T_budget_secs", json!(900)),
         ("S5_M", json!(100)),
         ("S5_K", json!(10)),
-        ("repetitions", json!(1)),
     ];
     for (key, expected) in exact {
         if config[key] != expected {
@@ -503,8 +534,12 @@ fn validate_reference_configuration(
     validate_cross_cutting_scenario_metrics(document)?;
     validate_scenario_specific_metrics(document)?;
     for (mode, scenarios) in mode_scenarios(document)? {
-        if scenarios["S1"]["outcome_status"] != "success" {
-            bail!("submission requires canonical successful S1 for {mode}");
+        for required in ["B0", "S0"] {
+            if scenarios[required]["execution_status"] != "completed"
+                || scenarios[required]["outcome_status"] != "success"
+            {
+                bail!("submission requires successful {required} for {mode}");
+            }
         }
         for (scenario, cell) in scenarios {
             if cell["execution_status"] == "not_applicable" {
@@ -562,6 +597,19 @@ fn validate_reference_configuration(
     if profile.harness_git_commit == "unknown" {
         bail!("submission profile must identify the harness git commit");
     }
+    if !profile.config["build_manifest"].is_object()
+        || !profile.config["seed_fingerprints"].is_object()
+    {
+        bail!("submission profile must record build-manifest and seed fingerprints");
+    }
+    if profile.environment.authority_network_path != "remote" {
+        bail!("submission requires an independent remote Esmeralda authority endpoint");
+    }
+    if profile.environment.base_node_network_path != "local"
+        || profile.environment.mode1_base_node_service_peer.is_none()
+    {
+        bail!("submission requires an archival local scan endpoint and Mode 1 P2P service peer");
+    }
     if profile.base_node.configured_revision != REFERENCE_BASE_NODE_REVISION {
         bail!(
             "submission base-node compatibility reference must be {REFERENCE_BASE_NODE_REVISION}"
@@ -580,6 +628,18 @@ fn validate_reference_configuration(
         || profile
             .base_node
             .tip_end_hash
+            .as_deref()
+            .is_none_or(str::is_empty)
+        || profile.base_node.authority_tip_start_height.is_none()
+        || profile
+            .base_node
+            .authority_tip_start_hash
+            .as_deref()
+            .is_none_or(str::is_empty)
+        || profile.base_node.authority_tip_end_height.is_none()
+        || profile
+            .base_node
+            .authority_tip_end_hash
             .as_deref()
             .is_none_or(str::is_empty)
     {
@@ -622,11 +682,21 @@ fn validate_reference_configuration(
                 mode.as_str()
             );
         }
-        if !profile
-            .chain_verification
-            .verified_transactions
-            .iter()
-            .any(|tx| tx.mode == mode.as_str() && tx.scenario == "S1")
+        if funding.shared_funding_fee_microtari.is_none()
+            || funding.funding_fee_attribution.as_deref()
+                != Some("external_source_shared_not_deducted_from_mode_balance")
+        {
+            bail!(
+                "submission funding for {} is missing shared fee attribution",
+                mode.as_str()
+            );
+        }
+        if profile.modes[mode.as_str()].scenarios["S1"].status == CellStatus::Ok
+            && !profile
+                .chain_verification
+                .verified_transactions
+                .iter()
+                .any(|tx| tx.mode == mode.as_str() && tx.scenario == "S1")
         {
             bail!(
                 "successful submission S1 for {} has no independently verified transaction",
@@ -703,6 +773,9 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
             || b0["max_height"] != b0["H_tip_end"]
             || b0["tip_lag_tolerance_blocks"] != 0
             || b0["scan_reached_tip"] != true
+            || b0["H_tip_target_hash"].as_str().is_none()
+            || b0["H_tip_completion"].as_u64().is_none()
+            || b0["H_tip_completion_hash"].as_str().is_none()
         {
             bail!("submission B0 exact empty-tip contract failed for {mode}");
         }
@@ -720,77 +793,186 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
         }
 
         let s1_metrics = &scenarios["S1"]["repetitions"][0]["metrics"];
-        for (round_index, tx_count, outputs_per_tx, target) in expected_rounds {
-            let key = format!("round_{round_index}");
-            let direct = s1_metrics.get(&key).filter(|value| !value.is_null());
-            let nested = s1_metrics["extra"]
-                .get(&key)
-                .filter(|value| !value.is_null());
-            let array = s1_metrics["rounds"].as_array().and_then(|rounds| {
-                rounds
-                    .iter()
-                    .find(|round| round["round_index"] == round_index)
-            });
-            let plan = s1_metrics["extra"]["rounds"].as_array().and_then(|rounds| {
-                rounds
-                    .iter()
-                    .find(|round| round["round_index"] == round_index)
-            });
-            let observed = direct.or(nested).or(array).with_context(|| {
-                format!("submission {mode}/S1 missing round {round_index} metrics")
-            })?;
-            let shape = array
-                .or(plan)
-                .or(direct)
-                .or(nested)
-                .expect("observed above");
-            if shape["tx_count"] != tx_count
-                || shape["outputs_per_tx"] != outputs_per_tx
-                || shape["target_utxos_after"] != target
-                || observed["wall_ms"].as_u64().is_none()
-                || observed["failure_count"] != 0
-                || observed["fee_only_balance_delta_ok"] != true
+        if scenarios["S1"]["outcome_status"] == "success" {
+            for (round_index, tx_count, outputs_per_tx, target) in expected_rounds {
+                let key = format!("round_{round_index}");
+                let direct = s1_metrics.get(&key).filter(|value| !value.is_null());
+                let nested = s1_metrics["extra"]
+                    .get(&key)
+                    .filter(|value| !value.is_null());
+                let array = s1_metrics["rounds"].as_array().and_then(|rounds| {
+                    rounds
+                        .iter()
+                        .find(|round| round["round_index"] == round_index)
+                });
+                let plan = s1_metrics["extra"]["rounds"].as_array().and_then(|rounds| {
+                    rounds
+                        .iter()
+                        .find(|round| round["round_index"] == round_index)
+                });
+                let observed = direct.or(nested).or(array).with_context(|| {
+                    format!("submission {mode}/S1 missing round {round_index} metrics")
+                })?;
+                let shape = array
+                    .or(plan)
+                    .or(direct)
+                    .or(nested)
+                    .expect("observed above");
+                if shape["tx_count"] != tx_count
+                    || shape["outputs_per_tx"] != outputs_per_tx
+                    || shape["target_utxos_after"] != target
+                    || observed["wall_ms"].as_u64().is_none()
+                    || observed["failure_count"] != 0
+                    || observed["fee_only_balance_delta_ok"] != true
+                {
+                    bail!("submission {mode}/S1 round {round_index} contract failed");
+                }
+            }
+            validate_transaction_observations(mode, "S1", s1_metrics)?;
+            if s1_metrics["transaction_observations"]
+                .as_array()
+                .is_none_or(|observations| observations.len() != 127)
             {
-                bail!("submission {mode}/S1 round {round_index} contract failed");
+                bail!(
+                    "submission {mode}/S1 must contain one observation for each of 127 transactions"
+                );
+            }
+            let s1_observations = s1_metrics["transaction_observations"]
+                .as_array()
+                .expect("checked above");
+            let two_output = s1_observations
+                .iter()
+                .filter(|observation| {
+                    observation["input_count"] == 1 && observation["total_output_count"] == 2
+                })
+                .count();
+            let eight_output = s1_observations
+                .iter()
+                .filter(|observation| {
+                    observation["input_count"] == 1 && observation["total_output_count"] == 8
+                })
+                .count();
+            if two_output != 63 || eight_output != 64 {
+                bail!(
+                    "submission {mode}/S1 does not prove 63 one-to-two and 64 one-to-eight transactions"
+                );
+            }
+        } else {
+            validate_transaction_observations(mode, "S1", s1_metrics)?;
+        }
+
+        if scenarios["S4"]["execution_status"] == "completed" {
+            let s4 = &scenarios["S4"]["repetitions"][0]["metrics"];
+            let batch_summaries = s4["batch_summaries"].as_array();
+            if batch_summaries.is_none()
+                || s4["max_serialization_gap_ms"].as_u64().is_none()
+                || s4["double_selection_rejections"].as_u64().is_none()
+            {
+                bail!("submission {mode}/S4 is missing concurrency batch metrics");
+            }
+            let batch_summaries = batch_summaries.expect("checked above");
+            if batch_summaries.len() != REFERENCE_S4_RAMP.len()
+                || batch_summaries
+                    .iter()
+                    .zip(REFERENCE_S4_RAMP)
+                    .any(|(summary, expected)| {
+                        summary["configured_batch"].as_u64() != Some(expected)
+                            || summary
+                                .get("attempted")
+                                .or_else(|| summary.get("attempted_batches"))
+                                .and_then(Value::as_u64)
+                                != Some(expected)
+                            || summary["wall_ms"].as_u64().is_none()
+                    })
+            {
+                bail!("submission {mode}/S4 does not contain the exact 8,16,32,64,128 arms");
+            }
+            validate_transaction_observations(mode, "S4", s4)?;
+            if s4["transaction_observations"]
+                .as_array()
+                .is_none_or(|observations| observations.len() != 248)
+            {
+                bail!("submission {mode}/S4 must contain one observation for each of 248 attempts");
+            }
+            let observations = s4["transaction_observations"]
+                .as_array()
+                .expect("checked above");
+            for configured_batch in REFERENCE_S4_RAMP {
+                if observations
+                    .iter()
+                    .filter(|observation| {
+                        observation["configured_batch"].as_u64() == Some(configured_batch)
+                    })
+                    .count()
+                    != configured_batch as usize
+                {
+                    bail!(
+                        "submission {mode}/S4 observations are not bound to configured arm {configured_batch}"
+                    );
+                }
             }
         }
-        validate_transaction_observations(mode, "S1", s1_metrics)?;
 
-        let s4 = &scenarios["S4"]["repetitions"][0]["metrics"];
-        if s4["batch_summaries"].as_array().is_none()
-            || s4["max_serialization_gap_ms"].as_u64().is_none()
-            || s4["double_selection_rejections"].as_u64().is_none()
-        {
-            bail!("submission {mode}/S4 is missing concurrency batch metrics");
-        }
-        validate_transaction_observations(mode, "S4", s4)?;
-
-        let s5 = &scenarios["S5"]["repetitions"][0]["metrics"];
-        let set = s5
-            .get("recipient_set")
-            .or_else(|| s5["extra"].get("recipient_set"))
-            .and_then(Value::as_array)
-            .with_context(|| format!("submission {mode}/S5 missing recipient_set"))?;
-        if set.len() != 100
-            || recipient_set
-                .as_ref()
-                .is_some_and(|expected| expected != set)
-        {
-            bail!("submission S5 recipient set is not the same 100 addresses for every mode");
-        }
-        recipient_set = Some(set.clone());
-        if s5
-            .get("unspent_before")
-            .or_else(|| s5["extra"].get("unspent_before"))
-            .is_none()
-            || s5
-                .get("balance_before_microtari")
-                .or_else(|| s5["extra"].get("balance_before_microtari"))
+        if scenarios["S5"]["execution_status"] == "completed" {
+            let s5 = &scenarios["S5"]["repetitions"][0]["metrics"];
+            let set = s5
+                .get("recipient_set")
+                .or_else(|| s5["extra"].get("recipient_set"))
+                .and_then(Value::as_array)
+                .with_context(|| format!("submission {mode}/S5 missing recipient_set"))?;
+            if set.len() != 100
+                || recipient_set
+                    .as_ref()
+                    .is_some_and(|expected| expected != set)
+            {
+                bail!("submission S5 recipient set is not the same 100 addresses for every mode");
+            }
+            recipient_set = Some(set.clone());
+            if s5
+                .get("unspent_before")
+                .or_else(|| s5["extra"].get("unspent_before"))
                 .is_none()
-        {
-            bail!("submission {mode}/S5 missing disclosed post-S4 starting state");
+                || s5
+                    .get("balance_before_microtari")
+                    .or_else(|| s5["extra"].get("balance_before_microtari"))
+                    .is_none()
+            {
+                bail!("submission {mode}/S5 missing disclosed post-S4 starting state");
+            }
+            validate_transaction_observations(mode, "S5", s5)?;
+            let expected_s5_transactions = if mode == "payment_processor" { 10 } else { 100 };
+            if s5["transaction_observations"]
+                .as_array()
+                .is_none_or(|observations| observations.len() != expected_s5_transactions)
+            {
+                bail!("submission {mode}/S5 has the wrong transaction observation count");
+            }
+            let expected_payment_outputs = if mode == "payment_processor" { 10 } else { 1 };
+            if s5["transaction_observations"]
+                .as_array()
+                .expect("checked above")
+                .iter()
+                .filter(|observation| observation["terminal_outcome"] == "confirmed")
+                .any(|observation| {
+                    let total = observation["total_output_count"].as_u64();
+                    let payments = observation["payment_output_count"].as_u64();
+                    let change = observation["change_output_count"].as_u64();
+                    observation["input_count"] != 1
+                        || observation["payment_output_count"] != expected_payment_outputs
+                        || total.is_none()
+                        || change.is_none()
+                        || change.is_some_and(|count| count > 1)
+                        || total
+                            != payments
+                                .zip(change)
+                                .map(|(payments, change)| payments + change)
+                })
+            {
+                bail!(
+                    "submission {mode}/S5 confirmed transaction has the wrong input/payment-output shape"
+                );
+            }
         }
-        validate_transaction_observations(mode, "S5", s5)?;
 
         for scenario in ["S2", "S3", "S6", "S7"] {
             let cell = &scenarios[scenario];
@@ -799,6 +981,21 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
             }
             for run in cell["repetitions"].as_array().expect("schema checked") {
                 let metrics = &run["metrics"];
+                if run["outcome_status"] != "success" {
+                    if metrics["H_tip_end"].as_u64().is_none()
+                        || metrics["H_tip_target_hash"].as_str().is_none()
+                        || metrics["max_height"].as_u64().is_none()
+                        || !metrics.as_object().is_some_and(|metrics| {
+                            metrics.contains_key("peak_rss_bytes")
+                                && metrics.contains_key("peak_cpu_percent")
+                        })
+                    {
+                        bail!(
+                            "submission {mode}/{scenario} failed scan is missing target, final progress, or resource evidence"
+                        );
+                    }
+                    continue;
+                }
                 if metrics["birthday"].as_u64()
                     != Some(if matches!(scenario, "S2" | "S6") {
                         0
@@ -808,6 +1005,10 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
                     || metrics["max_height"] != metrics["H_tip_end"]
                     || metrics["tip_lag_tolerance_blocks"] != 0
                     || metrics["history_matches_expected"] != true
+                    || metrics["history_identities_match_expected"] != true
+                    || metrics["H_tip_target_hash"].as_str().is_none()
+                    || metrics["H_tip_completion"].as_u64().is_none()
+                    || metrics["H_tip_completion_hash"].as_str().is_none()
                 {
                     bail!("submission {mode}/{scenario} scan contract failed");
                 }
@@ -843,11 +1044,22 @@ fn validate_transaction_observations(
         {
             bail!("submission {mode}/{scenario} transaction is missing construction time");
         }
+        if scenario == "S4"
+            && (observation["submit_offset_ms"].as_u64().is_none()
+                || observation["construction_complete_offset_ms"]
+                    .as_u64()
+                    .is_none())
+        {
+            bail!("submission {mode}/{scenario} attempt is missing common-clock offsets");
+        }
         if outcome == "confirmed"
             && (observation["confirmation_ms"].as_u64().is_none()
                 || observation["fee_microtari"].as_u64().is_none()
                 || observation["mined_height"].as_u64().is_none()
-                || observation["tip_end_height"].as_u64().is_none())
+                || observation["tip_end_height"].as_u64().is_none()
+                || observation["output_commitments"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty))
         {
             bail!(
                 "submission {mode}/{scenario} confirmed transaction is missing timing/fee/tip evidence"
@@ -907,10 +1119,10 @@ fn validate_s5_comparisons(document: &Value) -> anyhow::Result<()> {
 
 fn arm_complete(arms: &Value, mode: &str, arm: &str) -> bool {
     let arm = &arms[mode][arm];
-    let recipients = arm["recipient_count"].as_u64();
-    recipients.is_some_and(|count| count > 0)
-        && arm["success_count"].as_u64() == recipients
-        && arm["failure_count"].as_u64() == Some(0)
+    arm["recipient_count"]
+        .as_u64()
+        .is_some_and(|count| count > 0)
+        && arm["complete"] == true
 }
 
 fn mode_scenarios(
@@ -1142,5 +1354,214 @@ mod tests {
             serde_json::to_value(crate::result_profile::OutcomeStatus::Success).unwrap(),
             json!("success")
         );
+    }
+
+    #[test]
+    fn schema_accepts_realistic_s1_s4_s5_transaction_observations() {
+        let mut document = profile_document();
+        let observation = json!({
+            "transaction_id": "tx-1",
+            "attempt_index": 1,
+            "batch_index": null,
+            "submit_offset_ms": 2,
+            "construction_complete_offset_ms": 7,
+            "construction_ms": 5,
+            "submission_ms": 3,
+            "mempool_available": true,
+            "mempool_reason": null,
+            "confirmation_ms": 40,
+            "confirmation_timing_reason": null,
+            "fee_microtari": 700,
+            "terminal_outcome": "confirmed",
+            "error": null,
+            "mined_height": 100,
+            "tip_start_height": 99,
+            "tip_end_height": 103,
+            "input_count": 1,
+            "total_output_count": 2,
+            "payment_output_count": 1,
+            "change_output_count": 1,
+            "output_commitments": ["commitment"],
+            "configured_batch": 8
+        });
+        for mode in ["old_wallet", "new_wallet", "payment_processor"] {
+            for scenario in ["S1", "S4", "S5"] {
+                document["modes"][mode]["scenarios"][scenario]["repetitions"] = json!([{
+                    "run": 1,
+                    "execution_status": "completed",
+                    "outcome_status": "success",
+                    "wall_ms": 50,
+                    "success_count": 1,
+                    "failure_count": 0,
+                    "fee_microtari": 700,
+                    "error": null,
+                    "metrics": {"transaction_observations": [observation.clone()]}
+                }]);
+            }
+        }
+        validate_schema(&document).unwrap();
+    }
+
+    #[test]
+    fn validation_recomputes_and_rejects_tampered_deltas() {
+        let mut document = profile_document();
+        document["computed_deltas"]["scan_deltas"]["old_wallet"]["t_scan_s6_over_b0"] =
+            json!(999.0);
+        let error = validate_document(&document, false).unwrap_err().to_string();
+        assert!(error.contains("computed_deltas"));
+    }
+
+    #[test]
+    fn realistic_submission_accepts_honest_wallet_failure_and_blocked_dependents() {
+        let mut config = Config::default();
+        config.network.base_node_http_url = "http://127.0.0.1:18142".to_string();
+        config.network.authority_http_url = "https://rpc.esmeralda.tari.com".to_string();
+        config.network.mode1_base_node_service_peer =
+            Some("abc::/ip4/127.0.0.1/tcp/18189".to_string());
+        config.benchmark.mode1_live_topology = true;
+        config.benchmark.mode2_live_scenarios = true;
+        config.benchmark.mode3_live_topology = true;
+        config.benchmark.live_fresh_scan_cells = true;
+        let funding = crate::config::FundingRecord {
+            amount: "10000 T".to_string(),
+            tx_id: "funding-tx".to_string(),
+            height: 100,
+            birthday: Some(1),
+            birthday_start_height: Some(90),
+            construction_ms: Some(1),
+            broadcast_to_mempool_ms: Some(2),
+            broadcast_to_confirmed_at_c_min_ms: Some(3),
+            tip_height_at_confirmation: Some(103),
+            shared_funding_fee_microtari: Some(700),
+            funding_fee_attribution: Some(
+                "external_source_shared_not_deducted_from_mode_balance".to_string(),
+            ),
+        };
+        config.funding.old_wallet = Some(funding.clone());
+        config.funding.new_wallet = Some(funding.clone());
+        config.funding.payment_processor = Some(funding);
+        let mut profile = ResultProfile::new(
+            &config,
+            env_capture::capture_for_network(
+                &config.network.base_node_http_url,
+                &config.network.authority_http_url,
+                config.network.mode1_base_node_service_peer.as_deref(),
+            ),
+        );
+        profile
+            .config
+            .insert("build_manifest".to_string(), json!({"schema_version": 1}));
+        profile.config.insert(
+            "seed_fingerprints".to_string(),
+            json!({"old_wallet": "a", "new_wallet": "b", "payment_processor": "c"}),
+        );
+        profile.completed_stages = REQUIRED_STAGES.iter().map(ToString::to_string).collect();
+        profile.base_node.tip_start_height = Some(100);
+        profile.base_node.tip_start_hash = Some("aa".repeat(32));
+        profile.base_node.tip_end_height = Some(103);
+        profile.base_node.tip_end_hash = Some("bb".repeat(32));
+        profile.base_node.authority_tip_start_height = Some(100);
+        profile.base_node.authority_tip_start_hash = Some("aa".repeat(32));
+        profile.base_node.authority_tip_end_height = Some(103);
+        profile.base_node.authority_tip_end_hash = Some("bb".repeat(32));
+        profile.base_node.pruning_horizon = Some(0);
+        profile.base_node.is_synced = Some(true);
+
+        for mode in ModeName::ALL {
+            let mut mode_profile = empty_mode_profile(mode, Some(format!("{mode:?}-address")));
+            mode_profile
+                .scenarios
+                .get_mut("B0")
+                .unwrap()
+                .record_repetition(crate::result_profile::Repetition {
+                    run: 1,
+                    status: CellStatus::Ok,
+                    wall_ms: Some(10),
+                    success_count: 1,
+                    failure_count: 0,
+                    fee_microtari: Some(0),
+                    error: None,
+                    metrics: Some(json!({
+                        "T_scan_ms": 10, "blocks_per_sec": 10.0,
+                        "H_tip_start": 100, "H_tip_end": 100,
+                        "H_tip_target_hash": "aa", "H_tip_completion": 101,
+                        "H_tip_completion_hash": "bb", "birthday": 0,
+                        "detected_outputs": 0, "spendable_outputs": 0,
+                        "available_microtari": 0, "history_transactions": 0,
+                        "max_height": 100, "tip_lag_blocks": 0,
+                        "tip_lag_tolerance_blocks": 0, "scan_reached_tip": true,
+                        "peak_rss_bytes": 1, "peak_cpu_percent": 1.0,
+                        "balance_delta_microtari": 0
+                    })),
+                });
+            mode_profile
+                .scenarios
+                .get_mut("S0")
+                .unwrap()
+                .record_repetition(crate::result_profile::Repetition {
+                    run: 1,
+                    status: CellStatus::Ok,
+                    wall_ms: Some(1),
+                    success_count: 1,
+                    failure_count: 0,
+                    fee_microtari: Some(0),
+                    error: None,
+                    metrics: Some(json!({"balance_delta_microtari": 0})),
+                });
+            mode_profile
+                .scenarios
+                .get_mut("S1")
+                .unwrap()
+                .record_repetition(crate::result_profile::Repetition {
+                    run: 1,
+                    status: CellStatus::Failed,
+                    wall_ms: Some(5),
+                    success_count: 0,
+                    failure_count: 1,
+                    fee_microtari: Some(0),
+                    error: Some("wallet rejected construction".to_string()),
+                    metrics: Some(json!({
+                        "balance_reconciliation_unavailable_reason": "wallet rejected construction",
+                        "transaction_observations": [{
+                            "transaction_id": null, "attempt_index": 1, "batch_index": null,
+                            "submit_offset_ms": 0, "construction_complete_offset_ms": 1,
+                            "construction_ms": null, "submission_ms": null,
+                            "mempool_available": null, "mempool_reason": "not submitted",
+                            "confirmation_ms": null, "confirmation_timing_reason": "not submitted",
+                            "fee_microtari": null, "terminal_outcome": "rejected",
+                            "error": "wallet rejected construction", "mined_height": null,
+                            "tip_start_height": 100, "tip_end_height": null,
+                            "input_count": null, "total_output_count": null,
+                            "payment_output_count": null, "change_output_count": null,
+                            "output_commitments": [], "configured_batch": null
+                        }]
+                    })),
+                });
+            for scenario in ["S2", "S3", "S4", "S5", "S6", "S7"] {
+                mode_profile
+                    .scenarios
+                    .get_mut(scenario)
+                    .unwrap()
+                    .record_repetition(crate::result_profile::Repetition {
+                        run: 1,
+                        status: CellStatus::Failed,
+                        wall_ms: Some(0),
+                        success_count: 0,
+                        failure_count: 1,
+                        fee_microtari: Some(0),
+                        error: Some("blocked by S1".to_string()),
+                        metrics: Some(json!({
+                            "blocked_prerequisite": true,
+                            "balance_reconciliation_unavailable_reason": "blocked by S1"
+                        })),
+                    });
+            }
+            profile
+                .modes
+                .insert(mode.as_str().to_string(), mode_profile);
+        }
+        profile.mark_final();
+        profile.refresh_computed_deltas();
+        profile.validate_submission().unwrap();
     }
 }

@@ -6,9 +6,6 @@ pub(super) fn pp_snapshot_is_terminal_for_summary(
     snapshot: &PaymentProcessorDbSnapshot,
     accepted_batches: u32,
 ) -> bool {
-    if snapshot.has_upstream_signing_or_broadcast_error() {
-        return true;
-    }
     let accepted_batches = usize::try_from(accepted_batches).unwrap_or(usize::MAX);
     snapshot.batches.len() >= accepted_batches
         && snapshot
@@ -28,9 +25,30 @@ pub(super) async fn annotate_mode3_payment_processor(
     let start = Instant::now();
     let topology = start_mode3_topology(config, pp_seed).await;
     match topology {
-        Ok(context) => {
-            record_mode3_s0(config, profile, &context, start.elapsed().as_millis());
+        Ok(mut context) => {
+            let s0_ok = record_mode3_s0(config, profile, &context, start.elapsed().as_millis());
+            if !s0_ok {
+                record_blocked_prerequisite_cells(
+                    profile,
+                    "payment_processor",
+                    &[
+                        ScenarioName::S1,
+                        ScenarioName::S2,
+                        ScenarioName::S3,
+                        ScenarioName::S4,
+                        ScenarioName::S5,
+                        ScenarioName::S6,
+                        ScenarioName::S7,
+                    ],
+                    "S0",
+                );
+                context._payment_processor.shutdown().await?;
+                context._payment_receiver.shutdown().await?;
+                return Ok(());
+            }
             run_mode3_send_cells(config, profile, pp_seed, &context).await?;
+            context._payment_processor.shutdown().await?;
+            context._payment_receiver.shutdown().await?;
         }
         Err(error) => {
             record_mode3_startup_failure(profile, start.elapsed().as_millis(), error);
@@ -112,7 +130,7 @@ fn record_mode3_s0(
     profile: &mut ResultProfile,
     context: &Mode3TopologyContext,
     wall_ms: u128,
-) {
+) -> bool {
     let available =
         amount_field_as_microtari(&context.receiver_balance, "available").unwrap_or_default();
     let expected = config.a_fund().map(|amount| amount.0).unwrap_or_default();
@@ -120,6 +138,7 @@ fn record_mode3_s0(
         spendable_output_count(&payment_processor::payment_receiver_db_path(config)).ok();
     let (status, success_count, failure_count, error, mut metrics) =
         strict_s0_status(expected, available, spendable_count);
+    let ok = status == CellStatus::Ok;
     add_s0_funding_observation(
         &mut metrics,
         config.funding.payment_processor.as_ref(),
@@ -127,10 +146,10 @@ fn record_mode3_s0(
     );
 
     let Some(mode) = profile.modes.get_mut("payment_processor") else {
-        return;
+        return false;
     };
     let Some(cell) = mode.scenarios.get_mut("S0") else {
-        return;
+        return false;
     };
     cell.record_repetition(Repetition {
         run: 1,
@@ -161,6 +180,7 @@ fn record_mode3_s0(
             funding.tx_id, funding.height, funding.amount
         ));
     }
+    ok
 }
 
 fn record_mode3_startup_failure(profile: &mut ResultProfile, wall_ms: u128, error: anyhow::Error) {
@@ -170,15 +190,19 @@ fn record_mode3_startup_failure(profile: &mut ResultProfile, wall_ms: u128, erro
     for scenario in [
         ScenarioName::S0,
         ScenarioName::S1,
+        ScenarioName::S2,
+        ScenarioName::S3,
         ScenarioName::S4,
         ScenarioName::S5,
+        ScenarioName::S6,
+        ScenarioName::S7,
     ] {
         let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
             continue;
         };
         cell.record_repetition(Repetition {
             run: 1,
-            status: CellStatus::Failed,
+            status: CellStatus::HarnessError,
             wall_ms: Some(wall_ms),
             success_count: 0,
             failure_count: 1,
@@ -390,7 +414,13 @@ async fn run_pp_s1_rounds(
 ) -> PpScenarioSummary {
     let db_path = payment_processor::payment_receiver_db_path(config);
     let start = Instant::now();
-    let mut total = PpScenarioSummary::default();
+    let tip_start_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let mut total = PpScenarioSummary {
+        tip_start_height,
+        ..PpScenarioSummary::default()
+    };
     for round in rounds {
         let round_start = Instant::now();
         let round_balance_before = account_snapshot(&db_path)
@@ -423,10 +453,12 @@ async fn run_pp_s1_rounds(
             attempted_payments: round
                 .tx_count
                 .saturating_mul(round.outputs_per_tx.saturating_sub(1)),
+            tip_start_height,
             ..PpScenarioSummary::default()
         };
         for tx_index in 1..=round.tx_count {
             let input = spendable_amounts[(tx_index - 1) as usize];
+            let submit_offset_ms = round_start.elapsed().as_millis();
             let result = exact_pp_split_with_change(input, round.outputs_per_tx).map(|plan| {
                 plan.payment_amounts
                     .into_iter()
@@ -446,7 +478,11 @@ async fn run_pp_s1_rounds(
                 }
                 Err(error) => Err(error),
             };
-            round_summary.record_batch(tx_index, result);
+            let completed_offset_ms = round_start.elapsed().as_millis();
+            round_summary
+                .construction_complete_ms
+                .push(completed_offset_ms);
+            round_summary.record_batch(tx_index, submit_offset_ms, completed_offset_ms, result);
             if round_summary.failed_batches > 0 {
                 break;
             }
@@ -595,12 +631,16 @@ async fn run_pp_recipient_batches_sequential(
     let mut summary = PpScenarioSummary {
         attempted_batches,
         attempted_payments,
+        tip_start_height: base_node_tip_height(&config.network.base_node_http_url)
+            .await
+            .ok(),
         ..PpScenarioSummary::default()
     };
     let start = Instant::now();
     for (index, recipients) in recipient_batches.into_iter().enumerate() {
         let batch_index = u32::try_from(index + 1).unwrap_or(u32::MAX);
         println!("{label} batch {batch_index}/{attempted_batches} dispatching");
+        let submit_offset_ms = start.elapsed().as_millis();
         let result = submit_pp_batch_to_recipients(
             &context.client,
             scenario,
@@ -609,10 +649,9 @@ async fn run_pp_recipient_batches_sequential(
             amount,
         )
         .await;
-        summary
-            .construction_complete_ms
-            .push(start.elapsed().as_millis());
-        summary.record_batch(batch_index, result);
+        let completed_offset_ms = start.elapsed().as_millis();
+        summary.construction_complete_ms.push(completed_offset_ms);
+        summary.record_batch(batch_index, submit_offset_ms, completed_offset_ms, result);
     }
     summary
         .observe_db(config, pp_observation_timeout(config, scenario))
@@ -634,17 +673,23 @@ async fn run_pp_batches_concurrent(
     let mut summary = PpScenarioSummary {
         attempted_batches: batch_count,
         attempted_payments: batch_count,
+        tip_start_height: base_node_tip_height(&config.network.base_node_http_url)
+            .await
+            .ok(),
         ..PpScenarioSummary::default()
     };
     let start = Instant::now();
     let mut join_set = JoinSet::new();
+    let mut pending = BTreeMap::new();
     let budget = pp_observation_timeout(config, scenario);
     let deadline = time::Instant::now() + budget;
     for (index, recipient) in recipients.into_iter().enumerate() {
         let batch_index = u32::try_from(index + 1).unwrap_or(u32::MAX);
         println!("{label} batch {batch_index}/{batch_count} dispatching");
         let context = context.clone_for_task();
-        let batch_start = Instant::now();
+        let submit_offset_ms = start.elapsed().as_millis();
+        pending.insert(batch_index, submit_offset_ms);
+        let arm_start = start;
         join_set.spawn(async move {
             let result = submit_pp_batch(
                 &context.client,
@@ -655,26 +700,38 @@ async fn run_pp_batches_concurrent(
                 amount,
             )
             .await;
-            (batch_index, batch_start.elapsed().as_millis(), result)
+            (
+                batch_index,
+                submit_offset_ms,
+                arm_start.elapsed().as_millis(),
+                result,
+            )
         });
     }
     while !join_set.is_empty() {
         let Ok(Some(result)) = time::timeout_at(deadline, join_set.join_next()).await else {
-            let unfinished = u32::try_from(join_set.len()).unwrap_or(u32::MAX);
             join_set.abort_all();
-            summary.failed_batches = summary.failed_batches.saturating_add(unfinished);
-            summary.errors.push(format!(
-                "{label} absolute deadline expired with {unfinished} dispatch task(s) unfinished"
-            ));
             break;
         };
         match result {
-            Ok((batch_index, completed_ms, send)) => {
+            Ok((batch_index, submit_offset_ms, completed_ms, send)) => {
+                pending.remove(&batch_index);
                 summary.construction_complete_ms.push(completed_ms);
-                summary.record_batch(batch_index, send);
+                summary.record_batch(batch_index, submit_offset_ms, completed_ms, send);
             }
-            Err(error) => summary.record_join_error(error.to_string()),
+            Err(error) => summary.errors.push(format!("task join error: {error}")),
         }
+    }
+    let timed_out_at = start.elapsed().as_millis();
+    for (batch_index, submit_offset_ms) in pending {
+        summary.record_batch(
+            batch_index,
+            submit_offset_ms,
+            timed_out_at,
+            Err(anyhow::anyhow!(
+                "{label} absolute deadline expired before dispatch task completed"
+            )),
+        );
     }
     summary
         .observe_db(
@@ -831,6 +888,8 @@ pub(super) fn record_pp_summary(
     let observation_complete =
         summary.accepted_batches == 0 || confirmed_batch_count >= accepted_batch_count;
     let all_verified_ok = verified.iter().all(|tx| tx.confirmed);
+    let confirmed_batches = u32::try_from(confirmed_batch_count).unwrap_or(u32::MAX);
+    let terminal_failures = summary.attempted_batches.saturating_sub(confirmed_batches);
     profile
         .chain_verification
         .verified_transactions
@@ -843,7 +902,7 @@ pub(super) fn record_pp_summary(
     };
     let status = if summary.blocked_upstream {
         CellStatus::BlockedUpstream
-    } else if summary.failed_batches == 0 && observation_complete && all_verified_ok {
+    } else if terminal_failures == 0 && observation_complete && all_verified_ok {
         CellStatus::Ok
     } else {
         CellStatus::Failed
@@ -852,8 +911,8 @@ pub(super) fn record_pp_summary(
         run: 1,
         status,
         wall_ms: Some(summary.wall_ms),
-        success_count: summary.accepted_batches,
-        failure_count: summary.failed_batches,
+        success_count: confirmed_batches,
+        failure_count: terminal_failures,
         fee_microtari: Some(summary.verified_fee_total()),
         error: summary.error_note().or_else(|| {
             (!all_verified_ok)

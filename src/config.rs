@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tari_transaction_components::MicroMinotari;
 
 use crate::versions::{MINOTARI_CLI_REV, PAYMENT_PROCESSOR_REV, TARI_CONSOLE_WALLET_REV};
@@ -29,6 +30,10 @@ pub struct Config {
 pub struct NetworkConfig {
     pub name: String,
     pub base_node_http_url: String,
+    #[serde(default = "default_authority_http_url")]
+    pub authority_http_url: String,
+    #[serde(default)]
+    pub mode1_base_node_service_peer: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,15 +45,9 @@ pub struct BenchmarkConfig {
     pub fanout_outputs_per_tx: u32,
     pub concurrent_batches: Vec<u32>,
     pub s4_t_budget_secs: u64,
-    #[serde(default)]
-    pub settle_wait_blocks: Option<u64>,
-    #[serde(default = "default_settle_cooldown_secs")]
-    pub settle_cooldown_secs: u64,
     pub s5_m: u32,
     pub s5_k: u32,
     pub fee_rate: String,
-    #[serde(default = "default_repetitions")]
-    pub repetitions: u32,
     #[serde(default = "default_scan_repetitions")]
     pub scan_repetitions: u32,
     #[serde(default = "default_scan_batch_size")]
@@ -122,7 +121,10 @@ pub struct PathConfig {
     pub cache_dir: PathBuf,
     pub minotari_console_wallet: PathBuf,
     pub minotari_binary: PathBuf,
+    pub minotari_node: PathBuf,
     pub payment_processor_binary: PathBuf,
+    #[serde(default = "default_build_manifest")]
+    pub build_manifest: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +179,10 @@ pub struct FundingRecord {
     pub broadcast_to_confirmed_at_c_min_ms: Option<u128>,
     #[serde(default)]
     pub tip_height_at_confirmation: Option<u64>,
+    #[serde(default)]
+    pub shared_funding_fee_microtari: Option<u64>,
+    #[serde(default)]
+    pub funding_fee_attribution: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +205,33 @@ impl Default for TimeoutConfig {
 }
 
 impl Config {
+    pub fn protocol_fingerprint(&self) -> anyhow::Result<String> {
+        let runtime_sha256 = |path: &Path| {
+            std::fs::read(path)
+                .ok()
+                .map(|bytes| hex::encode(Sha256::digest(bytes)))
+                .unwrap_or_else(|| "missing".to_string())
+        };
+        let protocol = serde_json::json!({
+            "network": self.network,
+            "benchmark": self.benchmark,
+            "paths": self.paths,
+            "seeds": self.seeds,
+            "modes": self.modes,
+            "versions": self.versions,
+            "timeouts": self.timeouts,
+            "runtime_sha256": {
+                "minotari": runtime_sha256(&self.paths.minotari_binary),
+                "minotari_node": runtime_sha256(&self.paths.minotari_node),
+                "minotari_console_wallet": runtime_sha256(&self.paths.minotari_console_wallet),
+                "minotari_payment_processor": runtime_sha256(&self.paths.payment_processor_binary),
+                "build_manifest": runtime_sha256(&self.paths.build_manifest),
+            }
+        });
+        let bytes = serde_json::to_vec(&protocol).context("serializing protocol fingerprint")?;
+        Ok(hex::encode(Sha256::digest(bytes)))
+    }
+
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         Self::load_with_validation(path, true)
     }
@@ -227,13 +260,58 @@ impl Config {
         if self.network.name.to_lowercase() != "esmeralda" {
             bail!("network.name must be esmeralda");
         }
+        let scan_url = url::Url::parse(&self.network.base_node_http_url)
+            .context("network.base_node_http_url")?;
+        let authority_url = url::Url::parse(&self.network.authority_http_url)
+            .context("network.authority_http_url")?;
+        let canonical_live_shape = self.benchmark.mode1_live_topology
+            && self.benchmark.mode2_live_scenarios
+            && self.benchmark.mode3_live_topology
+            && self.benchmark.live_fresh_scan_cells;
+        if canonical_live_shape {
+            if !matches!(scan_url.host_str(), Some("localhost" | "127.0.0.1" | "::1")) {
+                bail!("canonical live runs require a local archival base_node_http_url");
+            }
+            if matches!(
+                authority_url.host_str(),
+                Some("localhost" | "127.0.0.1" | "::1")
+            ) || self.network.authority_http_url == self.network.base_node_http_url
+            {
+                bail!("canonical live runs require a distinct remote authority_http_url");
+            }
+            if parse_amount(&self.benchmark.a_fund)?.0 != parse_amount("10000 T")?.0
+                || self.benchmark.c_min != 3
+                || self.benchmark.volume_target != 512
+                || self.benchmark.doubling_rounds != 6
+                || self.benchmark.fanout_outputs_per_tx != 8
+                || self.benchmark.concurrent_batches != [8, 16, 32, 64, 128]
+                || self.benchmark.s4_t_budget_secs != 900
+                || self.benchmark.s5_m != 100
+                || self.benchmark.s5_k != 10
+                || self.benchmark.mode2_send_smoke
+                || self.benchmark.mode1_live_max_s1_txs != 0
+                || self.benchmark.mode1_live_max_s4_batch != 0
+                || self.benchmark.mode1_live_max_s5_items != 0
+                || self.benchmark.mode2_live_max_s1_txs != 0
+                || self.benchmark.mode2_live_max_s4_batch != 0
+                || self.benchmark.mode2_live_max_s5_txs != 0
+                || self.benchmark.mode3_live_max_s1_batches != 0
+                || self.benchmark.mode3_live_max_s4_batch != 0
+                || self.benchmark.mode3_live_max_s5_items != 0
+            {
+                bail!("canonical live runs require the uncapped reference benchmark parameters");
+            }
+        }
+        if matches!(scan_url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+            && self.benchmark.mode1_live_topology
+            && self.network.mode1_base_node_service_peer.is_none()
+        {
+            bail!(
+                "network.mode1_base_node_service_peer is required when Mode 1 uses a local base node"
+            );
+        }
         if self.benchmark.c_min == 0 {
             bail!("benchmark.c_min must be greater than 0");
-        }
-        if self.benchmark.repetitions != 1 {
-            bail!(
-                "benchmark.repetitions must equal 1 until stateful live repetitions use isolated funded wallets"
-            );
         }
         if self.benchmark.scan_repetitions == 0 {
             bail!("benchmark.scan_repetitions must be greater than 0");
@@ -268,12 +346,6 @@ impl Config {
         }
         if self.benchmark.concurrent_batches.contains(&0) {
             bail!("benchmark.concurrent_batches entries must be greater than 0");
-        }
-        if matches!(self.benchmark.settle_wait_blocks, Some(0)) {
-            bail!("benchmark.settle_wait_blocks must be greater than 0 when set");
-        }
-        if self.benchmark.settle_cooldown_secs == 0 {
-            bail!("benchmark.settle_cooldown_secs must be greater than 0");
         }
         if require_live_funding
             && self.benchmark.mode1_live_topology
@@ -311,8 +383,10 @@ impl Config {
         self.paths.minotari_console_wallet =
             resolve_runtime_path(base, &self.paths.minotari_console_wallet)?;
         self.paths.minotari_binary = resolve_runtime_path(base, &self.paths.minotari_binary)?;
+        self.paths.minotari_node = resolve_runtime_path(base, &self.paths.minotari_node)?;
         self.paths.payment_processor_binary =
             resolve_runtime_path(base, &self.paths.payment_processor_binary)?;
+        self.paths.build_manifest = resolve_runtime_path(base, &self.paths.build_manifest)?;
         self.modes.new_wallet_database =
             resolve_runtime_path(base, &self.modes.new_wallet_database)?;
         Ok(())
@@ -327,7 +401,7 @@ impl Config {
     }
 
     pub fn scenario_defaults(&self) -> BTreeMap<String, serde_json::Value> {
-        BTreeMap::from([
+        let mut defaults = BTreeMap::from([
             (
                 "A_fund".to_string(),
                 serde_json::json!(self.benchmark.a_fund),
@@ -353,23 +427,11 @@ impl Config {
                 "S4_T_budget_secs".to_string(),
                 serde_json::json!(self.benchmark.s4_t_budget_secs),
             ),
-            (
-                "settle_wait_blocks".to_string(),
-                serde_json::json!(self.settle_wait_blocks()),
-            ),
-            (
-                "settle_cooldown_secs".to_string(),
-                serde_json::json!(self.benchmark.settle_cooldown_secs),
-            ),
             ("S5_M".to_string(), serde_json::json!(self.benchmark.s5_m)),
             ("S5_K".to_string(), serde_json::json!(self.benchmark.s5_k)),
             (
                 "fee_rate".to_string(),
                 serde_json::json!(self.benchmark.fee_rate),
-            ),
-            (
-                "repetitions".to_string(),
-                serde_json::json!(self.benchmark.repetitions),
             ),
             (
                 "scan_repetitions".to_string(),
@@ -386,6 +448,14 @@ impl Config {
             (
                 "base_node_http_url".to_string(),
                 serde_json::json!(self.network.base_node_http_url),
+            ),
+            (
+                "authority_http_url".to_string(),
+                serde_json::json!(self.network.authority_http_url),
+            ),
+            (
+                "mode1_base_node_service_peer".to_string(),
+                serde_json::json!(self.network.mode1_base_node_service_peer),
             ),
             (
                 "base_node_rev".to_string(),
@@ -468,17 +538,19 @@ impl Config {
                 serde_json::json!(self.funding.as_map()),
             ),
             ("timeouts".to_string(), serde_json::json!(self.timeouts)),
-        ])
+        ]);
+        defaults.insert(
+            "protocol_fingerprint".to_string(),
+            serde_json::json!(
+                self.protocol_fingerprint()
+                    .unwrap_or_else(|_| "unavailable".to_string())
+            ),
+        );
+        defaults
     }
 
     pub fn timeout(&self, secs: u64) -> Duration {
         Duration::from_secs(secs)
-    }
-
-    pub fn settle_wait_blocks(&self) -> u64 {
-        self.benchmark
-            .settle_wait_blocks
-            .unwrap_or_else(|| self.benchmark.c_min.saturating_add(1).max(4))
     }
 }
 
@@ -488,6 +560,8 @@ impl Default for Config {
             network: NetworkConfig {
                 name: "esmeralda".to_string(),
                 base_node_http_url: "https://rpc.esmeralda.tari.com".to_string(),
+                authority_http_url: default_authority_http_url(),
+                mode1_base_node_service_peer: None,
             },
             benchmark: BenchmarkConfig {
                 a_fund: "10000 T".to_string(),
@@ -497,12 +571,9 @@ impl Default for Config {
                 fanout_outputs_per_tx: 8,
                 concurrent_batches: vec![8, 16, 32, 64, 128],
                 s4_t_budget_secs: 900,
-                settle_wait_blocks: None,
-                settle_cooldown_secs: default_settle_cooldown_secs(),
                 s5_m: 100,
                 s5_k: 10,
                 fee_rate: "5 uT".to_string(),
-                repetitions: default_repetitions(),
                 scan_repetitions: default_scan_repetitions(),
                 scan_batch_size: default_scan_batch_size(),
                 mode1_live_topology: false,
@@ -530,9 +601,11 @@ impl Default for Config {
                 cache_dir: PathBuf::from(".bench-cache"),
                 minotari_console_wallet: PathBuf::from("tools/minotari_console_wallet"),
                 minotari_binary: PathBuf::from("tools/minotari"),
+                minotari_node: PathBuf::from("tools/minotari_node"),
                 payment_processor_binary: PathBuf::from(
                     ".bench-cache/minotari_payment_processor/target/release/minotari_payment_processor",
                 ),
+                build_manifest: default_build_manifest(),
             },
             seeds: SeedConfig {
                 old_wallet_env: "HARNESS_SEED_OLD".to_string(),
@@ -566,14 +639,6 @@ fn default_scan_repetitions() -> u32 {
     1
 }
 
-fn default_repetitions() -> u32 {
-    1
-}
-
-fn default_settle_cooldown_secs() -> u64 {
-    60
-}
-
 fn default_mode1_payment_amount() -> String {
     "1 T".to_string()
 }
@@ -596,6 +661,14 @@ fn default_mode3_worker_sleep_secs() -> u64 {
 
 fn default_base_node_rev() -> String {
     "v5.4.0".to_string()
+}
+
+fn default_authority_http_url() -> String {
+    "https://rpc.esmeralda.tari.com".to_string()
+}
+
+fn default_build_manifest() -> PathBuf {
+    PathBuf::from("tools/build-manifest.json")
 }
 
 fn resolve_runtime_path(base: &Path, path: &Path) -> anyhow::Result<PathBuf> {
@@ -715,16 +788,6 @@ mod tests {
     }
 
     #[test]
-    fn settle_wait_blocks_defaults_to_c_min_plus_one_or_four() {
-        let mut cfg = Config::default();
-        assert_eq!(cfg.settle_wait_blocks(), 4);
-        cfg.benchmark.c_min = 10;
-        assert_eq!(cfg.settle_wait_blocks(), 11);
-        cfg.benchmark.settle_wait_blocks = Some(7);
-        assert_eq!(cfg.settle_wait_blocks(), 7);
-    }
-
-    #[test]
     fn funding_records_validate_amounts_and_heights() {
         let mut cfg = Config::default();
         cfg.funding.new_wallet = Some(FundingRecord {
@@ -809,14 +872,6 @@ mod tests {
     }
 
     #[test]
-    fn repetitions_are_one_until_live_state_is_isolated() {
-        let mut cfg = Config::default();
-        cfg.benchmark.repetitions = 2;
-        let error = cfg.validate().unwrap_err().to_string();
-        assert!(error.contains("repetitions must equal 1"));
-    }
-
-    #[test]
     fn legacy_scenario_amount_names_deserialize_as_payment_amounts() {
         let legacy = toml::to_string(&Config::default())
             .unwrap()
@@ -852,12 +907,31 @@ mod tests {
     }
 
     #[test]
+    fn local_mode1_endpoint_requires_an_explicit_service_peer() {
+        let mut cfg = Config::default();
+        cfg.network.base_node_http_url = "http://127.0.0.1:18142".to_string();
+        cfg.benchmark.mode1_live_topology = true;
+        assert!(
+            cfg.validate_prefunding_b0()
+                .unwrap_err()
+                .to_string()
+                .contains("mode1_base_node_service_peer")
+        );
+        cfg.network.mode1_base_node_service_peer =
+            Some("abc::/ip4/127.0.0.1/tcp/18189".to_string());
+        cfg.validate_prefunding_b0().unwrap();
+    }
+
+    #[test]
     fn prefunding_b0_validation_allows_live_shape_without_funding() {
         let mut cfg = Config::default();
         cfg.benchmark.mode1_live_topology = true;
         cfg.benchmark.mode2_live_scenarios = true;
         cfg.benchmark.mode3_live_topology = true;
         cfg.benchmark.live_fresh_scan_cells = true;
+        cfg.network.base_node_http_url = "http://127.0.0.1:18142".to_string();
+        cfg.network.mode1_base_node_service_peer =
+            Some("abc::/ip4/127.0.0.1/tcp/18189".to_string());
 
         assert!(cfg.validate_prefunding_b0().is_ok());
         assert!(
@@ -865,6 +939,26 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("funding.old_wallet")
+        );
+    }
+
+    #[test]
+    fn canonical_live_shape_rejects_capped_reference_parameters_early() {
+        let mut cfg = Config::default();
+        cfg.benchmark.mode1_live_topology = true;
+        cfg.benchmark.mode2_live_scenarios = true;
+        cfg.benchmark.mode3_live_topology = true;
+        cfg.benchmark.live_fresh_scan_cells = true;
+        cfg.benchmark.mode1_live_max_s1_txs = 1;
+        cfg.network.base_node_http_url = "http://127.0.0.1:18142".to_string();
+        cfg.network.mode1_base_node_service_peer =
+            Some("abc::/ip4/127.0.0.1/tcp/18189".to_string());
+
+        assert!(
+            cfg.validate_prefunding_b0()
+                .unwrap_err()
+                .to_string()
+                .contains("uncapped reference benchmark parameters")
         );
     }
 

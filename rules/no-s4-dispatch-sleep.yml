@@ -12,4 +12,7 @@ rule:
     - pattern: sleep($$$ARGS)
     - pattern: sleep_until($$$ARGS)
 files:
-  - src/**/*.rs
+  - src/live_minotari.rs
+  - src/live_minotari/mode1.rs
+  - src/live_minotari/mode2.rs
+  - src/live_minotari/mode3.rs

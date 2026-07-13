@@ -33,12 +33,8 @@ pub enum Command {
     Run {
         #[arg(long, default_value = "harness.toml")]
         config: PathBuf,
-        #[arg(long, default_value = "baselines/esmeralda_baseline.json")]
+        #[arg(long, default_value = "candidates/esmeralda-baseline.json")]
         profile: PathBuf,
-        #[arg(long)]
-        fresh_data_dir: bool,
-        #[arg(long)]
-        yes: bool,
         /// Immutable checkpoint produced before any benchmark address is
         /// funded. Required for the funded B0->S0 continuation.
         #[arg(long)]

@@ -5,7 +5,7 @@ CACHE_DIR="${1:-.bench-cache}"
 TOOLS_DIR="${2:-tools}"
 MINOTARI_REV="360c4848a54d65fd710266233cc9277b0f785e74"
 TARI_CONSOLE_WALLET_REV="9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
-TARI_NODE_REV="v5.4.0-pre.6"
+TARI_NODE_REV="v5.4.0"
 MINOTARI_DIR="${CACHE_DIR}/minotari-cli"
 TARI_DIR="${CACHE_DIR}/tari"
 
@@ -17,6 +17,10 @@ fi
 
 git -C "${MINOTARI_DIR}" fetch --tags origin
 git -C "${MINOTARI_DIR}" checkout "${MINOTARI_REV}"
+if [ -n "$(git -C "${MINOTARI_DIR}" status --porcelain --untracked-files=all)" ]; then
+  printf 'minotari-cli source tree is dirty; use a fresh cache directory\n' >&2
+  exit 1
+fi
 
 (
   cd "${MINOTARI_DIR}"
@@ -31,6 +35,10 @@ fi
 
 git -C "${TARI_DIR}" fetch --tags origin
 git -C "${TARI_DIR}" checkout "${TARI_CONSOLE_WALLET_REV}"
+if [ -n "$(git -C "${TARI_DIR}" status --porcelain --untracked-files=all)" ]; then
+  printf 'Tari source tree is dirty; use a fresh cache directory\n' >&2
+  exit 1
+fi
 
 (
   cd "${TARI_DIR}"
@@ -40,6 +48,10 @@ git -C "${TARI_DIR}" checkout "${TARI_CONSOLE_WALLET_REV}"
 cp "${TARI_DIR}/target/release/minotari_console_wallet" "${TOOLS_DIR}/minotari_console_wallet"
 
 git -C "${TARI_DIR}" checkout "${TARI_NODE_REV}"
+if [ -n "$(git -C "${TARI_DIR}" status --porcelain --untracked-files=all)" ]; then
+  printf 'Tari source tree became dirty before node build\n' >&2
+  exit 1
+fi
 
 (
   cd "${TARI_DIR}"

@@ -109,21 +109,7 @@ pub(super) async fn annotate_mode2_live_scenarios(
 
     let mut s1_request = request.clone();
     s1_request.recipient = sender_seed.address.clone();
-    let mut s1 = run_mode2_s1_rounds(config, s1_request).await;
-    let (s1_verification, s1_verification_attempts, s1_verification_wall_ms) =
-        verify_mode2_transactions_until_confirmed(
-            config,
-            &config.modes.new_wallet_database,
-            &s1.tx_ids,
-            ScenarioName::S1,
-        )
-        .await?;
-    s1.apply_mode2_verification(s1_verification);
-    record_mode2_verification_loop_metrics(
-        &mut s1,
-        s1_verification_attempts,
-        s1_verification_wall_ms,
-    );
+    let s1 = run_mode2_s1_rounds(config, s1_request).await;
     record_mode2_send_summary(
         profile,
         ScenarioName::S1,
@@ -203,17 +189,6 @@ pub(super) async fn annotate_mode2_live_scenarios(
                 .to_string(),
         ],
     );
-    if !s4.tx_ids.is_empty() {
-        let note = wait_for_mode2_scan_advance(
-            config,
-            &config.modes.new_wallet_database,
-            &password,
-            "S4->S5",
-        )
-        .await?;
-        append_mode2_note(profile, ScenarioName::S4, note);
-    }
-
     let s5_attempts = capped_attempts(
         config.benchmark.s5_m,
         config.benchmark.mode2_live_max_s5_txs,
@@ -235,19 +210,7 @@ pub(super) async fn annotate_mode2_live_scenarios(
         "recipient_set".to_string(),
         serde_json::json!(s5_recipient_set),
     );
-    let s5_settle_note = if s5.tx_ids.is_empty() {
-        None
-    } else {
-        Some(
-            wait_for_mode2_scan_advance(
-                config,
-                &config.modes.new_wallet_database,
-                &password,
-                "S5 final",
-            )
-            .await?,
-        )
-    };
+    let s5_verification_start_offset_ms = s5_start.elapsed().as_millis();
     let (s5_verification, s5_verification_attempts, s5_verification_wall_ms) =
         verify_mode2_transactions_until_confirmed(
             config,
@@ -259,9 +222,27 @@ pub(super) async fn annotate_mode2_live_scenarios(
     s5.apply_mode2_verification(s5_verification);
     record_mode2_verification_loop_metrics(
         &mut s5,
+        s5_verification_start_offset_ms,
         s5_verification_attempts,
         s5_verification_wall_ms,
     );
+    let s5_refresh_note = if s5.tx_ids.is_empty() {
+        None
+    } else {
+        let report = scan_to_tip(
+            &config.modes.new_wallet_database,
+            &password,
+            &config.network.base_node_http_url,
+            config.benchmark.scan_batch_size,
+            config.benchmark.c_min,
+            config.timeout(config.timeouts.scan_batch_secs),
+        )
+        .await?;
+        Some(format!(
+            "Mode 2 S5 post-confirmation refresh: scanned_height={} fixed_target={} wall_ms={}",
+            report.max_height, report.target_tip, report.wall_ms
+        ))
+    };
     s5.wall_ms = s5_start.elapsed().as_millis();
     let s5_balance_after = account_snapshot(&config.modes.new_wallet_database)
         .ok()
@@ -297,7 +278,7 @@ pub(super) async fn annotate_mode2_live_scenarios(
                 .to_string(),
         ],
     );
-    if let Some(note) = s5_settle_note {
+    if let Some(note) = s5_refresh_note {
         append_mode2_note(profile, ScenarioName::S5, note);
     }
     if config.benchmark.live_fresh_scan_cells {
@@ -346,12 +327,24 @@ async fn verify_mode2_transactions_until_confirmed_with_timeout(
     let start = Instant::now();
     let mut attempts = 0u32;
     let client = base_node_http_client()?;
+    let mut confirmation_observed_offsets_ms = BTreeMap::new();
 
     loop {
         attempts = attempts.saturating_add(1);
-        let verification =
+        let mut verification =
             verify_mode2_transactions_with_client(config, db_path, tx_ids, scenario, &client)
                 .await?;
+        let observed_at = start.elapsed().as_millis();
+        for tx in verification
+            .observed_transactions
+            .iter()
+            .filter(|tx| tx.confirmed)
+        {
+            confirmation_observed_offsets_ms
+                .entry(tx.tx_id.clone())
+                .or_insert(observed_at);
+        }
+        verification.confirmation_observed_offsets_ms = confirmation_observed_offsets_ms.clone();
         if mode2_verification_confirmed(&verification, tx_ids) || start.elapsed() >= timeout {
             return Ok((verification, attempts, start.elapsed().as_millis()));
         }
@@ -361,30 +354,29 @@ async fn verify_mode2_transactions_until_confirmed_with_timeout(
         if sleep_for.is_zero() {
             return Ok((verification, attempts, start.elapsed().as_millis()));
         }
-        settle_gate_pause(sleep_for).await;
+        observation_poll_pause(sleep_for).await;
     }
 }
 
 fn record_mode2_verification_loop_metrics(
     summary: &mut ScenarioSendSummary,
+    verification_start_offset_ms: u128,
     attempts: u32,
     wall_ms: u128,
 ) {
-    let confirmed_observed_ms = summary.wall_ms.saturating_add(wall_ms);
     for timing in &mut summary.tx_timings {
-        let confirmed = timing
+        let confirmed_offset_ms = timing
             .get("tx_id")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|tx_id| {
-                summary
-                    .tx_infos
-                    .iter()
-                    .any(|tx| tx.tx_id == tx_id && tx.confirmed)
-            });
-        if confirmed && let Some(map) = timing.as_object_mut() {
+            .and_then(|tx_id| summary.confirmation_observed_offsets_ms.get(tx_id).copied())
+            .map(|relative| verification_start_offset_ms.saturating_add(relative));
+        let submit_offset_ms = timing_u128(timing, "submit_offset_ms").unwrap_or_default();
+        if let Some(confirmed_offset_ms) = confirmed_offset_ms
+            && let Some(map) = timing.as_object_mut()
+        {
             map.insert(
                 "broadcast_to_confirmed_at_c_min_ms".to_string(),
-                serde_json::json!(confirmed_observed_ms),
+                serde_json::json!(confirmed_offset_ms.saturating_sub(submit_offset_ms)),
             );
         }
     }
@@ -409,92 +401,7 @@ pub(super) fn mode2_verification_confirmed(
             .all(|tx| tx.confirmed)
 }
 
-async fn wait_for_mode2_scan_advance(
-    config: &Config,
-    db_path: &Path,
-    password: &str,
-    label: &str,
-) -> anyhow::Result<String> {
-    let client = base_node_http_client()?;
-    let initial_scan_height = account_snapshot(db_path)
-        .with_context(|| format!("mode2 settle gate {label} could not read wallet scan height"))?
-        .max_height;
-    let initial_tip_height =
-        base_node_tip_height_with_client(&client, &config.network.base_node_http_url)
-            .await
-            .with_context(|| format!("mode2 settle gate {label} could not read base-node tip"))?;
-    let target_tip_height = initial_tip_height.saturating_add(config.settle_wait_blocks());
-    let timeout = config.timeout(config.timeouts.confirmation_secs);
-    let start = Instant::now();
-    let mut attempts = 0u32;
-    let mut total_scan_wall_ms = 0u128;
-    let mut total_scan_no_progress_attempts = 0u64;
-    let mut stopped_without_progress = false;
-
-    loop {
-        attempts = attempts.saturating_add(1);
-        let scan_report = scan_to_tip(
-            db_path,
-            password,
-            &config.network.base_node_http_url,
-            config.benchmark.scan_batch_size,
-            config.benchmark.c_min,
-            config.timeout(config.timeouts.scan_batch_secs),
-        )
-        .await
-        .with_context(|| format!("mode2 settle gate {label} scan failed"))?;
-        total_scan_wall_ms = total_scan_wall_ms.saturating_add(scan_report.wall_ms);
-        total_scan_no_progress_attempts =
-            total_scan_no_progress_attempts.saturating_add(scan_report.no_progress_attempts);
-        stopped_without_progress |= scan_report.stopped_without_progress;
-        let last_height = account_snapshot(db_path)
-            .with_context(|| {
-                format!("mode2 settle gate {label} could not read wallet scan height")
-            })?
-            .max_height;
-        let tip_height =
-            base_node_tip_height_with_client(&client, &config.network.base_node_http_url)
-                .await
-                .with_context(|| {
-                    format!("mode2 settle gate {label} could not read base-node tip")
-                })?;
-        println!(
-            "mode2 settle gate {label}: scanned_height={last_height} tip_height={tip_height} target_tip={target_tip_height} scan_no_progress_attempts={} scan_stopped_without_progress={}",
-            total_scan_no_progress_attempts, stopped_without_progress
-        );
-
-        if mode2_settle_gate_ready(last_height, tip_height, target_tip_height) {
-            return Ok(format!(
-                "Mode 2 settle gate {label}: scanned_height {initial_scan_height}->{last_height} tip_height {initial_tip_height}->{tip_height} target_tip={target_tip_height} attempts={attempts} scan_wall_ms={total_scan_wall_ms} scan_no_progress_attempts={} scan_stopped_without_progress={}",
-                total_scan_no_progress_attempts, stopped_without_progress
-            ));
-        }
-        if start.elapsed() >= timeout {
-            bail!(
-                "mode2 settle gate {label} timed out after {}s waiting for both wallet scan and base-node tip to reach target {target_tip_height}; scanned_height={last_height} tip_height={tip_height} scan_no_progress_attempts={} scan_stopped_without_progress={}",
-                timeout.as_secs(),
-                total_scan_no_progress_attempts,
-                stopped_without_progress
-            );
-        }
-
-        let remaining = timeout.saturating_sub(start.elapsed());
-        let sleep_for = Duration::from_secs(10).min(remaining);
-        if !sleep_for.is_zero() {
-            settle_gate_pause(sleep_for).await;
-        }
-    }
-}
-
-pub(super) fn mode2_settle_gate_ready(
-    scanned_height: u64,
-    tip_height: u64,
-    target_tip_height: u64,
-) -> bool {
-    scanned_height >= target_tip_height && tip_height >= target_tip_height
-}
-
-pub(super) async fn settle_gate_pause(duration: Duration) {
+async fn observation_poll_pause(duration: Duration) {
     wait_one_interval(duration).await;
 }
 
@@ -559,7 +466,11 @@ async fn run_mode2_s1_rounds(
     config: &Config,
     request: OwnedOneSidedSendRequest,
 ) -> ScenarioSendSummary {
-    let mut total = ScenarioSendSummary::default();
+    let tip_start_height = base_node_tip_height(&request.base_node_url).await.ok();
+    let mut total = ScenarioSendSummary {
+        tip_start_height,
+        ..ScenarioSendSummary::default()
+    };
     let start = Instant::now();
     let balance_before = account_snapshot(&request.db_path)
         .ok()
@@ -570,6 +481,7 @@ async fn run_mode2_s1_rounds(
     for round in rounds {
         let mut round_summary = ScenarioSendSummary {
             attempted: round.tx_count,
+            tip_start_height,
             ..ScenarioSendSummary::default()
         };
         let round_start = Instant::now();
@@ -606,6 +518,7 @@ async fn run_mode2_s1_rounds(
                 round.round_index, tx_index, round.tx_count, round.outputs_per_tx
             );
             let input = spendable_amounts[(tx_index - 1) as usize];
+            let submit_offset_ms = round_start.elapsed().as_millis();
             let result = exact_no_change_split(
                 input,
                 round.outputs_per_tx,
@@ -628,29 +541,15 @@ async fn run_mode2_s1_rounds(
                 }
                 Err(error) => Err(error),
             };
+            let completed_offset_ms = round_start.elapsed().as_millis();
             round_summary
                 .construction_complete_ms
-                .push(round_start.elapsed().as_millis());
-            round_summary.record_attempt(tx_index, result);
+                .push(completed_offset_ms);
+            round_summary.record_attempt(tx_index, submit_offset_ms, completed_offset_ms, result);
         }
-        let mut settle_note = None;
+        let mut refresh_note = None;
         if !round_summary.tx_ids.is_empty() {
-            match wait_for_mode2_scan_advance(
-                config,
-                &request.db_path,
-                &request.password,
-                &format!("S1 round {}", round.round_index),
-            )
-            .await
-            {
-                Ok(note) => settle_note = Some(note),
-                Err(error) => {
-                    round_summary.failure_count = round_summary.failure_count.saturating_add(1);
-                    round_summary
-                        .errors
-                        .push(format!("mode2 S1 settle gate failed: {error:#}"));
-                }
-            }
+            let verification_start_offset_ms = round_start.elapsed().as_millis();
             match verify_mode2_transactions_until_confirmed(
                 config,
                 &request.db_path,
@@ -661,7 +560,12 @@ async fn run_mode2_s1_rounds(
             {
                 Ok((verification, attempts, wall_ms)) => {
                     round_summary.apply_mode2_verification(verification);
-                    record_mode2_verification_loop_metrics(&mut round_summary, attempts, wall_ms);
+                    record_mode2_verification_loop_metrics(
+                        &mut round_summary,
+                        verification_start_offset_ms,
+                        attempts,
+                        wall_ms,
+                    );
                 }
                 Err(error) => {
                     round_summary.failure_count = round_summary.failure_count.saturating_add(1);
@@ -682,14 +586,11 @@ async fn run_mode2_s1_rounds(
             .await
             {
                 Ok(report) => {
-                    let refresh_note = format!(
+                    let message = format!(
                         "post-confirmation wallet refresh reached height {} against target {} in {} ms",
                         report.max_height, report.target_tip, report.wall_ms
                     );
-                    settle_note = Some(match settle_note {
-                        Some(note) => format!("{note}; {refresh_note}"),
-                        None => refresh_note,
-                    });
+                    refresh_note = Some(message);
                 }
                 Err(error) => {
                     round_summary.failure_count = round_summary.failure_count.saturating_add(1);
@@ -732,7 +633,7 @@ async fn run_mode2_s1_rounds(
             "success_count": round_summary.success_count,
             "failure_count": round_summary.failure_count,
             "total_fee_microtari": round_summary.fee_microtari,
-            "settle_note": settle_note,
+            "refresh_note": refresh_note,
             "observed_unspent_count": observed_utxos,
             "fee_only_balance_delta_ok": fee_only_balance_delta_ok,
             "independently_confirmed": independently_confirmed,
@@ -795,6 +696,7 @@ async fn run_s4_batches(
         .await;
         let remaining = deadline.saturating_duration_since(time::Instant::now());
         if !batch.tx_ids.is_empty() && !remaining.is_zero() {
+            let verification_start_offset_ms = arm_start.elapsed().as_millis();
             let (verification, verification_attempts, verification_wall_ms) =
                 verify_mode2_transactions_until_confirmed_with_timeout(
                     config,
@@ -807,6 +709,7 @@ async fn run_s4_batches(
             batch.apply_mode2_verification(verification);
             record_mode2_verification_loop_metrics(
                 &mut batch,
+                verification_start_offset_ms,
                 verification_attempts,
                 verification_wall_ms,
             );
@@ -831,19 +734,20 @@ async fn run_send_attempts_to_recipients_sequential(
     let attempts = u32::try_from(recipients.len()).unwrap_or(u32::MAX);
     let mut summary = ScenarioSendSummary {
         attempted: attempts,
+        tip_start_height: base_node_tip_height(&request.base_node_url).await.ok(),
         ..ScenarioSendSummary::default()
     };
     let start = Instant::now();
     for (index, recipient) in recipients.into_iter().enumerate() {
         let attempt = u32::try_from(index + 1).unwrap_or(u32::MAX);
         println!("{label} attempt {attempt}/{attempts} dispatching");
+        let submit_offset_ms = start.elapsed().as_millis();
         let mut request = request.clone();
         request.recipient = recipient;
         let result = construct_sign_broadcast_one_sided_owned(request).await;
-        summary
-            .construction_complete_ms
-            .push(start.elapsed().as_millis());
-        summary.record_attempt(attempt, result);
+        let completed_offset_ms = start.elapsed().as_millis();
+        summary.construction_complete_ms.push(completed_offset_ms);
+        summary.record_attempt(attempt, submit_offset_ms, completed_offset_ms, result);
     }
     summary.wall_ms = start.elapsed().as_millis();
     summary
@@ -858,38 +762,54 @@ async fn run_send_attempts_concurrent(
     let attempts = u32::try_from(recipients.len()).unwrap_or(u32::MAX);
     let mut summary = ScenarioSendSummary {
         attempted: attempts,
+        tip_start_height: base_node_tip_height(&request.base_node_url).await.ok(),
         ..ScenarioSendSummary::default()
     };
     let start = Instant::now();
     let mut join_set = JoinSet::new();
+    let mut pending = BTreeMap::new();
     for (index, recipient) in recipients.into_iter().enumerate() {
         let attempt = u32::try_from(index + 1).unwrap_or(u32::MAX);
         println!("{label} attempt {attempt}/{attempts} dispatching");
         let mut request = request.clone();
         request.recipient = recipient;
-        let attempt_start = Instant::now();
+        let submit_offset_ms = start.elapsed().as_millis();
+        pending.insert(attempt, submit_offset_ms);
+        let arm_start = start;
         join_set.spawn(async move {
             let result = construct_sign_broadcast_one_sided_owned(request).await;
-            (attempt, attempt_start.elapsed().as_millis(), result)
+            (
+                attempt,
+                submit_offset_ms,
+                arm_start.elapsed().as_millis(),
+                result,
+            )
         });
     }
     while !join_set.is_empty() {
         let Ok(Some(result)) = time::timeout_at(deadline, join_set.join_next()).await else {
-            let unfinished = u32::try_from(join_set.len()).unwrap_or(u32::MAX);
             join_set.abort_all();
-            summary.failure_count = summary.failure_count.saturating_add(unfinished);
-            summary.errors.push(format!(
-                "{label} absolute deadline expired with {unfinished} dispatch task(s) unfinished"
-            ));
             break;
         };
         match result {
-            Ok((attempt, completed_ms, send)) => {
+            Ok((attempt, submit_offset_ms, completed_ms, send)) => {
+                pending.remove(&attempt);
                 summary.construction_complete_ms.push(completed_ms);
-                summary.record_attempt(attempt, send);
+                summary.record_attempt(attempt, submit_offset_ms, completed_ms, send);
             }
-            Err(error) => summary.record_join_error(error.to_string()),
+            Err(error) => summary.errors.push(format!("task join error: {error}")),
         }
+    }
+    let timed_out_at = start.elapsed().as_millis();
+    for (attempt, submit_offset_ms) in pending {
+        summary.record_attempt(
+            attempt,
+            submit_offset_ms,
+            timed_out_at,
+            Err(anyhow::anyhow!(
+                "{label} absolute deadline expired before dispatch task completed"
+            )),
+        );
     }
     summary.wall_ms = start.elapsed().as_millis();
     summary
@@ -953,10 +873,13 @@ pub(super) fn refresh_recorded_mode2_send_summary(
 
 fn mode2_send_repetition(summary: &ScenarioSendSummary, scenario: ScenarioName) -> Repetition {
     let verified = summary.verified_transactions();
-    let verification_complete = summary.tx_ids.is_empty() || !verified.is_empty();
+    let verification_complete = summary.tx_ids.is_empty() || verified.len() >= summary.tx_ids.len();
     let all_verified_ok = verified.iter().all(|tx| tx.confirmed);
+    let confirmed =
+        u32::try_from(verified.iter().filter(|tx| tx.confirmed).count()).unwrap_or(u32::MAX);
+    let terminal_failures = summary.attempted.saturating_sub(confirmed);
 
-    let status = if summary.failure_count == 0 && verification_complete && all_verified_ok {
+    let status = if terminal_failures == 0 && verification_complete && all_verified_ok {
         CellStatus::Ok
     } else {
         CellStatus::Failed
@@ -966,8 +889,8 @@ fn mode2_send_repetition(summary: &ScenarioSendSummary, scenario: ScenarioName) 
         run: 1,
         status,
         wall_ms: Some(summary.wall_ms),
-        success_count: summary.success_count,
-        failure_count: summary.failure_count,
+        success_count: confirmed,
+        failure_count: terminal_failures,
         fee_microtari: Some(summary.fee_microtari),
         error: summary.error_note().or_else(|| {
             (!all_verified_ok)

@@ -14,14 +14,33 @@ pub(super) async fn annotate_mode1_console_wallet(
     match topology {
         Ok(mut context) => {
             let spendable_count = mode1_unspent_count(&mut context.client).await.ok();
-            record_mode1_s0(
+            let s0_ok = record_mode1_s0(
                 config,
                 profile,
                 &context,
                 start.elapsed().as_millis(),
                 spendable_count,
             );
+            if !s0_ok {
+                record_blocked_prerequisite_cells(
+                    profile,
+                    "old_wallet",
+                    &[
+                        ScenarioName::S1,
+                        ScenarioName::S2,
+                        ScenarioName::S3,
+                        ScenarioName::S4,
+                        ScenarioName::S5,
+                        ScenarioName::S6,
+                        ScenarioName::S7,
+                    ],
+                    "S0",
+                );
+                context.process.shutdown().await?;
+                return Ok(());
+            }
             run_mode1_send_cells(config, profile, old_seed, &mut context).await?;
+            context.process.shutdown().await?;
         }
         Err(error) => {
             record_mode1_startup_failure(profile, start.elapsed().as_millis(), error);
@@ -49,17 +68,7 @@ pub(super) async fn start_mode1_console_wallet_with_recovery(
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::create_dir_all("logs")?;
-    let stdout_path = PathBuf::from("logs/mode1-console-wallet.stdout.log");
-    let stderr_path = PathBuf::from("logs/mode1-console-wallet.stderr.log");
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stdout_path)?;
-    let stderr = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stderr_path)?;
+    write_mode1_runtime_config(config, &config_path)?;
     let grpc_bind = grpc_bind_multiaddr(&config.modes.old_wallet_grpc_address)?;
     let birthday = config
         .funding
@@ -88,17 +97,11 @@ pub(super) async fn start_mode1_console_wallet_with_recovery(
     if recovery {
         command.arg("--recovery");
     }
-    command
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-
-    let mut process = Mode1ConsoleProcess {
-        child: command
-            .spawn()
-            .context("spawning minotari_console_wallet")?,
-        stdout_path,
-        stderr_path,
-    };
+    let mut process = ManagedProcess::spawn(
+        "mode1-console-wallet",
+        command,
+        &config.paths.data_dir.join("logs"),
+    )?;
     let client = wait_for_mode1_grpc(config, &mut process).await?;
     let mut context = Mode1ConsoleContext {
         process,
@@ -118,6 +121,23 @@ pub(super) async fn start_mode1_console_wallet_with_recovery(
     let balance = wait_for_mode1_balance(config, &mut context, min_available).await?;
     context.balance = Some(balance);
     Ok(context)
+}
+
+pub(super) fn write_mode1_runtime_config(config: &Config, path: &Path) -> anyhow::Result<()> {
+    let peers = config
+        .network
+        .mode1_base_node_service_peer
+        .iter()
+        .map(|peer| format!("\"{}\"", peer.replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let contents = format!(
+        "[wallet]\nbase_node_service_peers = [{peers}]\nfee_per_gram = {}\nnum_required_confirmations = {}\n",
+        config.fee_rate()?.0,
+        config.benchmark.c_min
+    );
+    fs::write(path, contents)
+        .with_context(|| format!("writing Mode 1 runtime config {}", path.display()))
 }
 
 pub(super) async fn send_mode1_operator_one_sided(
@@ -264,13 +284,11 @@ pub(super) async fn wait_for_mode1_grpc_address(
 pub(super) async fn wait_for_mode1_scan_to_tip(
     process: &mut Mode1ConsoleProcess,
     client: &mut WalletGrpcClient<tonic::transport::Channel>,
-    target_tip: Option<u64>,
-    moving_tip_base_url: Option<&str>,
+    target_tip: u64,
     timeout: Duration,
     no_progress_timeout: Duration,
 ) -> anyhow::Result<u64> {
     let start = Instant::now();
-    let mut target_tip = target_tip;
     let mut last_progress = Instant::now();
     let mut interval = time::interval(Duration::from_secs(5));
     let mut last_scanned_height = None;
@@ -293,11 +311,10 @@ pub(super) async fn wait_for_mode1_scan_to_tip(
                 process.stderr_path.display()
             );
         }
-        let state = match time::timeout(
-            Duration::from_secs(10),
-            client.get_state(grpc::GetStateRequest {}),
-        )
-        .await
+        let remaining = timeout.saturating_sub(start.elapsed());
+        let call_timeout = Duration::from_secs(10).min(remaining);
+        let state = match time::timeout(call_timeout, client.get_state(grpc::GetStateRequest {}))
+            .await
         {
             Ok(Ok(response)) => response.into_inner(),
             Ok(Err(error)) => {
@@ -323,7 +340,7 @@ pub(super) async fn wait_for_mode1_scan_to_tip(
                         process.stderr_path.display()
                     );
                 }
-                println!("mode1 fresh scan state query timed out after 10s");
+                println!("mode1 fresh scan state query timed out after {call_timeout:?}");
                 continue;
             }
         };
@@ -332,18 +349,7 @@ pub(super) async fn wait_for_mode1_scan_to_tip(
             last_progress = Instant::now();
         }
         last_scanned_height = Some(scanned_height);
-        let target = target_tip.unwrap_or_else(|| scanned_height.saturating_add(1));
-        if scanned_height >= target {
-            if let Some(base_url) = moving_tip_base_url {
-                let latest = base_node_tip_height(base_url).await?;
-                if scanned_height < latest {
-                    println!(
-                        "mode1 fresh scan reached fixed target {target}; continuing to moving tip {latest}"
-                    );
-                    target_tip = Some(latest);
-                    continue;
-                }
-            }
+        if scanned_height >= target_tip {
             return Ok(scanned_height);
         }
         if last_progress.elapsed() > no_progress_timeout {
@@ -357,11 +363,11 @@ pub(super) async fn wait_for_mode1_scan_to_tip(
         }
         if start.elapsed() > timeout {
             bail!(
-                "console wallet fresh scan did not reach target tip {target} within {:?}; scanned_height={scanned_height}",
+                "console wallet fresh scan did not reach target tip {target_tip} within {:?}; scanned_height={scanned_height}",
                 timeout
             );
         }
-        println!("mode1 fresh scan wait: scanned_height={scanned_height} target={target}");
+        println!("mode1 fresh scan wait: scanned_height={scanned_height} target={target_tip}");
     }
 }
 
@@ -420,18 +426,19 @@ fn record_mode1_s0(
     context: &Mode1ConsoleContext,
     wall_ms: u128,
     spendable_count: Option<u64>,
-) {
+) -> bool {
     let Some(mode) = profile.modes.get_mut("old_wallet") else {
-        return;
+        return false;
     };
     let Some(cell) = mode.scenarios.get_mut("S0") else {
-        return;
+        return false;
     };
     let balance = context.balance.as_ref();
     let available = balance.map(|b| b.available_balance).unwrap_or_default();
     let expected = config.a_fund().map(|amount| amount.0).unwrap_or_default();
     let (status, success_count, failure_count, error, mut metrics) =
         strict_s0_status(expected, available, spendable_count);
+    let ok = status == CellStatus::Ok;
     add_s0_funding_observation(
         &mut metrics,
         config.funding.old_wallet.as_ref(),
@@ -464,6 +471,7 @@ fn record_mode1_s0(
             funding.tx_id, funding.height, funding.amount
         ));
     }
+    ok
 }
 
 fn record_mode1_startup_failure(profile: &mut ResultProfile, wall_ms: u128, error: anyhow::Error) {
@@ -473,15 +481,19 @@ fn record_mode1_startup_failure(profile: &mut ResultProfile, wall_ms: u128, erro
     for scenario in [
         ScenarioName::S0,
         ScenarioName::S1,
+        ScenarioName::S2,
+        ScenarioName::S3,
         ScenarioName::S4,
         ScenarioName::S5,
+        ScenarioName::S6,
+        ScenarioName::S7,
     ] {
         let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
             continue;
         };
         cell.record_repetition(Repetition {
             run: 1,
-            status: CellStatus::Failed,
+            status: CellStatus::HarnessError,
             wall_ms: Some(wall_ms),
             success_count: 0,
             failure_count: 1,
@@ -638,7 +650,13 @@ async fn run_mode1_s1(
     client: &mut WalletGrpcClient<tonic::transport::Channel>,
     fee_rate: u64,
 ) -> Mode1TransferSummary {
-    let mut total = Mode1TransferSummary::default();
+    let tip_start_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let mut total = Mode1TransferSummary {
+        tip_start_height,
+        ..Mode1TransferSummary::default()
+    };
     let start = Instant::now();
     let rounds = s1_round_plan(config, config.benchmark.mode1_live_max_s1_txs);
     let balance_before = mode1_available_balance(client).await.ok();
@@ -670,6 +688,7 @@ async fn run_mode1_s1(
         let mut round_summary = Mode1TransferSummary {
             attempted_batches: round.tx_count,
             attempted_payments: round.tx_count.saturating_mul(round.outputs_per_tx),
+            tip_start_height,
             ..Mode1TransferSummary::default()
         };
         for tx_index in 1..=round.tx_count {
@@ -695,24 +714,28 @@ async fn run_mode1_s1(
                 input,
                 plan.fee_microtari
             );
+            let submit_offset_ms = round_start.elapsed().as_millis();
             let result =
                 submit_mode1_coin_split(client, plan.amount_per_split, plan.split_count, fee_rate)
                     .await;
-            round_summary.record_batch(tx_index, round.outputs_per_tx, result);
+            let completed_offset_ms = round_start.elapsed().as_millis();
+            round_summary.record_batch(
+                tx_index,
+                round.outputs_per_tx,
+                submit_offset_ms,
+                completed_offset_ms,
+                result,
+            );
             round_summary
                 .construction_complete_ms
-                .push(round_start.elapsed().as_millis());
+                .push(completed_offset_ms);
         }
-        wait_for_mode1_scan_advance(
-            client,
-            config.settle_wait_blocks(),
-            config.timeout(config.timeouts.confirmation_secs),
-        )
-        .await;
         wait_for_mode1_summary_verification(
             client,
+            &config.network.base_node_http_url,
             &mut round_summary,
             ScenarioName::S1,
+            round_start.elapsed().as_millis(),
             config.timeout(config.timeouts.confirmation_secs),
             config.benchmark.c_min,
         )
@@ -806,18 +829,15 @@ async fn run_mode1_s5(
         false,
         amount,
         fee_rate,
-    )
-    .await;
-    wait_for_mode1_scan_advance(
-        client,
-        config.settle_wait_blocks(),
-        config.timeout(config.timeouts.confirmation_secs),
+        &config.network.base_node_http_url,
     )
     .await;
     wait_for_mode1_summary_verification(
         client,
+        &config.network.base_node_http_url,
         &mut total,
         ScenarioName::S5,
+        start.elapsed().as_millis(),
         config.timeout(config.timeouts.confirmation_secs),
         config.benchmark.c_min,
     )
@@ -866,6 +886,7 @@ async fn run_mode1_s4_batches(
             fee_rate,
             config.timeout(config.benchmark.s4_t_budget_secs),
             config.benchmark.c_min,
+            &config.network.base_node_http_url,
         )
         .await;
         total.add_batch(*configured_batch, batch);
@@ -884,21 +905,26 @@ async fn run_mode1_transfers_concurrent(
     fee_rate: u64,
     budget: Duration,
     required_depth: u64,
+    base_node_url: &str,
 ) -> Mode1TransferSummary {
     let batch_count = u32::try_from(recipients.len()).unwrap_or(u32::MAX);
     let mut summary = Mode1TransferSummary {
         attempted_batches: batch_count,
         attempted_payments: batch_count,
+        tip_start_height: base_node_tip_height(base_node_url).await.ok(),
         ..Mode1TransferSummary::default()
     };
     let start = Instant::now();
     let deadline = time::Instant::now() + budget;
     let mut join_set = JoinSet::new();
+    let mut pending = BTreeMap::new();
     for (index, recipient) in recipients.into_iter().enumerate() {
         let batch_index = u32::try_from(index + 1).unwrap_or(u32::MAX);
         println!("{label} batch {batch_index}/{batch_count} dispatching");
         let mut client = client.clone();
-        let batch_start = Instant::now();
+        let submit_offset_ms = start.elapsed().as_millis();
+        pending.insert(batch_index, submit_offset_ms);
+        let arm_start = start;
         join_set.spawn(async move {
             let transfer = submit_mode1_transfer(
                 &mut client,
@@ -911,34 +937,49 @@ async fn run_mode1_transfers_concurrent(
                 fee_rate,
             )
             .await;
-            (batch_index, batch_start.elapsed().as_millis(), transfer)
+            (
+                batch_index,
+                submit_offset_ms,
+                arm_start.elapsed().as_millis(),
+                transfer,
+            )
         });
     }
     while !join_set.is_empty() {
         let Ok(Some(result)) = time::timeout_at(deadline, join_set.join_next()).await else {
-            let unobserved = u32::try_from(join_set.len()).unwrap_or(u32::MAX);
             join_set.abort_all();
-            summary.failure_count = summary.failure_count.saturating_add(unobserved);
-            summary.errors.push(format!(
-                "{label} absolute deadline expired with {unobserved} dispatch task(s) unfinished"
-            ));
             break;
         };
         match result {
-            Ok((batch_index, completed_ms, transfer)) => {
+            Ok((batch_index, submit_offset_ms, completed_ms, transfer)) => {
+                pending.remove(&batch_index);
                 summary.construction_complete_ms.push(completed_ms);
-                summary.record_batch(batch_index, 1, transfer)
+                summary.record_batch(batch_index, 1, submit_offset_ms, completed_ms, transfer)
             }
-            Err(error) => summary.record_join_error(error.to_string()),
+            Err(error) => summary.errors.push(format!("task join error: {error}")),
         }
+    }
+    let timed_out_at = start.elapsed().as_millis();
+    for (batch_index, submit_offset_ms) in pending {
+        summary.record_batch(
+            batch_index,
+            1,
+            submit_offset_ms,
+            timed_out_at,
+            Err(anyhow::anyhow!(
+                "{label} absolute deadline expired before dispatch task completed"
+            )),
+        );
     }
     let remaining = deadline.saturating_duration_since(time::Instant::now());
     if !remaining.is_zero() && !summary.tx_ids.is_empty() {
         let mut verifier = client.clone();
         wait_for_mode1_summary_verification(
             &mut verifier,
+            base_node_url,
             &mut summary,
             ScenarioName::S4,
+            start.elapsed().as_millis(),
             remaining,
             required_depth,
         )
@@ -953,6 +994,7 @@ async fn run_mode1_transfers_concurrent(
     summary
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_mode1_recipient_batches_sequential(
     label: &str,
     client: &mut WalletGrpcClient<tonic::transport::Channel>,
@@ -961,6 +1003,7 @@ async fn run_mode1_recipient_batches_sequential(
     single_tx: bool,
     amount: MicroMinotari,
     fee_rate: u64,
+    base_node_url: &str,
 ) -> Mode1TransferSummary {
     let mut summary = Mode1TransferSummary {
         attempted_batches: recipient_batches.len().try_into().unwrap_or(u32::MAX),
@@ -968,6 +1011,7 @@ async fn run_mode1_recipient_batches_sequential(
             .iter()
             .map(|batch| u32::try_from(batch.len()).unwrap_or(u32::MAX))
             .fold(0u32, u32::saturating_add),
+        tip_start_height: base_node_tip_height(base_node_url).await.ok(),
         ..Mode1TransferSummary::default()
     };
     let start = Instant::now();
@@ -980,6 +1024,7 @@ async fn run_mode1_recipient_batches_sequential(
             summary.attempted_batches,
             recipients.len()
         );
+        let submit_offset_ms = start.elapsed().as_millis();
         let result = submit_mode1_transfer_to_recipients(
             client,
             scenario,
@@ -990,10 +1035,15 @@ async fn run_mode1_recipient_batches_sequential(
             fee_rate,
         )
         .await;
-        summary
-            .construction_complete_ms
-            .push(start.elapsed().as_millis());
-        summary.record_batch(batch_index, items_per_batch, result);
+        let completed_offset_ms = start.elapsed().as_millis();
+        summary.construction_complete_ms.push(completed_offset_ms);
+        summary.record_batch(
+            batch_index,
+            items_per_batch,
+            submit_offset_ms,
+            completed_offset_ms,
+            result,
+        );
     }
     summary.wall_ms = start.elapsed().as_millis();
     summary
@@ -1119,40 +1169,6 @@ async fn mode1_available_balance(
         .await?
         .into_inner();
     Ok(response.available_balance)
-}
-
-async fn wait_for_mode1_scan_advance(
-    client: &mut WalletGrpcClient<tonic::transport::Channel>,
-    blocks: u64,
-    timeout: Duration,
-) {
-    let Ok(start_state) = client
-        .get_state(grpc::GetStateRequest {})
-        .await
-        .map(|r| r.into_inner())
-    else {
-        return;
-    };
-    let target = start_state.scanned_height.saturating_add(blocks);
-    let start = Instant::now();
-    let mut interval = time::interval(Duration::from_secs(10));
-    while start.elapsed() < timeout {
-        interval.tick().await;
-        let Ok(state) = client
-            .get_state(grpc::GetStateRequest {})
-            .await
-            .map(|r| r.into_inner())
-        else {
-            continue;
-        };
-        if state.scanned_height >= target {
-            return;
-        }
-        println!(
-            "mode1 settle wait: scanned_height={} target={}",
-            state.scanned_height, target
-        );
-    }
 }
 
 /// Pinned transaction weights: one kernel (10), one input (8), and 53 per output.

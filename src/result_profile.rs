@@ -6,6 +6,7 @@ use std::{
 };
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::Digest;
 
 use crate::{
     config::Config,
@@ -72,6 +73,7 @@ pub struct ResultProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaseNodeMetadata {
     pub endpoint: String,
+    pub authority_endpoint: String,
     pub configured_revision: String,
     pub observed_version: Option<String>,
     pub version_observable: bool,
@@ -81,6 +83,10 @@ pub struct BaseNodeMetadata {
     pub tip_end_hash: Option<String>,
     pub pruning_horizon: Option<u64>,
     pub is_synced: Option<bool>,
+    pub authority_tip_start_height: Option<u64>,
+    pub authority_tip_start_hash: Option<String>,
+    pub authority_tip_end_height: Option<u64>,
+    pub authority_tip_end_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +129,15 @@ pub struct S0FundingTransactionEvidence {
     pub broadcast_to_confirmed_at_c_min_ms: u128,
     pub mined_height: u64,
     pub tip_height_at_confirmation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S0FundingSubmissionEvidence {
+    pub tx_id: String,
+    pub broadcasted_at: chrono::DateTime<chrono::Utc>,
+    pub fee_microtari: u64,
+    pub construction_ms: u128,
+    pub broadcast_to_mempool_ms: u128,
 }
 
 #[derive(Debug, Clone)]
@@ -358,6 +373,43 @@ pub struct VerifiedTransaction {
     pub confirmed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionObservation {
+    pub transaction_id: Option<String>,
+    pub attempt_index: Option<u32>,
+    pub batch_index: Option<u32>,
+    pub submit_offset_ms: Option<u128>,
+    pub construction_complete_offset_ms: Option<u128>,
+    pub construction_ms: Option<u128>,
+    pub submission_ms: Option<u128>,
+    pub mempool_available: Option<bool>,
+    pub mempool_reason: Option<String>,
+    pub confirmation_ms: Option<u128>,
+    pub confirmation_timing_reason: Option<String>,
+    pub fee_microtari: Option<u64>,
+    pub terminal_outcome: String,
+    pub error: Option<String>,
+    pub mined_height: Option<u64>,
+    pub tip_start_height: Option<u64>,
+    pub tip_end_height: Option<u64>,
+    pub input_count: Option<u32>,
+    pub total_output_count: Option<u32>,
+    pub payment_output_count: Option<u32>,
+    pub change_output_count: Option<u32>,
+    pub output_commitments: Vec<String>,
+    pub configured_batch: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutcomeCounts {
+    pub attempted: u32,
+    pub accepted: u32,
+    pub confirmed: u32,
+    pub rejected: u32,
+    pub stalled: u32,
+    pub timed_out: u32,
+}
+
 impl ResultProfile {
     pub fn new(config: &Config, environment: Environment) -> Self {
         let versions = BTreeMap::from([
@@ -392,6 +444,22 @@ impl ResultProfile {
         ]);
         let mut scenario_config = config.scenario_defaults();
         scenario_config.insert(
+            "build_manifest".to_string(),
+            fs::read(&config.paths.build_manifest)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or(serde_json::Value::Null),
+        );
+        scenario_config.insert(
+            "harness_executable_sha256".to_string(),
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| fs::read(path).ok())
+                .map(|bytes| hex::encode(sha2::Sha256::digest(bytes)))
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+        scenario_config.insert(
             "scenario_order".to_string(),
             serde_json::json!(ScenarioName::ALL.map(ScenarioName::as_str)),
         );
@@ -407,6 +475,7 @@ impl ResultProfile {
             network: config.network.name.clone(),
             base_node: BaseNodeMetadata {
                 endpoint: config.network.base_node_http_url.clone(),
+                authority_endpoint: config.network.authority_http_url.clone(),
                 configured_revision: config.versions.base_node_rev.clone(),
                 observed_version: None,
                 version_observable: false,
@@ -416,6 +485,10 @@ impl ResultProfile {
                 tip_end_hash: None,
                 pruning_horizon: None,
                 is_synced: None,
+                authority_tip_start_height: None,
+                authority_tip_start_hash: None,
+                authority_tip_end_height: None,
+                authority_tip_end_hash: None,
             },
             environment,
             versions,
@@ -423,7 +496,7 @@ impl ResultProfile {
             funding: config.funding.as_map(),
             modes: BTreeMap::new(),
             computed_deltas: BTreeMap::new(),
-            findings: default_findings(),
+            findings: Vec::new(),
             chain_verification: ChainVerification {
                 tx_mined_confirmed_status_value: TX_MINED_CONFIRMED_STATUS,
                 verified_transactions: Vec::new(),
@@ -522,7 +595,7 @@ fn harness_git_commit() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn computed_deltas(profile: &ResultProfile) -> BTreeMap<String, serde_json::Value> {
+pub(super) fn computed_deltas(profile: &ResultProfile) -> BTreeMap<String, serde_json::Value> {
     let mut deltas = BTreeMap::new();
     deltas.insert("scan_deltas".to_string(), computed_scan_deltas(profile));
     deltas.insert("s5_throughput".to_string(), computed_s5_throughput(profile));
@@ -537,12 +610,18 @@ fn computed_scan_deltas(profile: &ResultProfile) -> serde_json::Value {
             let b0 = scenario_wall_ms(profile, mode_key, "B0");
             let s2 = scenario_wall_ms(profile, mode_key, "S2");
             let s6 = scenario_wall_ms(profile, mode_key, "S6");
+            let s2_minus_b0 = option_sub_u128(s2, b0);
+            let s6_minus_s2 = option_sub_u128(s6, s2);
+            let s6_over_b0 = option_ratio_u128(s6, b0);
             (
                 mode_key.to_string(),
                 serde_json::json!({
-                    "t_scan_s2_minus_b0_ms": option_sub_u128(s2, b0),
-                    "t_scan_s6_minus_s2_ms": option_sub_u128(s6, s2),
-                    "t_scan_s6_over_b0": option_ratio_u128(s6, b0),
+                    "t_scan_s2_minus_b0_ms": s2_minus_b0,
+                    "t_scan_s2_minus_b0_unavailable_reason": s2_minus_b0.is_none().then_some("B0_or_S2_incomplete"),
+                    "t_scan_s6_minus_s2_ms": s6_minus_s2,
+                    "t_scan_s6_minus_s2_unavailable_reason": s6_minus_s2.is_none().then_some("S2_or_S6_incomplete"),
+                    "t_scan_s6_over_b0": s6_over_b0,
+                    "t_scan_s6_over_b0_unavailable_reason": s6_over_b0.is_none().then_some("B0_or_S6_incomplete_or_B0_zero"),
                     "source": "scenario_median_wall_ms"
                 }),
             )
@@ -610,9 +689,7 @@ fn complete_arm_wall_ms(
 ) -> Option<u128> {
     let arm = arms.get(mode)?.get(arm)?;
     let recipients = arm.get("recipient_count")?.as_u64()?;
-    let successes = arm.get("success_count")?.as_u64()?;
-    let failures = arm.get("failure_count")?.as_u64()?;
-    if recipients == 0 || successes != recipients || failures != 0 {
+    if recipients == 0 || arm.get("complete")?.as_bool() != Some(true) {
         return None;
     }
     arm.get("wall_ms")?.as_u64().map(u128::from)
@@ -723,60 +800,6 @@ pub fn write_schema(path: &PathBuf) -> anyhow::Result<()> {
     let schema = profile_validation::schema_document();
     fs::write(path, serde_json::to_string_pretty(&schema)? + "\n")?;
     Ok(())
-}
-
-fn default_findings() -> Vec<Finding> {
-    vec![
-        Finding {
-            id: "pp-real-app".to_string(),
-            title: "Mode 3 uses the real minotari_payment_processor".to_string(),
-            status: "implemented_in_topology".to_string(),
-            recommendation: "Keep PP failures visible as benchmark output rather than bypassing the service."
-                .to_string(),
-        },
-        Finding {
-            id: "birthday-seeds".to_string(),
-            title: "Genesis and birthday scans require birthday-encoded seeds".to_string(),
-            status: "harness_generates_seed_material".to_string(),
-            recommendation: "Use generated seeds and rewrite birthday for scan setup instead of RescanWallet(0)."
-                .to_string(),
-        },
-        Finding {
-            id: "chain-verification".to_string(),
-            title: "Mempool acceptance is not benchmark success".to_string(),
-            status: "schema_requires_chain_verification".to_string(),
-            recommendation: "Verify claimed successful transactions with status value 6 before publishing throughput."
-                .to_string(),
-        },
-        Finding {
-            id: "funds-pending-hidden-state".to_string(),
-            title: "FundsPending can live outside reported balances".to_string(),
-            status: "observed_in_live_runs".to_string(),
-            recommendation: "Use chain-advance settlement gates between planned spend rounds; do not retry failed sends."
-                .to_string(),
-        },
-        Finding {
-            id: "mode2-multi-recipient-s1-builder".to_string(),
-            title: "Mode 2 S1 uses the multi-recipient one-sided builder".to_string(),
-            status: "implemented_for_s1_round_shape".to_string(),
-            recommendation: "Keep S1 on the lower-level multi-recipient builder; S4/S5 remain single-recipient by scenario shape."
-                .to_string(),
-        },
-        Finding {
-            id: "pp-single-utxo-lock-stalls-batches".to_string(),
-            title: "Payment processor batches can stall behind one locked UTXO".to_string(),
-            status: "observed_in_real_topology".to_string(),
-            recommendation: "Preserve PENDING_BATCHING/insufficient-funds states as benchmark signal."
-                .to_string(),
-        },
-        Finding {
-            id: "console-mnemonic-birthday".to_string(),
-            title: "Console wallet recovery uses mnemonic birthday over the birthday flag".to_string(),
-            status: "implemented_in_mode1_startup".to_string(),
-            recommendation: "Rewrite only the mnemonic birthday for birthday scans while preserving wallet keys and address."
-                .to_string(),
-        },
-    ]
 }
 
 #[cfg(test)]
@@ -907,8 +930,8 @@ mod tests {
                 error: None,
                 metrics: Some(serde_json::json!({
                     "s5_arms": {
-                        "individual": {"wall_ms": 300, "recipient_count": 100, "success_count": 100, "failure_count": 0},
-                        "batch": {"wall_ms": 150, "recipient_count": 100, "success_count": 100, "failure_count": 0}
+                        "individual": {"wall_ms": 300, "recipient_count": 100, "success_count": 100, "failure_count": 0, "complete": true},
+                        "batch": {"wall_ms": 150, "recipient_count": 100, "success_count": 10, "failure_count": 0, "complete": true}
                     }
                 })),
             });
@@ -925,7 +948,7 @@ mod tests {
                 fee_microtari: None,
                 error: None,
                 metrics: Some(serde_json::json!({
-                    "s5_arms": {"batch": {"wall_ms": 120, "recipient_count": 100, "success_count": 100, "failure_count": 0}}
+                    "s5_arms": {"batch": {"wall_ms": 120, "recipient_count": 100, "success_count": 10, "failure_count": 0, "complete": true}}
                 })),
             });
 

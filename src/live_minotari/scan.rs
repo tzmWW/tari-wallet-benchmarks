@@ -271,8 +271,15 @@ async fn run_library_fresh_scan_cell(
             config.benchmark.scan_repetitions,
             spec.birthday()
         );
-        let scan =
-            run_library_fresh_scan(config, mode, spec, run, funded_seed_words, expectations).await;
+        let scan = run_library_fresh_scan(
+            config,
+            mode,
+            spec,
+            run,
+            funded_seed_words,
+            expectations.clone(),
+        )
+        .await;
         match scan {
             Ok(measurement) => {
                 println!(
@@ -306,7 +313,7 @@ async fn run_library_fresh_scan_cell(
                 );
                 cell.record_repetition(Repetition {
                     run,
-                    status: CellStatus::Failed,
+                    status: CellStatus::HarnessError,
                     wall_ms: Some(run_start.elapsed().as_millis()),
                     success_count: 0,
                     failure_count: 1,
@@ -339,7 +346,7 @@ async fn run_mode1_fresh_scan_cell(
             config.benchmark.scan_repetitions,
             spec.birthday()
         );
-        let scan = run_mode1_fresh_scan(config, old_seed, spec, run, expectations).await;
+        let scan = run_mode1_fresh_scan(config, old_seed, spec, run, expectations.clone()).await;
         match scan {
             Ok(measurement) => {
                 println!(
@@ -373,7 +380,7 @@ async fn run_mode1_fresh_scan_cell(
                 );
                 cell.record_repetition(Repetition {
                     run,
-                    status: CellStatus::Failed,
+                    status: CellStatus::HarnessError,
                     wall_ms: Some(run_start.elapsed().as_millis()),
                     success_count: 0,
                     failure_count: 1,
@@ -407,46 +414,76 @@ async fn run_library_fresh_scan(
     init_with_seed_words(seed, &password, &db_path, Some("default"))
         .context("initializing fresh scan wallet")?;
 
-    let tip_start = base_node_tip_height(&config.network.base_node_http_url)
-        .await
-        .ok();
+    let target = base_node_tip_snapshot(&config.network.base_node_http_url).await?;
+    let tip_start = Some(target.height);
     let tip_tolerance = 0;
+    let scan_started = Instant::now();
     let (scan_result, resource_peaks) = with_resource_sampling(
         Some(std::process::id()),
-        scan_to_tip(
+        scan_to_fixed_tip(
             &db_path,
             &password,
             &config.network.base_node_http_url,
             config.benchmark.scan_batch_size,
             tip_tolerance,
-            config.timeout(config.timeouts.scan_batch_secs),
+            config.timeout(config.timeouts.startup_secs),
+            target.clone(),
         ),
     )
     .await;
-    let scan_report = scan_result?;
-    let tip_end = Some(scan_report.target_tip);
     let account = account_snapshot(&db_path)?;
+    let (wall_ms, completion, no_progress, stopped, more_blocks, scan_error) = match scan_result {
+        Ok(report) => (
+            report.wall_ms,
+            ChainTipSnapshot {
+                height: report.completion_tip,
+                hash: report.completion_hash,
+            },
+            report.no_progress_attempts,
+            report.stopped_without_progress,
+            report.last_more_blocks,
+            None,
+        ),
+        Err(error) => (
+            scan_started.elapsed().as_millis(),
+            base_node_tip_snapshot(&config.network.base_node_http_url)
+                .await
+                .unwrap_or_else(|_| target.clone()),
+            u64::from(account.max_height == 0),
+            true,
+            None,
+            Some(format!("{error:#}")),
+        ),
+    };
     let detected_outputs = detected_output_count(&db_path).unwrap_or_default();
     let history_transactions = history_transaction_count(&db_path).unwrap_or_default();
+    let history_tx_ids = history_transaction_ids(&db_path).unwrap_or_default();
+    let recovered_output_commitments = recovered_output_commitments(&db_path).unwrap_or_default();
     let spendable_outputs = spendable_output_count(&db_path).unwrap_or_default();
 
     Ok(ScanMeasurement {
-        wall_ms: scan_report.wall_ms,
+        wall_ms,
         birthday: spec.birthday(),
         birthday_start_height: resolved_birthday_start_height(config, mode, spec),
         max_height: account.max_height,
         available_microtari: account.available_microtari,
         tip_start,
-        tip_end,
+        tip_end: Some(target.height),
+        tip_target_hash: Some(target.hash),
+        tip_completion: Some(completion.height),
+        tip_completion_hash: Some(completion.hash),
         detected_outputs,
         history_transactions,
+        history_tx_ids,
+        recovered_output_commitments,
         spendable_outputs,
         resource_peaks,
         expectations,
         tip_lag_tolerance_blocks: tip_tolerance,
-        scan_no_progress_attempts: scan_report.no_progress_attempts,
-        scan_stopped_without_progress: scan_report.stopped_without_progress,
-        scan_last_more_blocks: scan_report.last_more_blocks,
+        scan_no_progress_attempts: no_progress,
+        scan_stopped_without_progress: stopped,
+        scan_last_more_blocks: more_blocks,
+        scan_error,
     })
 }
 
@@ -472,27 +509,16 @@ async fn run_mode1_fresh_scan(
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::create_dir_all("logs")?;
+    write_mode1_runtime_config(config, &config_path)?;
     let log_stem = format!(
         "mode1-scan-{}-run{}-birthday{}",
         spec.scenario.as_str().to_lowercase(),
         run,
         spec.birthday()
     );
-    let stdout_path = PathBuf::from(format!("logs/{log_stem}.stdout.log"));
-    let stderr_path = PathBuf::from(format!("logs/{log_stem}.stderr.log"));
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stdout_path)?;
-    let stderr = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stderr_path)?;
 
-    let tip_start = base_node_tip_height(&config.network.base_node_http_url)
-        .await
-        .ok();
+    let target = base_node_tip_snapshot(&config.network.base_node_http_url).await?;
+    let tip_start = Some(target.height);
     let start = Instant::now();
     let mut command = Command::new(&config.paths.minotari_console_wallet);
     command
@@ -508,57 +534,71 @@ async fn run_mode1_fresh_scan(
         .arg("--recovery")
         .arg("--grpc-enabled")
         .arg("--grpc-address")
-        .arg(&grpc_bind)
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-    let mut process = Mode1ConsoleProcess {
-        child: command.spawn().context("spawning scan console wallet")?,
-        stdout_path,
-        stderr_path,
-    };
-    let scan_pid = process.child.id();
+        .arg(&grpc_bind);
+    let mut process =
+        ManagedProcess::spawn(&log_stem, command, &config.paths.data_dir.join("logs"))?;
+    let scan_pid = process.id();
     let mut client = wait_for_mode1_grpc_address(config, &mut process, &grpc_address).await?;
     let (scan_result, resource_peaks) = with_resource_sampling(
         scan_pid,
         wait_for_mode1_scan_to_tip(
             &mut process,
             &mut client,
-            tip_start,
-            Some(&config.network.base_node_http_url),
+            target.height,
             config.timeout(config.timeouts.startup_secs),
             config.timeout(config.timeouts.scan_batch_secs),
         ),
     )
     .await;
-    let max_height = scan_result?;
-    let balance = client
+    let scan_error = scan_result.as_ref().err().map(|error| format!("{error:#}"));
+    let max_height = match scan_result {
+        Ok(height) => height,
+        Err(_) => client
+            .get_state(grpc::GetStateRequest {})
+            .await
+            .ok()
+            .map(|response| response.into_inner().scanned_height)
+            .unwrap_or_default(),
+    };
+    let available_microtari = client
         .get_balance(grpc::GetBalanceRequest { payment_id: None })
-        .await?
-        .into_inner();
-    let detected_outputs = mode1_unspent_count(&mut client).await.unwrap_or_default();
-    let history_transactions =
-        history_transaction_count(&base_path.join("esmeralda/data/wallet/db/console_wallet.db"))
-            .unwrap_or_default();
-    let spendable_outputs = detected_outputs;
-    let tip_end = Some(max_height);
+        .await
+        .ok()
+        .map(|response| response.into_inner().available_balance)
+        .unwrap_or_default();
+    let wallet_db = base_path.join("esmeralda/data/wallet/db/console_wallet.db");
+    let detected_outputs = detected_output_count(&wallet_db).unwrap_or_default();
+    let history_transactions = history_transaction_count(&wallet_db).unwrap_or_default();
+    let history_tx_ids = history_transaction_ids(&wallet_db).unwrap_or_default();
+    let recovered_output_commitments = recovered_output_commitments(&wallet_db).unwrap_or_default();
+    let spendable_outputs = mode1_unspent_count(&mut client).await.unwrap_or_default();
+    let completion = base_node_tip_snapshot(&config.network.base_node_http_url).await?;
+    let tip_end = Some(target.height);
+    process.shutdown().await?;
 
     Ok(ScanMeasurement {
         wall_ms: start.elapsed().as_millis(),
         birthday: spec.birthday(),
         birthday_start_height: resolved_birthday_start_height(config, "old_wallet", spec),
         max_height,
-        available_microtari: balance.available_balance,
+        available_microtari,
         tip_start,
         tip_end,
+        tip_target_hash: Some(target.hash),
+        tip_completion: Some(completion.height),
+        tip_completion_hash: Some(completion.hash),
         detected_outputs,
         history_transactions,
+        history_tx_ids,
+        recovered_output_commitments,
         spendable_outputs,
         resource_peaks,
         expectations,
         tip_lag_tolerance_blocks: 0,
         scan_no_progress_attempts: 0,
-        scan_stopped_without_progress: false,
+        scan_stopped_without_progress: scan_error.is_some() || max_height < target.height,
         scan_last_more_blocks: None,
+        scan_error,
     })
 }
 
@@ -621,6 +661,50 @@ fn history_transaction_count(db_path: &Path) -> anyhow::Result<u64> {
         row.get(0)
     })?;
     Ok(u64::try_from(count).unwrap_or_default())
+}
+
+fn history_transaction_ids(db_path: &Path) -> anyhow::Result<BTreeSet<String>> {
+    let conn = Connection::open(db_path)?;
+    let columns = table_columns_for_scan(&conn, "completed_transactions")?;
+    let column = if columns.contains("tx_id") {
+        "tx_id"
+    } else if columns.contains("transaction_id") {
+        "transaction_id"
+    } else {
+        bail!("completed_transactions has no transaction identity column");
+    };
+    let mut statement = conn.prepare(&format!(
+        "SELECT CAST({column} AS TEXT) FROM completed_transactions WHERE {column} IS NOT NULL"
+    ))?;
+    Ok(statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?)
+}
+
+fn recovered_output_commitments(db_path: &Path) -> anyhow::Result<BTreeSet<String>> {
+    let conn = Connection::open(db_path)?;
+    let columns = table_columns_for_scan(&conn, "outputs")?;
+    let column = if columns.contains("commitment") {
+        "commitment"
+    } else if columns.contains("commitment_data") {
+        "commitment_data"
+    } else {
+        bail!("outputs has no commitment identity column");
+    };
+    let mut statement = conn.prepare(&format!(
+        "SELECT {column} FROM outputs WHERE {column} IS NOT NULL"
+    ))?;
+    Ok(statement
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+        .map(|row| row.map(hex::encode))
+        .collect::<Result<_, _>>()?)
+}
+
+fn table_columns_for_scan(conn: &Connection, table: &str) -> anyhow::Result<BTreeSet<String>> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    Ok(statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<_, _>>()?)
 }
 
 pub fn account_balance(db_path: &Path) -> anyhow::Result<serde_json::Value> {

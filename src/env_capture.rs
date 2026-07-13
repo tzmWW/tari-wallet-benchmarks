@@ -15,17 +15,39 @@ pub struct Environment {
     pub base_node_host: Option<String>,
     #[serde(default)]
     pub base_node_network_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_host: Option<String>,
+    #[serde(default)]
+    pub authority_network_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode1_base_node_service_peer: Option<String>,
 }
 
 pub fn capture() -> Environment {
-    capture_with_base_node_url(None)
+    capture_with_network(None, None, None)
 }
 
 pub fn capture_for_base_node(base_node_url: &str) -> Environment {
-    capture_with_base_node_url(Some(base_node_url))
+    capture_with_network(Some(base_node_url), None, None)
 }
 
-fn capture_with_base_node_url(base_node_url: Option<&str>) -> Environment {
+pub fn capture_for_network(
+    base_node_url: &str,
+    authority_url: &str,
+    mode1_base_node_service_peer: Option<&str>,
+) -> Environment {
+    capture_with_network(
+        Some(base_node_url),
+        Some(authority_url),
+        mode1_base_node_service_peer,
+    )
+}
+
+fn capture_with_network(
+    base_node_url: Option<&str>,
+    authority_url: Option<&str>,
+    mode1_base_node_service_peer: Option<&str>,
+) -> Environment {
     let mut system = System::new_all();
     system.refresh_all();
     let cpu_brand = system
@@ -34,7 +56,8 @@ fn capture_with_base_node_url(base_node_url: Option<&str>) -> Environment {
         .map(|cpu| cpu.brand().to_string())
         .unwrap_or_else(|| "unknown".to_string());
     let (disk_kind, disk_name) = primary_disk();
-    let (base_node_host, base_node_network_path) = base_node_network_path(base_node_url);
+    let (base_node_host, base_node_path) = base_node_network_path(base_node_url);
+    let (authority_host, authority_network_path) = base_node_network_path(authority_url);
 
     Environment {
         os: System::long_os_version().unwrap_or_else(|| std::env::consts::OS.to_string()),
@@ -44,7 +67,10 @@ fn capture_with_base_node_url(base_node_url: Option<&str>) -> Environment {
         disk_kind,
         disk_name,
         base_node_host,
-        base_node_network_path,
+        base_node_network_path: base_node_path,
+        authority_host,
+        authority_network_path,
+        mode1_base_node_service_peer: mode1_base_node_service_peer.map(ToString::to_string),
     }
 }
 

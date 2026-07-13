@@ -1,0 +1,25 @@
+diff --git a/minotari_payment_processor/src/workers/unsigned_tx_creator.rs b/minotari_payment_processor/src/workers/unsigned_tx_creator.rs
+index 0b3883c..0c3a8cc 100644
+--- a/minotari_payment_processor/src/workers/unsigned_tx_creator.rs
++++ b/minotari_payment_processor/src/workers/unsigned_tx_creator.rs
+@@ -32,7 +32,6 @@ use crate::utils::log::{mask_amount, mask_string};
+ use crate::workers::types::IntermediateContext;
+ 
+ const DEFAULT_SLEEP_SECS: u64 = 15;
+-const FEE_PER_GRAM: u64 = 5;
+ // Buffer to ensure we have enough funds left for the final payment after paying for split fees.
+ const FEE_BUFFER_AMOUNT: i64 = 200_000;
+ 
+@@ -289,7 +288,11 @@ async fn prepare_signing_request(
+     let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager, network)
+         .context("Failed to create TransactionBuilder")?;
+ 
+-    tx_builder.with_fee_per_gram(MicroMinotari(FEE_PER_GRAM));
++    let fee_per_gram = std::env::var("FEE_PER_GRAM")
++        .context("FEE_PER_GRAM must be set")?
++        .parse::<u64>()
++        .context("FEE_PER_GRAM must be an unsigned integer in microTari")?;
++    tx_builder.with_fee_per_gram(MicroMinotari(fee_per_gram));
+ 
+     for input in inputs {
+         tx_builder.with_input(input.clone()).context("Failed to add input")?;

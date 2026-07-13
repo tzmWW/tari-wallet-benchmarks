@@ -9,6 +9,7 @@ harness.toml
 config/
 logs/
 tools/
+candidates/
 
 # Local planning and memory files
 KNOWLEDGE.md

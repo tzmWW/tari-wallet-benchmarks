@@ -3,6 +3,22 @@
     "base_node": {
       "additionalProperties": false,
       "properties": {
+        "authority_endpoint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "authority_tip_end_hash": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "authority_tip_end_height": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "authority_tip_start_hash": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "authority_tip_start_height": {
+          "$ref": "#/$defs/nullable_integer"
+        },
         "configured_revision": {
           "minLength": 1,
           "type": "string"
@@ -41,6 +57,7 @@
       },
       "required": [
         "endpoint",
+        "authority_endpoint",
         "configured_revision",
         "observed_version",
         "version_observable",
@@ -49,7 +66,11 @@
         "tip_end_height",
         "tip_end_hash",
         "pruning_horizon",
-        "is_synced"
+        "is_synced",
+        "authority_tip_start_height",
+        "authority_tip_start_hash",
+        "authority_tip_end_height",
+        "authority_tip_end_hash"
       ],
       "type": "object"
     },
@@ -165,9 +186,9 @@
         "fee_rate": {
           "type": "string"
         },
-        "repetitions": {
-          "minimum": 1,
-          "type": "integer"
+        "protocol_fingerprint": {
+          "minLength": 64,
+          "type": "string"
         },
         "scan_repetitions": {
           "minimum": 1,
@@ -189,14 +210,24 @@
         "S5_M",
         "S5_K",
         "fee_rate",
-        "repetitions",
-        "scan_repetitions"
+        "scan_repetitions",
+        "protocol_fingerprint"
       ],
       "type": "object"
     },
     "environment": {
       "additionalProperties": false,
       "properties": {
+        "authority_host": {
+          "type": "string"
+        },
+        "authority_network_path": {
+          "enum": [
+            "local",
+            "remote",
+            "unknown"
+          ]
+        },
         "base_node_host": {
           "type": "string"
         },
@@ -216,6 +247,9 @@
         "disk_name": {
           "type": "string"
         },
+        "mode1_base_node_service_peer": {
+          "type": "string"
+        },
         "os": {
           "type": "string"
         },
@@ -232,7 +266,8 @@
         "cpu_brand",
         "physical_cores",
         "total_memory_bytes",
-        "base_node_network_path"
+        "base_node_network_path",
+        "authority_network_path"
       ],
       "type": "object"
     },
@@ -304,9 +339,15 @@
         "construction_ms": {
           "$ref": "#/$defs/nullable_integer"
         },
+        "funding_fee_attribution": {
+          "$ref": "#/$defs/nullable_string"
+        },
         "height": {
           "minimum": 0,
           "type": "integer"
+        },
+        "shared_funding_fee_microtari": {
+          "$ref": "#/$defs/nullable_integer"
         },
         "tip_height_at_confirmation": {
           "$ref": "#/$defs/nullable_integer"
@@ -564,7 +605,25 @@
     "transaction_observation": {
       "additionalProperties": false,
       "properties": {
+        "attempt_index": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "batch_index": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "change_output_count": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "configured_batch": {
+          "$ref": "#/$defs/nullable_integer"
+        },
         "confirmation_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "confirmation_timing_reason": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "construction_complete_offset_ms": {
           "$ref": "#/$defs/nullable_integer"
         },
         "construction_ms": {
@@ -574,6 +633,9 @@
           "$ref": "#/$defs/nullable_string"
         },
         "fee_microtari": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "input_count": {
           "$ref": "#/$defs/nullable_integer"
         },
         "mempool_available": {
@@ -588,13 +650,26 @@
         "mined_height": {
           "$ref": "#/$defs/nullable_integer"
         },
+        "output_commitments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "payment_output_count": {
+          "$ref": "#/$defs/nullable_integer"
+        },
         "submission_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "submit_offset_ms": {
           "$ref": "#/$defs/nullable_integer"
         },
         "terminal_outcome": {
           "enum": [
             "confirmed",
             "rejected",
+            "stalled",
             "timed_out",
             "unavailable"
           ]
@@ -605,23 +680,37 @@
         "tip_start_height": {
           "$ref": "#/$defs/nullable_integer"
         },
+        "total_output_count": {
+          "$ref": "#/$defs/nullable_integer"
+        },
         "transaction_id": {
           "$ref": "#/$defs/nullable_string"
         }
       },
       "required": [
         "transaction_id",
+        "attempt_index",
+        "batch_index",
+        "submit_offset_ms",
+        "construction_complete_offset_ms",
         "construction_ms",
         "submission_ms",
         "mempool_available",
         "mempool_reason",
         "confirmation_ms",
+        "confirmation_timing_reason",
         "fee_microtari",
         "terminal_outcome",
         "error",
         "mined_height",
         "tip_start_height",
-        "tip_end_height"
+        "tip_end_height",
+        "input_count",
+        "total_output_count",
+        "payment_output_count",
+        "change_output_count",
+        "output_commitments",
+        "configured_batch"
       ],
       "type": "object"
     },
