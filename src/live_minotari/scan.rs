@@ -329,7 +329,7 @@ async fn run_library_fresh_scan_cell(
             Ok(measurement) => {
                 let verification_ok = measurement.scan_verification_ok();
                 println!(
-                    "live scan {mode}/{} run {run} {}: wall_ms={} max_height={} available_microtari={}",
+                    "live scan {mode}/{} run {run} {}: wall_ms={} max_height={} available_microtari={}{}",
                     spec.scenario.as_str(),
                     if verification_ok {
                         "verified"
@@ -338,7 +338,12 @@ async fn run_library_fresh_scan_cell(
                     },
                     measurement.wall_ms,
                     measurement.max_height,
-                    measurement.available_microtari
+                    measurement.available_microtari,
+                    if verification_ok {
+                        String::new()
+                    } else {
+                        format!(" error={}", measurement.scan_verification_error())
+                    }
                 );
                 cell.record_repetition(Repetition {
                     run,
@@ -410,7 +415,7 @@ async fn run_mode1_fresh_scan_cell(
             Ok(measurement) => {
                 let verification_ok = measurement.scan_verification_ok();
                 println!(
-                    "live scan old_wallet/{} run {run} {}: wall_ms={} max_height={} available_microtari={}",
+                    "live scan old_wallet/{} run {run} {}: wall_ms={} max_height={} available_microtari={}{}",
                     spec.scenario.as_str(),
                     if verification_ok {
                         "verified"
@@ -419,7 +424,12 @@ async fn run_mode1_fresh_scan_cell(
                     },
                     measurement.wall_ms,
                     measurement.max_height,
-                    measurement.available_microtari
+                    measurement.available_microtari,
+                    if verification_ok {
+                        String::new()
+                    } else {
+                        format!(" error={}", measurement.scan_verification_error())
+                    }
                 );
                 cell.record_repetition(Repetition {
                     run,
