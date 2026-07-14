@@ -68,10 +68,6 @@ pub struct BenchmarkConfig {
     #[serde(default)]
     pub live_fresh_scan_cells: bool,
     #[serde(default)]
-    pub mode2_send_smoke: bool,
-    #[serde(default = "default_mode2_send_smoke_amount")]
-    pub mode2_send_smoke_amount: String,
-    #[serde(default)]
     pub mode2_live_scenarios: bool,
     #[serde(
         default = "default_mode2_payment_amount",
@@ -291,7 +287,6 @@ impl Config {
                 || self.benchmark.s5_m != 100
                 || self.benchmark.s5_k != 10
                 || self.fee_rate()?.0 != 5
-                || self.benchmark.mode2_send_smoke
                 || self.benchmark.mode1_live_max_s1_txs != 0
                 || self.benchmark.mode1_live_max_s4_batch != 0
                 || self.benchmark.mode1_live_max_s5_items != 0
@@ -322,15 +317,8 @@ impl Config {
         if self.benchmark.scan_batch_size == 0 {
             bail!("benchmark.scan_batch_size must be greater than 0");
         }
-        if self.benchmark.mode2_send_smoke && self.benchmark.mode2_live_scenarios {
-            bail!(
-                "benchmark.mode2_send_smoke and benchmark.mode2_live_scenarios are mutually exclusive"
-            );
-        }
         parse_amount(&self.benchmark.mode1_payment_amount)
             .context("benchmark.mode1_payment_amount")?;
-        parse_amount(&self.benchmark.mode2_send_smoke_amount)
-            .context("benchmark.mode2_send_smoke_amount")?;
         parse_amount(&self.benchmark.mode2_payment_amount)
             .context("benchmark.mode2_payment_amount")?;
         parse_amount(&self.benchmark.mode3_payment_amount)
@@ -357,7 +345,7 @@ impl Config {
             bail!("funding.old_wallet must be set when benchmark.mode1_live_topology=true");
         }
         if require_live_funding
-            && (self.benchmark.mode2_live_scenarios || self.benchmark.mode2_send_smoke)
+            && self.benchmark.mode2_live_scenarios
             && self.funding.new_wallet.is_none()
         {
             bail!("funding.new_wallet must be set when Mode 2 live sends are enabled");
@@ -485,14 +473,6 @@ impl Config {
                 serde_json::json!(self.benchmark.live_fresh_scan_cells),
             ),
             (
-                "mode2_send_smoke".to_string(),
-                serde_json::json!(self.benchmark.mode2_send_smoke),
-            ),
-            (
-                "mode2_send_smoke_amount".to_string(),
-                serde_json::json!(self.benchmark.mode2_send_smoke_amount),
-            ),
-            (
                 "mode2_live_scenarios".to_string(),
                 serde_json::json!(self.benchmark.mode2_live_scenarios),
             ),
@@ -585,8 +565,6 @@ impl Default for Config {
                 mode1_live_max_s4_batch: 0,
                 mode1_live_max_s5_items: 0,
                 live_fresh_scan_cells: false,
-                mode2_send_smoke: false,
-                mode2_send_smoke_amount: default_mode2_send_smoke_amount(),
                 mode2_live_scenarios: false,
                 mode2_payment_amount: default_mode2_payment_amount(),
                 mode2_live_max_s1_txs: 0,
@@ -641,10 +619,6 @@ fn default_scan_repetitions() -> u32 {
 }
 
 fn default_mode1_payment_amount() -> String {
-    "1 T".to_string()
-}
-
-fn default_mode2_send_smoke_amount() -> String {
     "1 T".to_string()
 }
 
@@ -717,7 +691,7 @@ impl FundingConfig {
             ),
             (
                 "new_wallet",
-                benchmark.mode2_live_scenarios || benchmark.mode2_send_smoke,
+                benchmark.mode2_live_scenarios,
                 self.new_wallet.as_ref(),
             ),
             (
@@ -792,15 +766,15 @@ mod tests {
     fn funding_records_validate_amounts_and_heights() {
         let mut cfg = Config::default();
         cfg.funding.new_wallet = Some(FundingRecord {
-            amount: "50000 T".to_string(),
-            tx_id: "7676530785144502866".to_string(),
-            height: 707741,
+            amount: "10000 T".to_string(),
+            tx_id: "synthetic-funding-tx".to_string(),
+            height: 100,
             birthday: None,
             birthday_start_height: None,
             ..FundingRecord::default()
         });
         cfg.validate().unwrap();
-        assert_eq!(cfg.funding.as_map()["new_wallet"].height, 707741);
+        assert_eq!(cfg.funding.as_map()["new_wallet"].height, 100);
 
         cfg.funding.new_wallet.as_mut().unwrap().height = 0;
         let error = cfg.validate().unwrap_err().to_string();
@@ -813,14 +787,6 @@ mod tests {
         cfg.benchmark.scan_batch_size = 0;
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("scan_batch_size"));
-    }
-
-    #[test]
-    fn mode2_smoke_amount_must_parse() {
-        let mut cfg = Config::default();
-        cfg.benchmark.mode2_send_smoke_amount = "not money".to_string();
-        let error = cfg.validate().unwrap_err().to_string();
-        assert!(error.contains("mode2_send_smoke_amount"));
     }
 
     #[test]
@@ -853,15 +819,6 @@ mod tests {
         cfg.benchmark.mode3_worker_sleep_secs = 0;
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("mode3_worker_sleep_secs"));
-    }
-
-    #[test]
-    fn mode2_smoke_and_live_scenarios_are_exclusive() {
-        let mut cfg = Config::default();
-        cfg.benchmark.mode2_send_smoke = true;
-        cfg.benchmark.mode2_live_scenarios = true;
-        let error = cfg.validate().unwrap_err().to_string();
-        assert!(error.contains("mutually exclusive"));
     }
 
     #[test]

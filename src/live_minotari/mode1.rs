@@ -457,11 +457,10 @@ fn record_mode1_s0(
         metrics: Some(metrics),
     });
     cell.notes.push(format!(
-        "Mode 1 topology started real minotari_console_wallet gRPC version {}; grpc_address={} grpc_bind={} base_path={} birthday={} balance_available={} pending_in={} pending_out={}",
+        "Mode 1 topology started real minotari_console_wallet gRPC version {}; grpc_address={} grpc_bind={} birthday={} balance_available={} pending_in={} pending_out={}",
         context.version.as_deref().unwrap_or("unknown"),
         config.modes.old_wallet_grpc_address,
         context.grpc_bind,
-        old_wallet_base_path(config).display(),
         context.birthday,
         balance.map(|b| b.available_balance).unwrap_or_default(),
         balance.map(|b| b.pending_incoming_balance).unwrap_or_default(),
@@ -1362,30 +1361,6 @@ impl ExactSplitPlan {
     }
 }
 
-/// Plans a one-input transaction whose recipients plus exact pinned fee consume the
-/// entire input. The final recipient absorbs the integer remainder, so the builder has
-/// no value from which to create a change output.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn exact_no_change_split(
-    input_microtari: u64,
-    child_count: u32,
-    fee_per_gram: u64,
-    output_grams: u64,
-) -> anyhow::Result<ExactSplitPlan> {
-    if child_count < 2 {
-        bail!("exact split requires at least two child outputs");
-    }
-    let child_count_u64 = u64::from(child_count);
-    let weight = 10u64
-        .checked_add(8)
-        .and_then(|base| base.checked_add(output_grams.checked_mul(child_count_u64)?))
-        .context("exact split transaction weight overflow")?;
-    let fee_microtari = weight
-        .checked_mul(fee_per_gram)
-        .context("exact split fee overflow")?;
-    exact_no_change_split_with_fee(input_microtari, child_count, fee_microtari)
-}
-
 pub(super) fn exact_no_change_split_with_fee(
     input_microtari: u64,
     child_count: u32,
@@ -1424,8 +1399,8 @@ pub(super) fn exact_no_change_split_with_fee(
 pub(super) fn exact_pp_split_with_change(
     input_microtari: u64,
     child_count: u32,
+    fee_per_gram: u64,
 ) -> anyhow::Result<PpSplitPlan> {
-    const PP_FEE_PER_GRAM: u64 = 5;
     const PP_LOCK_FEE_BUFFER: u64 = 200_000;
     if child_count < 2 {
         bail!("PP exact split requires at least two child outputs");
@@ -1442,7 +1417,7 @@ pub(super) fn exact_pp_split_with_change(
         .and_then(|weight| weight.checked_add(CONSOLE_SELF_OUTPUT_GRAMS))
         .context("PP exact split weight overflow")?;
     let fee_microtari = weight
-        .checked_mul(PP_FEE_PER_GRAM)
+        .checked_mul(fee_per_gram)
         .context("PP exact split fee overflow")?;
     let available = input_microtari
         .checked_sub(fee_microtari)
@@ -1503,7 +1478,8 @@ mod tests {
             amounts = amounts
                 .into_iter()
                 .flat_map(|input| {
-                    exact_no_change_split(input, 2, 5, CONSOLE_SELF_OUTPUT_GRAMS)
+                    let fee = (18 + CONSOLE_SELF_OUTPUT_GRAMS * 2) * 5;
+                    exact_no_change_split_with_fee(input, 2, fee)
                         .unwrap()
                         .child_amounts
                 })
@@ -1513,7 +1489,8 @@ mod tests {
         amounts = amounts
             .into_iter()
             .flat_map(|input| {
-                exact_no_change_split(input, 8, 5, CONSOLE_SELF_OUTPUT_GRAMS)
+                let fee = (18 + CONSOLE_SELF_OUTPUT_GRAMS * 8) * 5;
+                exact_no_change_split_with_fee(input, 8, fee)
                     .unwrap()
                     .child_amounts
             })
@@ -1561,7 +1538,7 @@ mod tests {
 
     #[test]
     fn final_child_absorbs_division_remainder() {
-        let plan = exact_no_change_split(2_499_999_505, 2, 5, CONSOLE_SELF_OUTPUT_GRAMS).unwrap();
+        let plan = exact_no_change_split_with_fee(2_499_999_505, 2, 740).unwrap();
         assert_eq!(plan.child_amounts[1], plan.child_amounts[0] + 1);
         assert_eq!(
             plan.total_children() + plan.fee_microtari,
@@ -1576,7 +1553,7 @@ mod tests {
             amounts = amounts
                 .into_iter()
                 .flat_map(|input| {
-                    let plan = exact_pp_split_with_change(input, 2).unwrap();
+                    let plan = exact_pp_split_with_change(input, 2, 5).unwrap();
                     plan.payment_amounts
                         .into_iter()
                         .chain([plan.change_microtari])
@@ -1587,7 +1564,7 @@ mod tests {
         amounts = amounts
             .into_iter()
             .flat_map(|input| {
-                let plan = exact_pp_split_with_change(input, 8).unwrap();
+                let plan = exact_pp_split_with_change(input, 8, 5).unwrap();
                 plan.payment_amounts
                     .into_iter()
                     .chain([plan.change_microtari])

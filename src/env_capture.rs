@@ -27,10 +27,6 @@ pub fn capture() -> Environment {
     capture_with_network(None, None, None)
 }
 
-pub fn capture_for_base_node(base_node_url: &str) -> Environment {
-    capture_with_network(Some(base_node_url), None, None)
-}
-
 pub fn capture_for_network(
     base_node_url: &str,
     authority_url: &str,

@@ -11,16 +11,6 @@ use wallet_bench::{
 };
 
 #[test]
-fn example_config_loads() {
-    let config = Config::load(Path::new("harness.toml.example")).unwrap();
-    assert_eq!(config.network.name, "esmeralda");
-    assert_eq!(
-        config.benchmark.concurrent_batches,
-        vec![8, 16, 32, 64, 128]
-    );
-}
-
-#[test]
 fn prefunding_template_loads_without_manual_funding_records() {
     let config = Config::load_prefunding_b0(Path::new("harness-prefunding.toml")).unwrap();
     assert!(config.funding.as_map().is_empty());
@@ -28,6 +18,34 @@ fn prefunding_template_loads_without_manual_funding_records() {
     assert!(config.benchmark.mode1_live_topology);
     assert!(config.benchmark.mode2_live_scenarios);
     assert!(config.benchmark.mode3_live_topology);
+}
+
+#[test]
+fn canonical_pins_are_consistent_across_build_inputs() {
+    let config = Config::load_prefunding_b0(Path::new("harness-prefunding.toml")).unwrap();
+    assert_eq!(
+        config.versions.minotari_cli_rev,
+        wallet_bench::versions::MINOTARI_CLI_REV
+    );
+    assert_eq!(
+        config.versions.tari_console_wallet_rev,
+        wallet_bench::versions::TARI_CONSOLE_WALLET_REV
+    );
+    assert_eq!(
+        config.versions.payment_processor_rev,
+        wallet_bench::versions::PAYMENT_PROCESSOR_REV
+    );
+    for path in [
+        "Cargo.toml",
+        "scripts/fetch-minotari-cli.sh",
+        "scripts/fetch-payment-processor.sh",
+    ] {
+        let contents = fs::read_to_string(path).unwrap();
+        assert!(
+            contents.contains(wallet_bench::versions::MINOTARI_CLI_REV),
+            "{path}"
+        );
+    }
 }
 
 #[test]

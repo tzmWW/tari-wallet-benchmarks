@@ -32,12 +32,18 @@ No measured duration, fee, API result, or chain result was changed.
    and spendable-state results. The corrected contract proves each expected
    chain transaction by intersection with its independently verified output
    commitments. Mode 2 S2/S3/S6/S7 and PP S2/S3 therefore become successful.
+   The exported expectation maps now bind every expected sender transaction ID
+   to those commitments; the initial correction accidentally left those maps
+   empty even though the recovered evidence was present.
 2. PP S1 proved 512 outputs in its final round, but a concurrent receiver DB
    read returned an error and overwrote exported `unspent_after` with null.
    PP balance components were similarly lost. They were reconstructed exactly
    from the one-output S0 state, independently confirmed payments, verified
    fees, scan balances, and final DB state. The run stopped only because the
    validator looked for PP `unspent_after` at the wrong JSON nesting level.
+3. The Mode 2 S1 note said the configured `1 T` S4/S5 payment amount was used
+   per S1 output. S1 actually divides each selected parent into balanced,
+   no-change children. Only this narrative was corrected.
 
 ## Scenario Review
 
@@ -99,5 +105,8 @@ No measured duration, fee, API result, or chain result was changed.
   counts and reasons, start/end tips, balance reconciliation, transaction
   timing, resource peaks, scan cursors/hashes, and computed deltas. Submission
   semantic validation passes.
+- Scan deltas use every completed `T_scan_ms`, including scans whose recovered
+  wallet state failed verification. This preserves measured scan cost while
+  keeping the recovery failure visible.
 - S5 throughput is 1.2732056206427376x for Mode 2 individual over PP batch and
   2.1008777738979663x for old-wallet individual over PP batch.

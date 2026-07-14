@@ -12,7 +12,7 @@ does not retry scenario transactions or pre-partition UTXOs.
 
 ## Prerequisites
 
-- Rust stable with `rustfmt` and `clippy`
+- Rustup; `rust-toolchain.toml` installs the pinned Rust toolchain, `rustfmt`, and `clippy`
 - Git, Bash, `curl`, `lsof`, `sqlite3`, `protobuf-compiler`, and standard C/C++ build tools
 - Node.js/npm only for installing `@ast-grep/cli`
 - An unpruned, synchronized Esmeralda HTTP wallet-query endpoint
@@ -24,8 +24,6 @@ macOS:
 ```sh
 xcode-select --install
 brew install rustup git protobuf sqlite3 node
-rustup default stable
-rustup component add rustfmt clippy
 npm install --global @ast-grep/cli
 ```
 
@@ -35,7 +33,6 @@ Ubuntu/Debian:
 sudo apt-get update
 sudo apt-get install -y build-essential clang cmake git curl lsof protobuf-compiler sqlite3 nodejs npm
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup component add rustfmt clippy
 npm install --global @ast-grep/cli
 ```
 
@@ -50,9 +47,10 @@ cargo build --release --features live-minotari
 cp harness-prefunding.toml harness.toml
 ```
 
-Before using the template, replace `REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY` with the
-actual identity of the local node. Canonical live configuration rejects a remote
-scan endpoint, a local authority endpoint, or identical scan/authority URLs.
+Before using the template, follow `RUNBOOK.md` to initialize and synchronize the
+pinned local node, then replace `REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY` with its
+`whoami` public key. Canonical live configuration rejects a remote scan endpoint,
+a local authority endpoint, or identical scan/authority URLs.
 
 The second fetch script applies the tracked PP fee patch and writes
 `tools/build-manifest.json`. Preflight verifies every source revision, the patch
@@ -66,7 +64,8 @@ rejects stale local nodes.
 
 ## Candidate Workflow
 
-Use a new `paths.data_dir` and new seed env file for every candidate.
+Use a new `paths.data_dir`, matching `modes.new_wallet_database`, and new seed env
+file for every candidate. Keep at least 20 GiB free on the candidate volume.
 
 ```sh
 mkdir -p .secrets candidates
@@ -93,8 +92,11 @@ validation, and summary generation in one process. `fund-s0` still writes a
 broadcast checkpoint atomically before waiting for `C_min`; the standalone stage
 commands remain available for diagnosis and interrupted-funding recovery.
 
-The source wallet funds the three benchmark wallets. It is not itself measured,
-and its shared funding fee is disclosed but not deducted from any mode balance.
+The operator funds exactly one source wallet, not any benchmark-mode address.
+After all three empty-wallet B0 scans pass, the harness automatically broadcasts
+one transaction containing three `A_fund` outputs, one to each fresh mode seed,
+and waits for recipient readiness. The source wallet is not measured; its shared
+funding fee is disclosed but not deducted from any mode balance.
 
 Do not use old namespaces, copied wallet DBs, or `--fresh-data-dir`. The harness
 locks the candidate namespace, rejects dirty PP/signer state, stores child logs

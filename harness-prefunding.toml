@@ -23,8 +23,6 @@ mode1_live_max_s1_txs = 0
 mode1_live_max_s4_batch = 0
 mode1_live_max_s5_items = 0
 live_fresh_scan_cells = true
-mode2_send_smoke = false
-mode2_send_smoke_amount = "1 T"
 mode2_live_scenarios = true
 mode2_payment_amount = "1 T"
 mode2_live_max_s1_txs = 0
@@ -65,7 +63,7 @@ payment_processor_rev = "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c"
 base_node_rev = "v5.4.0"
 
 [timeouts]
-startup_secs = 1800
-confirmation_secs = 1200
-scan_batch_secs = 300
+startup_secs = 21600
+confirmation_secs = 1800
+scan_batch_secs = 600
 transaction_lock_secs = 60

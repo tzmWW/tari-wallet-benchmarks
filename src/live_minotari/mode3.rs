@@ -175,12 +175,10 @@ fn record_mode3_s0(
         context.receiver_birthday,
         context.worker_sleep_secs
     ));
-    cell.notes.push(format!(
-        "payment_receiver_db={} payment_processor_db={} console_wallet_base={}",
-        payment_processor::payment_receiver_db_path(config).display(),
-        payment_processor::payment_processor_db_path(config).display(),
-        payment_processor::console_wallet_base_path(config).display()
-    ));
+    cell.notes.push(
+        "payment receiver, processor, and signer state use the fresh candidate namespace"
+            .to_string(),
+    );
     if let Some(funding) = &config.funding.payment_processor {
         cell.notes.push(format!(
             "funding tx_id={} height={} amount={}",
@@ -537,12 +535,15 @@ async fn run_pp_s1_rounds(
         for tx_index in 1..=round.tx_count {
             let input = spendable_amounts[(tx_index - 1) as usize];
             let submit_offset_ms = round_start.elapsed().as_millis();
-            let result = exact_pp_split_with_change(input, round.outputs_per_tx).map(|plan| {
-                plan.payment_amounts
-                    .into_iter()
-                    .map(|amount| (self_address.to_string(), amount))
-                    .collect()
-            });
+            let result = config
+                .fee_rate()
+                .and_then(|rate| exact_pp_split_with_change(input, round.outputs_per_tx, rate.0))
+                .map(|plan| {
+                    plan.payment_amounts
+                        .into_iter()
+                        .map(|amount| (self_address.to_string(), amount))
+                        .collect()
+                });
             let result = match result {
                 Ok(recipients) => {
                     submit_pp_batch_to_recipient_amounts(

@@ -2,81 +2,6 @@ use super::verification::verify_mode2_transactions_with_client;
 use super::*;
 use crate::versions::TX_MINED_CONFIRMED_STATUS;
 
-pub(super) async fn annotate_mode2_send_smoke(
-    config: &Config,
-    book: &AddressBook,
-    profile: &mut ResultProfile,
-) -> anyhow::Result<()> {
-    let Some(sender_seed) = book.addresses.get(WalletRole::NewWallet.label()) else {
-        return Ok(());
-    };
-    let Some(recipient_seed) = book.addresses.get(WalletRole::OldWallet.label()) else {
-        return Ok(());
-    };
-    let password = wallet_password(&config.seeds.wallet_password_env)?;
-    let amount = parse_amount(&config.benchmark.mode2_send_smoke_amount)?;
-    ensure_signing_wallet(
-        &config.modes.new_wallet_database,
-        &sender_seed.seed_words,
-        &config.seeds.wallet_password_env,
-    )?;
-    let start = Instant::now();
-    let send = construct_sign_broadcast_one_sided(OneSidedSendRequest {
-        db_path: &config.modes.new_wallet_database,
-        password: &password,
-        base_node_url: &config.network.base_node_http_url,
-        recipient: &recipient_seed.address,
-        amount,
-        fee_rate: config.fee_rate()?,
-        seconds_to_lock: config.timeouts.transaction_lock_secs,
-        confirmation_window: config.benchmark.c_min,
-        request_timeout: Duration::from_secs(30),
-    })
-    .await;
-    let wall_ms = start.elapsed().as_millis();
-
-    if let Some(mode) = profile.modes.get_mut("new_wallet")
-        && let Some(cell) = mode.scenarios.get_mut("S1")
-    {
-        match send {
-            Ok(outcome) => {
-                cell.record_repetition(Repetition {
-                    run: 1,
-                    status: CellStatus::Ok,
-                    wall_ms: Some(wall_ms),
-                    success_count: 1,
-                    failure_count: 0,
-                    fee_microtari: Some(outcome.fee_microtari),
-                    error: None,
-                    metrics: None,
-                });
-                cell.notes.push(format!(
-                    "Mode 2 compatibility smoke only: constructed, signed, persisted, and submitted one one-sided tx without retry middleware; tx_id={} amount={} recipient={} accepted={} is_synced={}",
-                    outcome.tx_id,
-                    config.benchmark.mode2_send_smoke_amount,
-                    recipient_seed.address,
-                    outcome.accepted,
-                    outcome.is_synced
-                ));
-            }
-            Err(error) => {
-                cell.record_repetition(Repetition {
-                    run: 1,
-                    status: CellStatus::Failed,
-                    wall_ms: Some(wall_ms),
-                    success_count: 0,
-                    failure_count: 1,
-                    fee_microtari: None,
-                    error: Some(format!("{error:#}")),
-                    metrics: None,
-                });
-            }
-        }
-    }
-
-    Ok(())
-}
-
 pub(super) async fn annotate_mode2_live_scenarios(
     config: &Config,
     book: &AddressBook,
@@ -126,9 +51,8 @@ pub(super) async fn annotate_mode2_live_scenarios(
         &s1,
         vec![
             format!(
-                "Mode 2 S1 live scenario: attempted {} self-directed multi-recipient one-sided txs of {} per output to {}; planned_rounds={} cap={}",
+                "Mode 2 S1 live scenario: attempted {} self-directed no-change split txs with balanced children derived from each selected parent; recipient={} planned_rounds={} cap={}",
                 s1.attempted,
-                config.benchmark.mode2_payment_amount,
                 sender_seed.address,
                 s1_round_plan(config, 0).len(),
                 config.benchmark.mode2_live_max_s1_txs
@@ -914,39 +838,6 @@ pub(super) fn record_mode2_send_summary(
     cell.record_repetition(mode2_send_repetition(summary, scenario));
     notes.push(summary.note(scenario));
     cell.notes.extend(notes);
-}
-
-#[cfg(test)]
-pub(super) fn refresh_recorded_mode2_send_summary(
-    profile: &mut ResultProfile,
-    scenario: ScenarioName,
-    summary: &ScenarioSendSummary,
-    note: String,
-) {
-    profile
-        .chain_verification
-        .verified_transactions
-        .retain(|tx| !(tx.mode == "new_wallet" && tx.scenario == scenario.as_str()));
-    profile
-        .chain_verification
-        .verified_transactions
-        .extend(summary.verified_transactions());
-
-    let Some(mode) = profile.modes.get_mut("new_wallet") else {
-        return;
-    };
-    let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) else {
-        return;
-    };
-
-    let repetition = mode2_send_repetition(summary, scenario);
-    if let Some(existing) = cell.repetitions.last_mut() {
-        *existing = repetition;
-        cell.refresh_summary();
-    } else {
-        cell.record_repetition(repetition);
-    }
-    cell.notes.push(note);
 }
 
 fn mode2_send_repetition(summary: &ScenarioSendSummary, scenario: ScenarioName) -> Repetition {

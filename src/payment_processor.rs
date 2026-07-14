@@ -433,15 +433,6 @@ pub struct PaymentProcessorClient {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PaymentRequest {
-    pub client_id: String,
-    pub account_name: String,
-    pub recipient_address: String,
-    pub amount: i64,
-    pub payment_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct BulkPaymentItem {
     pub client_id: String,
     pub recipient_address: String,
@@ -776,20 +767,6 @@ impl PaymentProcessorClient {
         .await
     }
 
-    pub async fn create_payment(
-        &self,
-        request: &PaymentRequest,
-    ) -> anyhow::Result<serde_json::Value> {
-        response_json(
-            self.client
-                .post(format!("{}/v1/payments", self.base_url))
-                .json(request)
-                .send()
-                .await?,
-        )
-        .await
-    }
-
     pub async fn create_payment_batch(
         &self,
         request: &BulkPaymentRequest,
@@ -798,27 +775,6 @@ impl PaymentProcessorClient {
             self.client
                 .post(format!("{}/v1/payment-batches", self.base_url))
                 .json(request)
-                .send()
-                .await?,
-        )
-        .await
-    }
-
-    pub async fn get_payment(&self, payment_id: &str) -> anyhow::Result<serde_json::Value> {
-        response_json(
-            self.client
-                .get(format!("{}/v1/payments/{}", self.base_url, payment_id))
-                .send()
-                .await?,
-        )
-        .await
-    }
-
-    pub async fn events(&self, limit: u32) -> anyhow::Result<serde_json::Value> {
-        response_json(
-            self.client
-                .get(format!("{}/v1/events", self.base_url))
-                .query(&[("limit", limit)])
                 .send()
                 .await?,
         )

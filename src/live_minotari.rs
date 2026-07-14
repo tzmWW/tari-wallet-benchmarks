@@ -49,13 +49,13 @@ use mode1::{
     wait_for_mode1_grpc_address, wait_for_mode1_scan_to_tip, write_mode1_runtime_config,
 };
 use mode2::{
-    annotate_mode2_live_scenarios, annotate_mode2_send_smoke, base_node_endpoint_url,
-    base_node_http_client, base_node_tip_height, base_node_tip_height_with_client, capped_attempts,
+    annotate_mode2_live_scenarios, base_node_endpoint_url, base_node_http_client,
+    base_node_tip_height, base_node_tip_height_with_client, capped_attempts,
     mode2_completed_transaction_status, repeated_recipient,
 };
 #[cfg(test)]
 use mode2::{
-    mode2_verification_confirmed, record_mode2_send_summary, refresh_recorded_mode2_send_summary,
+    mode2_verification_confirmed, record_mode2_send_summary,
     verify_mode2_transactions_until_confirmed,
 };
 use mode3::{annotate_mode3_payment_processor, pp_observation_complete};
@@ -433,13 +433,11 @@ pub async fn annotate_profile_with_library_smoke(
         );
     } else if config.benchmark.mode2_live_scenarios {
         annotate_mode2_live_scenarios(config, book, profile).await?;
-    } else if config.benchmark.mode2_send_smoke {
-        annotate_mode2_send_smoke(config, book, profile).await?;
     } else if let Some(mode) = profile.modes.get_mut("new_wallet")
         && let Some(cell) = mode.scenarios.get_mut("S1")
     {
         cell.notes.push(
-            "Mode 2 send smoke disabled; set benchmark.mode2_send_smoke=true to run the opt-in tiny spend"
+            "Mode 2 live scenarios disabled; set benchmark.mode2_live_scenarios=true to run S1"
                 .to_string(),
         );
         if let Some(cell) = mode.scenarios.get_mut("S4") {
@@ -846,7 +844,7 @@ fn annotate_mode3_disabled(profile: &mut ResultProfile) {
         if let Some(cell) = mode.scenarios.get_mut(scenario.as_str()) {
             cell.status = CellStatus::NotApplicable;
             cell.notes.push(
-                "Mode 3 real payment-processor topology disabled; set benchmark.mode3_live_topology=true to spawn minotari PR daemon plus minotari_payment_processor"
+                "Mode 3 real payment-processor topology disabled; set benchmark.mode3_live_topology=true to spawn the companion minotari daemon plus minotari_payment_processor"
                     .to_string(),
             );
         }
@@ -4188,10 +4186,7 @@ fn verified_history_output_commitments(
         .flatten()
         .filter(|observation| observation["terminal_outcome"] == "confirmed")
         .filter_map(|observation| {
-            let tx_id = observation["tx_id"]
-                .as_str()
-                .or_else(|| observation["batch_id"].as_str())?
-                .to_string();
+            let tx_id = observation["transaction_id"].as_str()?.to_string();
             let commitments = observation["output_commitments"]
                 .as_array()?
                 .iter()
@@ -5575,88 +5570,42 @@ mod tests {
     }
 
     #[test]
-    fn mode2_refresh_replaces_pending_repetition_and_confirmed_row() {
+    fn scan_history_commitments_use_transaction_observation_ids() {
         let config = Config::default();
         let mut profile = ResultProfile::new(&config, crate::env_capture::capture());
         profile.modes.insert(
             ModeName::NewWallet.as_str().to_string(),
             empty_mode_profile(ModeName::NewWallet, None),
         );
-        let mut summary = ScenarioSendSummary {
-            attempted: 1,
+        let cell = profile
+            .modes
+            .get_mut(ModeName::NewWallet.as_str())
+            .unwrap()
+            .scenarios
+            .get_mut(ScenarioName::S1.as_str())
+            .unwrap();
+        cell.record_repetition(Repetition {
+            run: 1,
+            status: CellStatus::Ok,
+            wall_ms: Some(1),
             success_count: 1,
-            tx_ids: vec!["42".to_string()],
-            tx_infos: vec![VerifiedTransaction {
-                tx_id: "42".to_string(),
-                status_value: 1,
-                mode: "new_wallet".to_string(),
-                scenario: ScenarioName::S1.as_str().to_string(),
-                amount_microtari: None,
-                fee_microtari: Some(10),
-                mined_height: None,
-                confirmations: None,
-                min_confirmations: None,
-                tip_height: None,
-                confirmed: false,
-            }],
-            ..ScenarioSendSummary::default()
-        };
+            failure_count: 0,
+            fee_microtari: Some(1),
+            error: None,
+            metrics: Some(serde_json::json!({
+                "transaction_observations": [{
+                    "transaction_id": "42",
+                    "terminal_outcome": "confirmed",
+                    "output_commitments": ["commitment-1", "commitment-2"]
+                }]
+            })),
+        });
 
-        record_mode2_send_summary(&mut profile, ScenarioName::S1, &summary, Vec::new());
-
-        let cell = &profile
-            .modes
-            .get(ModeName::NewWallet.as_str())
-            .unwrap()
-            .scenarios[ScenarioName::S1.as_str()];
-        assert_eq!(cell.status, CellStatus::Failed);
-        assert_eq!(cell.repetitions.len(), 1);
-        assert_eq!(profile.chain_verification.verified_transactions.len(), 0);
-
-        summary.tx_infos = vec![VerifiedTransaction {
-            tx_id: "42".to_string(),
-            status_value: TX_MINED_CONFIRMED_STATUS,
-            mode: "new_wallet".to_string(),
-            scenario: ScenarioName::S1.as_str().to_string(),
-            amount_microtari: None,
-            fee_microtari: Some(10),
-            mined_height: Some(100),
-            confirmations: None,
-            min_confirmations: None,
-            tip_height: None,
-            confirmed: true,
-        }];
-        summary.extra_metrics.insert(
-            "verification_source".to_string(),
-            serde_json::json!("base_node_transaction_query"),
-        );
-
-        refresh_recorded_mode2_send_summary(
-            &mut profile,
-            ScenarioName::S1,
-            &summary,
-            "post-S5 refresh".to_string(),
-        );
-        refresh_recorded_mode2_send_summary(
-            &mut profile,
-            ScenarioName::S1,
-            &summary,
-            "post-S5 refresh repeat".to_string(),
-        );
-
-        let cell = &profile
-            .modes
-            .get(ModeName::NewWallet.as_str())
-            .unwrap()
-            .scenarios[ScenarioName::S1.as_str()];
-        assert_eq!(cell.status, CellStatus::Ok);
-        assert_eq!(cell.repetitions.len(), 1);
-        assert_eq!(cell.repetitions[0].status, CellStatus::Ok);
-        assert_eq!(cell.repetitions[0].error, None);
-        assert_eq!(profile.chain_verification.verified_transactions.len(), 1);
+        let commitments =
+            verified_history_output_commitments(&profile, "new_wallet", &[ScenarioName::S1]);
         assert_eq!(
-            profile.chain_verification.verified_transactions[0].tx_id,
-            "42"
+            commitments["42"],
+            BTreeSet::from(["commitment-1".to_string(), "commitment-2".to_string()])
         );
     }
 

@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
@@ -839,6 +843,16 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
         {
             bail!("submission B0 exact empty-tip contract failed for {mode}");
         }
+        let funding = &document["funding"][mode];
+        if funding["height"]
+            .as_u64()
+            .is_none_or(|height| height <= target_height)
+            || funding["tip_height_at_broadcast"]
+                .as_u64()
+                .is_none_or(|height| height <= target_height)
+        {
+            bail!("submission funding for {mode} did not occur after the shared B0 target");
+        }
         for key in [
             "T_scan_ms",
             "blocks_per_sec",
@@ -1173,10 +1187,124 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
                 {
                     bail!("submission {mode}/{scenario} scan contract failed");
                 }
+                if (mode == "old_wallet"
+                    && metrics["expected_history_tx_ids"]
+                        .as_array()
+                        .is_none_or(Vec::is_empty))
+                    || (mode != "old_wallet"
+                        && metrics["expected_output_commitments"]
+                            .as_object()
+                            .is_none_or(serde_json::Map::is_empty))
+                {
+                    bail!("submission {mode}/{scenario} scan history expectation is empty");
+                }
+                validate_scan_history_evidence(document, mode, scenario, metrics)?;
             }
         }
     }
     Ok(())
+}
+
+fn validate_scan_history_evidence(
+    document: &Value,
+    mode: &str,
+    scan_scenario: &str,
+    metrics: &Value,
+) -> anyhow::Result<()> {
+    let source_scenarios: &[&str] = if matches!(scan_scenario, "S2" | "S3") {
+        &["S1"]
+    } else {
+        &["S1", "S4", "S5"]
+    };
+    if mode == "old_wallet" {
+        let expected = document["chain_verification"]["verified_transactions"]
+            .as_array()
+            .expect("schema checked")
+            .iter()
+            .filter(|tx| {
+                tx["mode"] == mode
+                    && tx["confirmed"] == true
+                    && tx["scenario"]
+                        .as_str()
+                        .is_some_and(|scenario| source_scenarios.contains(&scenario))
+            })
+            .filter_map(|tx| tx["tx_id"].as_str().map(ToString::to_string))
+            .collect::<BTreeSet<_>>();
+        let reported = json_string_set(&metrics["expected_history_tx_ids"])?;
+        let recovered = json_string_set(&metrics["recovered_history_tx_ids"])?;
+        let missing = expected
+            .difference(&recovered)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if reported != expected || json_string_set(&metrics["missing_history_tx_ids"])? != missing {
+            bail!("submission {mode}/{scan_scenario} history transaction evidence is inconsistent");
+        }
+    } else {
+        let expected = expected_observation_commitments(document, mode, source_scenarios)?;
+        let reported = json_commitment_map(&metrics["expected_output_commitments"])?;
+        let recovered = json_string_set(&metrics["recovered_output_commitments"])?;
+        let missing = expected
+            .iter()
+            .filter(|(_, commitments)| commitments.is_disjoint(&recovered))
+            .map(|(tx_id, _)| tx_id.clone())
+            .collect::<BTreeSet<_>>();
+        if reported != expected
+            || json_string_set(&metrics["missing_history_output_tx_ids"])? != missing
+        {
+            bail!("submission {mode}/{scan_scenario} history commitment evidence is inconsistent");
+        }
+    }
+    Ok(())
+}
+
+fn expected_observation_commitments(
+    document: &Value,
+    mode: &str,
+    scenarios: &[&str],
+) -> anyhow::Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut expected = BTreeMap::<String, BTreeSet<String>>::new();
+    for scenario in scenarios {
+        let observations = document["modes"][mode]["scenarios"][scenario]["repetitions"][0]
+            ["metrics"]["transaction_observations"]
+            .as_array()
+            .with_context(|| format!("submission {mode}/{scenario} observations missing"))?;
+        for observation in observations
+            .iter()
+            .filter(|observation| observation["terminal_outcome"] == "confirmed")
+        {
+            let tx_id = observation["transaction_id"]
+                .as_str()
+                .with_context(|| format!("submission {mode}/{scenario} confirmed tx id missing"))?;
+            expected
+                .entry(tx_id.to_string())
+                .or_default()
+                .extend(json_string_set(&observation["output_commitments"])?);
+        }
+    }
+    Ok(expected)
+}
+
+fn json_string_set(value: &Value) -> anyhow::Result<BTreeSet<String>> {
+    value
+        .as_array()
+        .context("expected an array of strings")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToString::to_string)
+                .context("expected a string")
+        })
+        .collect()
+}
+
+fn json_commitment_map(value: &Value) -> anyhow::Result<BTreeMap<String, BTreeSet<String>>> {
+    value
+        .as_object()
+        .context("expected a transaction commitment map")?
+        .iter()
+        .map(|(tx_id, commitments)| Ok((tx_id.clone(), json_string_set(commitments)?)))
+        .collect()
 }
 
 fn is_amount_value(value: &Value) -> bool {
@@ -1419,9 +1547,15 @@ pub fn render_summary(document: &Value) -> anyhow::Result<String> {
         markdown_text(&document["harness_git_commit"])
     ));
     output.push_str(&format!(
-        "- Base node: `{}` (`{}`)\n\n",
+        "- Selected scan node: `{}` (`{}`; `{}`)\n",
         markdown_text(&document["base_node"]["endpoint"]),
-        markdown_text(&document["base_node"]["configured_revision"])
+        markdown_text(&document["base_node"]["configured_revision"]),
+        markdown_text(&document["environment"]["base_node_network_path"])
+    ));
+    output.push_str(&format!(
+        "- Independent authority: `{}` (`{}`)\n\n",
+        markdown_text(&document["base_node"]["authority_endpoint"]),
+        markdown_text(&document["environment"]["authority_network_path"])
     ));
     output
         .push_str("| Mode | Scenario | Execution | Outcome | Median ms | Successes | Failures |\n");
@@ -1576,6 +1710,40 @@ mod tests {
     }
 
     #[test]
+    fn scan_history_validation_recomputes_commitment_evidence() {
+        let document = json!({
+            "modes": {
+                "new_wallet": {
+                    "scenarios": {
+                        "S1": {"repetitions": [{"metrics": {"transaction_observations": [{
+                            "transaction_id": "tx-1",
+                            "terminal_outcome": "confirmed",
+                            "output_commitments": ["commitment-1", "commitment-2"]
+                        }]}}]}
+                    }
+                }
+            }
+        });
+        let metrics = json!({
+            "expected_output_commitments": {
+                "tx-1": ["commitment-1", "commitment-2"]
+            },
+            "recovered_output_commitments": ["commitment-2"],
+            "missing_history_output_tx_ids": []
+        });
+        validate_scan_history_evidence(&document, "new_wallet", "S2", &metrics).unwrap();
+
+        let mut tampered = metrics;
+        tampered["expected_output_commitments"] = json!({"tx-2": ["commitment-2"]});
+        assert!(
+            validate_scan_history_evidence(&document, "new_wallet", "S2", &tampered)
+                .unwrap_err()
+                .to_string()
+                .contains("inconsistent")
+        );
+    }
+
+    #[test]
     fn incomplete_s5_arms_never_create_comparison() {
         let config = Config::default();
         let mut profile = ResultProfile::new(&config, env_capture::capture());
@@ -1667,14 +1835,14 @@ mod tests {
         let funding = crate::config::FundingRecord {
             amount: "10000 T".to_string(),
             tx_id: "funding-tx".to_string(),
-            height: 100,
+            height: 101,
             birthday: Some(1),
             birthday_start_height: Some(90),
             construction_ms: Some(1),
             broadcast_to_mempool_ms: Some(2),
             broadcast_to_confirmed_at_c_min_ms: Some(3),
-            tip_height_at_broadcast: Some(100),
-            tip_height_at_confirmation: Some(103),
+            tip_height_at_broadcast: Some(101),
+            tip_height_at_confirmation: Some(104),
             shared_funding_fee_microtari: Some(700),
             funding_fee_attribution: Some(
                 "external_source_shared_not_deducted_from_mode_balance".to_string(),

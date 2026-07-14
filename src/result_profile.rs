@@ -597,15 +597,6 @@ fn new_run_id() -> String {
 fn harness_git_commit() -> String {
     option_env!("GIT_COMMIT")
         .map(ToString::to_string)
-        .or_else(|| {
-            std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .and_then(|output| String::from_utf8(output.stdout).ok())
-                .map(|commit| commit.trim().to_string())
-        })
         .filter(|commit| !commit.is_empty())
         .unwrap_or_else(|| "unknown".to_string())
 }
@@ -637,7 +628,7 @@ fn computed_scan_deltas(profile: &ResultProfile) -> serde_json::Value {
                     "t_scan_s6_minus_s2_unavailable_reason": s6_minus_s2.is_none().then_some("S2_or_S6_incomplete"),
                     "t_scan_s6_over_b0": s6_over_b0,
                     "t_scan_s6_over_b0_unavailable_reason": s6_over_b0.is_none().then_some("B0_or_S6_incomplete_or_B0_zero"),
-                    "source": "scenario_median_wall_ms"
+                    "source": "measured_scan_repetition_T_scan_ms"
                 }),
             )
         })
@@ -676,12 +667,24 @@ fn computed_s5_throughput(profile: &ResultProfile) -> serde_json::Value {
 }
 
 fn scenario_wall_ms(profile: &ResultProfile, mode: &str, scenario: &str) -> Option<u128> {
-    profile
-        .modes
-        .get(mode)?
-        .scenarios
-        .get(scenario)?
-        .median_wall_ms
+    let cell = profile.modes.get(mode)?.scenarios.get(scenario)?;
+    let mut walls = cell
+        .repetitions
+        .iter()
+        .filter_map(|run| {
+            let metrics = run.metrics.as_ref()?;
+            if metrics.get("scan_reached_tip")?.as_bool() == Some(true)
+                && metrics.get("max_height") == metrics.get("H_tip_end")
+                && metrics.get("H_scan_cursor_hash") == metrics.get("H_tip_target_hash")
+            {
+                metrics.get("T_scan_ms")?.as_u64().map(u128::from)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    walls.sort_unstable();
+    median(&walls)
 }
 
 fn s5_arm_metrics(profile: &ResultProfile, mode: &str) -> Option<serde_json::Value> {
@@ -827,9 +830,9 @@ mod tests {
     fn profile_round_trips() {
         let mut config = Config::default();
         config.funding.new_wallet = Some(crate::config::FundingRecord {
-            amount: "50000 T".to_string(),
-            tx_id: "7676530785144502866".to_string(),
-            height: 707741,
+            amount: "10000 T".to_string(),
+            tx_id: "synthetic-funding-tx".to_string(),
+            height: 100,
             birthday: None,
             birthday_start_height: None,
             ..crate::config::FundingRecord::default()
@@ -838,7 +841,7 @@ mod tests {
         let json = serde_json::to_string(&profile).unwrap();
         let decoded: ResultProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.schema_version, RESULT_SCHEMA_VERSION);
-        assert_eq!(decoded.funding["new_wallet"].height, 707741);
+        assert_eq!(decoded.funding["new_wallet"].height, 100);
         assert_eq!(
             decoded.config["scenario_order"],
             serde_json::json!(["B0", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"])
@@ -917,20 +920,34 @@ mod tests {
                 failure_count: 0,
                 fee_microtari: None,
                 error: None,
-                metrics: None,
+                metrics: Some(serde_json::json!({
+                    "T_scan_ms": 100,
+                    "scan_reached_tip": true,
+                    "max_height": 100,
+                    "H_tip_end": 100,
+                    "H_scan_cursor_hash": "aa",
+                    "H_tip_target_hash": "aa"
+                })),
             });
         old.scenarios
             .get_mut("S2")
             .unwrap()
             .record_repetition(Repetition {
                 run: 1,
-                status: CellStatus::Ok,
+                status: CellStatus::Failed,
                 wall_ms: Some(175),
-                success_count: 1,
-                failure_count: 0,
+                success_count: 0,
+                failure_count: 1,
                 fee_microtari: None,
                 error: None,
-                metrics: None,
+                metrics: Some(serde_json::json!({
+                    "T_scan_ms": 175,
+                    "scan_reached_tip": true,
+                    "max_height": 175,
+                    "H_tip_end": 175,
+                    "H_scan_cursor_hash": "bb",
+                    "H_tip_target_hash": "bb"
+                })),
             });
         old.scenarios
             .get_mut("S5")
@@ -948,6 +965,26 @@ mod tests {
                         "individual": {"wall_ms": 300, "recipient_count": 100, "success_count": 100, "failure_count": 0, "complete": true},
                         "batch": {"wall_ms": 150, "recipient_count": 100, "success_count": 10, "failure_count": 0, "complete": true}
                     }
+                })),
+            });
+        old.scenarios
+            .get_mut("S6")
+            .unwrap()
+            .record_repetition(Repetition {
+                run: 1,
+                status: CellStatus::Failed,
+                wall_ms: Some(200),
+                success_count: 0,
+                failure_count: 1,
+                fee_microtari: Some(0),
+                error: Some("scan stopped below target".to_string()),
+                metrics: Some(serde_json::json!({
+                    "T_scan_ms": 200,
+                    "scan_reached_tip": false,
+                    "max_height": 190,
+                    "H_tip_end": 200,
+                    "H_scan_cursor_hash": "cc",
+                    "H_tip_target_hash": "dd"
                 })),
             });
         let pp = profile.modes.get_mut("payment_processor").unwrap();
@@ -972,6 +1009,9 @@ mod tests {
         assert_eq!(
             profile.computed_deltas["scan_deltas"]["old_wallet"]["t_scan_s2_minus_b0_ms"],
             serde_json::json!(75)
+        );
+        assert!(
+            profile.computed_deltas["scan_deltas"]["old_wallet"]["t_scan_s6_minus_s2_ms"].is_null()
         );
         assert_eq!(
             profile.computed_deltas["s5_throughput"]["comparisons"]["old_wallet_individual_over_payment_processor_batch"],

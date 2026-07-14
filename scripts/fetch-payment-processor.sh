@@ -12,6 +12,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_FILE="${SCRIPT_DIR}/../patches/payment-processor-fee-rate.patch"
 MANIFEST="${TOOLS_DIR}/build-manifest.json"
 
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d ' ' -f 1
+  else
+    sha256sum "$1" | cut -d ' ' -f 1
+  fi
+}
+
 mkdir -p "${CACHE_DIR}"
 
 if [ ! -d "${PP_DIR}/.git" ]; then
@@ -49,11 +57,11 @@ mkdir -p "${PP_DIR}/data"
 
 mkdir -p "${TOOLS_DIR}"
 cp "${PP_DIR}/target/release/minotari_payment_processor" "${TOOLS_DIR}/minotari_payment_processor"
-MINOTARI_SHA="$(shasum -a 256 "${TOOLS_DIR}/minotari" | cut -d ' ' -f 1)"
-CONSOLE_SHA="$(shasum -a 256 "${TOOLS_DIR}/minotari_console_wallet" | cut -d ' ' -f 1)"
-NODE_SHA="$(shasum -a 256 "${TOOLS_DIR}/minotari_node" | cut -d ' ' -f 1)"
-PP_SHA="$(shasum -a 256 "${TOOLS_DIR}/minotari_payment_processor" | cut -d ' ' -f 1)"
-PATCH_SHA="$(shasum -a 256 "${PATCH_FILE}" | cut -d ' ' -f 1)"
+MINOTARI_SHA="$(sha256_file "${TOOLS_DIR}/minotari")"
+CONSOLE_SHA="$(sha256_file "${TOOLS_DIR}/minotari_console_wallet")"
+NODE_SHA="$(sha256_file "${TOOLS_DIR}/minotari_node")"
+PP_SHA="$(sha256_file "${TOOLS_DIR}/minotari_payment_processor")"
+PATCH_SHA="$(sha256_file "${PATCH_FILE}")"
 printf '{\n  "schema_version": 1,\n  "payment_processor_patch_sha256": "%s",\n  "artifacts": {\n    "minotari": {"source_revision": "%s", "sha256": "%s"},\n    "minotari_console_wallet": {"source_revision": "%s", "sha256": "%s"},\n    "minotari_node": {"source_revision": "%s", "sha256": "%s"},\n    "minotari_payment_processor": {"source_revision": "%s", "sha256": "%s"}\n  }\n}\n' \
   "${PATCH_SHA}" "${MINOTARI_REV}" "${MINOTARI_SHA}" \
   "${TARI_CONSOLE_WALLET_REV}" "${CONSOLE_SHA}" "${TARI_NODE_REV}" "${NODE_SHA}" \

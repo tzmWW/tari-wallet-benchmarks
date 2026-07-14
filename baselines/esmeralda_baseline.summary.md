@@ -5,7 +5,8 @@
 - Complete: `true`
 - Network: `esmeralda`
 - Harness commit: `0b5d4f4ed3ec00cc19610021b3a042959914b281`
-- Base node: `http://127.0.0.1:18142` (`v5.4.0`)
+- Selected scan node: `http://127.0.0.1:18142` (`v5.4.0`; `local`)
+- Independent authority: `https://rpc.esmeralda.tari.com` (`remote`)
 
 | Mode | Scenario | Execution | Outcome | Median ms | Successes | Failures |
 |---|---:|---|---|---:|---:|---:|
