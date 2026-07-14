@@ -45,7 +45,7 @@ cache_dir = ".bench-cache"
 minotari_console_wallet = "tools/minotari_console_wallet"
 minotari_binary = "tools/minotari"
 minotari_node = "tools/minotari_node"
-payment_processor_binary = ".bench-cache/minotari_payment_processor/target/release/minotari_payment_processor"
+payment_processor_binary = "tools/minotari_payment_processor"
 build_manifest = "tools/build-manifest.json"
 
 [seeds]

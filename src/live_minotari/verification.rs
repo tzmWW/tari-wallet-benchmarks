@@ -162,7 +162,7 @@ pub(super) async fn wait_for_mode1_summary_verification(
             && let Some(map) = timing.as_object_mut()
         {
             map.insert(
-                "broadcast_to_confirmed_at_c_min_ms".to_string(),
+                "dispatch_to_confirmed_at_c_min_ms".to_string(),
                 serde_json::json!(confirmed_at_ms.saturating_sub(submit_offset_ms)),
             );
         }

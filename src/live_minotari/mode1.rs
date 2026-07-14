@@ -132,7 +132,9 @@ pub(super) fn write_mode1_runtime_config(config: &Config, path: &Path) -> anyhow
         .collect::<Vec<_>>()
         .join(", ");
     let contents = format!(
-        "[wallet]\nbase_node_service_peers = [{peers}]\nfee_per_gram = {}\nnum_required_confirmations = {}\n",
+        "[wallet]\nbase_node_service_peers = [{peers}]\nhttp_server_url = \"{}\"\nfallback_http_server_url = \"{}\"\nfee_per_gram = {}\nnum_required_confirmations = {}\n",
+        config.network.base_node_http_url.replace('"', "\\\""),
+        config.network.base_node_http_url.replace('"', "\\\""),
         config.fee_rate()?.0,
         config.benchmark.c_min
     );
@@ -517,7 +519,17 @@ async fn run_mode1_send_cells(
 ) -> anyhow::Result<()> {
     let amount = parse_amount(&config.benchmark.mode1_payment_amount)?;
     let fee_rate = config.fee_rate()?.0;
-    let s1 = run_mode1_s1(config, &mut context.client, fee_rate).await;
+    let s1_components_before = mode1_balance_components(&mut context.client).await.ok();
+    let mut s1 = run_mode1_s1(config, &mut context.client, fee_rate).await;
+    s1.tip_end_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let s1_components_after = mode1_balance_components(&mut context.client).await.ok();
+    add_balance_component_metrics(
+        &mut s1.extra_metrics,
+        s1_components_before,
+        s1_components_after,
+    );
     record_mode1_transfer_summary(
         profile,
         ScenarioName::S1,
@@ -556,6 +568,7 @@ async fn run_mode1_send_cells(
     }
 
     let s4_recipients = derive_distinct_recipient_pool(128)?;
+    let s4_components_before = mode1_balance_components(&mut context.client).await.ok();
     let s4_balance_before = mode1_available_balance(&mut context.client).await.ok();
     let mut s4 = run_mode1_s4_batches(
         config,
@@ -565,14 +578,24 @@ async fn run_mode1_send_cells(
         fee_rate,
     )
     .await;
+    s4.tip_end_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let s4_components_after = mode1_balance_components(&mut context.client).await.ok();
     let s4_balance_after = mode1_available_balance(&mut context.client).await.ok();
-    let s4_success_payments = s4.attempted_payments.saturating_sub(s4.failure_count);
+    let s4_success_payments =
+        u32::try_from(s4.tx_infos.iter().filter(|tx| tx.confirmed).count()).unwrap_or(u32::MAX);
     add_balance_reconciliation_metrics(
         &mut s4.extra_metrics,
         s4_balance_before,
         s4_balance_after,
         u64::from(s4_success_payments).saturating_mul(amount.0),
         s4.fee_microtari,
+    );
+    add_balance_component_metrics(
+        &mut s4.extra_metrics,
+        s4_components_before,
+        s4_components_after,
     );
     s4.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -588,6 +611,7 @@ async fn run_mode1_send_cells(
         )],
     );
     let s5_recipients = derive_distinct_recipient_pool(config.benchmark.s5_m)?;
+    let s5_components_before = mode1_balance_components(&mut context.client).await.ok();
     let s5_balance_before = mode1_available_balance(&mut context.client).await.ok();
     let s5_unspent_before = mode1_unspent_count(&mut context.client).await.ok();
     let mut s5 = run_mode1_s5(
@@ -598,18 +622,28 @@ async fn run_mode1_send_cells(
         fee_rate,
     )
     .await;
+    s5.tip_end_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let s5_components_after = mode1_balance_components(&mut context.client).await.ok();
     s5.extra_metrics.insert(
         "recipient_set".to_string(),
         serde_json::json!(s5_recipients),
     );
     let s5_balance_after = mode1_available_balance(&mut context.client).await.ok();
-    let s5_success_payments = s5.attempted_payments.saturating_sub(s5.failure_count);
+    let s5_success_payments =
+        u32::try_from(s5.tx_infos.iter().filter(|tx| tx.confirmed).count()).unwrap_or(u32::MAX);
     add_balance_reconciliation_metrics(
         &mut s5.extra_metrics,
         s5_balance_before,
         s5_balance_after,
         u64::from(s5_success_payments).saturating_mul(amount.0),
         s5.fee_microtari,
+    );
+    add_balance_component_metrics(
+        &mut s5.extra_metrics,
+        s5_components_before,
+        s5_components_after,
     );
     s5.extra_metrics.insert(
         "unspent_before".to_string(),
@@ -724,6 +758,7 @@ async fn run_mode1_s1(
                 round.outputs_per_tx,
                 submit_offset_ms,
                 completed_offset_ms,
+                Vec::new(),
                 result,
             );
             round_summary
@@ -922,11 +957,12 @@ async fn run_mode1_transfers_concurrent(
         let batch_index = u32::try_from(index + 1).unwrap_or(u32::MAX);
         println!("{label} batch {batch_index}/{batch_count} dispatching");
         let mut client = client.clone();
+        let recipient_for_metrics = recipient.clone();
         let submit_offset_ms = start.elapsed().as_millis();
-        pending.insert(batch_index, submit_offset_ms);
+        pending.insert(batch_index, (submit_offset_ms, recipient.clone()));
         let arm_start = start;
         join_set.spawn(async move {
-            let transfer = submit_mode1_transfer(
+            let mut transfer = submit_mode1_transfer(
                 &mut client,
                 scenario,
                 batch_index,
@@ -937,10 +973,21 @@ async fn run_mode1_transfers_concurrent(
                 fee_rate,
             )
             .await;
+            if let Ok(outcome) = &mut transfer {
+                for timing in &mut outcome.tx_timings {
+                    if let Some(map) = timing.as_object_mut() {
+                        map.insert(
+                            "recipient".to_string(),
+                            serde_json::json!(&recipient_for_metrics),
+                        );
+                    }
+                }
+            }
             (
                 batch_index,
                 submit_offset_ms,
                 arm_start.elapsed().as_millis(),
+                recipient_for_metrics,
                 transfer,
             )
         });
@@ -951,21 +998,29 @@ async fn run_mode1_transfers_concurrent(
             break;
         };
         match result {
-            Ok((batch_index, submit_offset_ms, completed_ms, transfer)) => {
+            Ok((batch_index, submit_offset_ms, completed_ms, recipient, transfer)) => {
                 pending.remove(&batch_index);
                 summary.construction_complete_ms.push(completed_ms);
-                summary.record_batch(batch_index, 1, submit_offset_ms, completed_ms, transfer)
+                summary.record_batch(
+                    batch_index,
+                    1,
+                    submit_offset_ms,
+                    completed_ms,
+                    vec![recipient],
+                    transfer,
+                )
             }
             Err(error) => summary.errors.push(format!("task join error: {error}")),
         }
     }
     let timed_out_at = start.elapsed().as_millis();
-    for (batch_index, submit_offset_ms) in pending {
+    for (batch_index, (submit_offset_ms, recipient)) in pending {
         summary.record_batch(
             batch_index,
             1,
             submit_offset_ms,
             timed_out_at,
+            vec![recipient],
             Err(anyhow::anyhow!(
                 "{label} absolute deadline expired before dispatch task completed"
             )),
@@ -1025,6 +1080,7 @@ async fn run_mode1_recipient_batches_sequential(
             recipients.len()
         );
         let submit_offset_ms = start.elapsed().as_millis();
+        let recipient_identities = recipients.clone();
         let result = submit_mode1_transfer_to_recipients(
             client,
             scenario,
@@ -1042,6 +1098,7 @@ async fn run_mode1_recipient_batches_sequential(
             items_per_batch,
             submit_offset_ms,
             completed_offset_ms,
+            recipient_identities,
             result,
         );
     }
@@ -1108,9 +1165,53 @@ async fn submit_mode1_transfer_to_recipients(
             recipients,
             single_tx,
         })
-        .await?;
-    Ok(Mode1TransferOutcome::from_response(response.into_inner())
-        .with_rpc_timing(batch_index, submit_start.elapsed().as_millis()))
+        .await;
+    let elapsed = submit_start.elapsed().as_millis();
+    match response {
+        Ok(response) => Ok(Mode1TransferOutcome::from_response(response.into_inner())
+            .with_rpc_timing(batch_index, elapsed)),
+        Err(status) => {
+            let Some(tx_id) = mode1_not_found_tx_id(&status) else {
+                return Err(status.into());
+            };
+            let error = status.to_string();
+            Ok(Mode1TransferOutcome {
+                success_count: 0,
+                failure_count: 1,
+                fee_microtari: 0,
+                tx_ids: vec![tx_id.to_string()],
+                errors: vec![error.clone()],
+                tx_timings: vec![serde_json::json!({
+                    "batch_index": batch_index,
+                    "tx_id": tx_id.to_string(),
+                    "construction_complete_ms": elapsed,
+                    "grpc_round_trip_ms": elapsed,
+                    "construction_timing_reason": "console-wallet gRPC does not expose internal construction completion",
+                    "submission_timing_origin": "console_wallet_grpc_round_trip",
+                    "api_accepted": false,
+                    "api_error": error,
+                    "grpc_code": "NotFound",
+                    "chain_reconciliation_candidate": true,
+                    "broadcast_to_mempool_ms": null,
+                    "broadcast_to_mempool_unavailable_reason": "console_wallet_grpc_transfer_response_does_not_expose_mempool_timestamp"
+                })],
+            })
+        }
+    }
+}
+
+fn mode1_not_found_tx_id(status: &tonic::Status) -> Option<u64> {
+    if status.code() != tonic::Code::NotFound {
+        return None;
+    }
+    let value = status
+        .message()
+        .strip_prefix("Transaction ")?
+        .strip_suffix(" not found within timeout")?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
 }
 
 async fn submit_mode1_coin_split(
@@ -1169,6 +1270,21 @@ async fn mode1_available_balance(
         .await?
         .into_inner();
     Ok(response.available_balance)
+}
+
+async fn mode1_balance_components(
+    client: &mut WalletGrpcClient<tonic::transport::Channel>,
+) -> anyhow::Result<serde_json::Value> {
+    let response = client
+        .get_balance(grpc::GetBalanceRequest { payment_id: None })
+        .await?
+        .into_inner();
+    Ok(serde_json::json!({
+        "available": response.available_balance,
+        "pending_incoming": response.pending_incoming_balance,
+        "pending_outgoing": response.pending_outgoing_balance,
+        "timelocked": response.timelocked_balance
+    }))
 }
 
 /// Pinned transaction weights: one kernel (10), one input (8), and 53 per output.
@@ -1249,6 +1365,7 @@ impl ExactSplitPlan {
 /// Plans a one-input transaction whose recipients plus exact pinned fee consume the
 /// entire input. The final recipient absorbs the integer remainder, so the builder has
 /// no value from which to create a change output.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn exact_no_change_split(
     input_microtari: u64,
     child_count: u32,
@@ -1266,9 +1383,21 @@ pub(super) fn exact_no_change_split(
     let fee_microtari = weight
         .checked_mul(fee_per_gram)
         .context("exact split fee overflow")?;
+    exact_no_change_split_with_fee(input_microtari, child_count, fee_microtari)
+}
+
+pub(super) fn exact_no_change_split_with_fee(
+    input_microtari: u64,
+    child_count: u32,
+    fee_microtari: u64,
+) -> anyhow::Result<ExactSplitPlan> {
+    if child_count < 2 {
+        bail!("exact split requires at least two child outputs");
+    }
+    let child_count_u64 = u64::from(child_count);
     let available = input_microtari
         .checked_sub(fee_microtari)
-        .context("exact split input does not cover pinned fee")?;
+        .context("exact split input does not cover fee")?;
     let base_child = available / child_count_u64;
     if base_child == 0 {
         bail!("exact split would create a zero-value child output");
@@ -1390,6 +1519,44 @@ mod tests {
             })
             .collect();
         assert_eq!(amounts.len(), 512);
+    }
+
+    #[test]
+    fn parses_only_pinned_mode1_not_found_status() {
+        let status =
+            tonic::Status::not_found("Transaction 18446744073709551615 not found within timeout");
+        assert_eq!(mode1_not_found_tx_id(&status), Some(u64::MAX));
+        assert_eq!(
+            mode1_not_found_tx_id(&tonic::Status::internal(
+                "Transaction 42 not found within timeout"
+            )),
+            None
+        );
+        assert_eq!(
+            mode1_not_found_tx_id(&tonic::Status::not_found(
+                "Transaction nope not found within timeout"
+            )),
+            None
+        );
+        assert_eq!(
+            mode1_not_found_tx_id(&tonic::Status::not_found("unrelated 42")),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_config_pins_primary_and_fallback_http_endpoints() {
+        let mut config = Config::default();
+        config.network.base_node_http_url = "http://127.0.0.1:18142".to_string();
+        config.network.mode1_base_node_service_peer = Some("/ip4/127.0.0.1/tcp/18189".to_string());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.toml");
+
+        write_mode1_runtime_config(&config, &path).unwrap();
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(contents.contains("http_server_url = \"http://127.0.0.1:18142\""));
+        assert!(contents.contains("fallback_http_server_url = \"http://127.0.0.1:18142\""));
+        assert!(!contents.contains("rpc.esmeralda.tari.com"));
     }
 
     #[test]

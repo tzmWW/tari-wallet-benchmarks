@@ -4,7 +4,7 @@ set -euo pipefail
 CACHE_DIR="${1:-.bench-cache}"
 TOOLS_DIR="${2:-tools}"
 PP_REV="f0572c98cbfac7377412dc6d4094c7d7dfc5de2c"
-MINOTARI_REV="c2b8d7b65a3b4320d85b7ba118145d190c264777"
+MINOTARI_REV="1391dbd2155c96e885379d72b76e33582f0aad87"
 TARI_CONSOLE_WALLET_REV="9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
 TARI_NODE_REV="v5.4.0"
 PP_DIR="${CACHE_DIR}/minotari_payment_processor"
@@ -48,10 +48,11 @@ mkdir -p "${PP_DIR}/data"
 )
 
 mkdir -p "${TOOLS_DIR}"
+cp "${PP_DIR}/target/release/minotari_payment_processor" "${TOOLS_DIR}/minotari_payment_processor"
 MINOTARI_SHA="$(shasum -a 256 "${TOOLS_DIR}/minotari" | cut -d ' ' -f 1)"
 CONSOLE_SHA="$(shasum -a 256 "${TOOLS_DIR}/minotari_console_wallet" | cut -d ' ' -f 1)"
 NODE_SHA="$(shasum -a 256 "${TOOLS_DIR}/minotari_node" | cut -d ' ' -f 1)"
-PP_SHA="$(shasum -a 256 "${PP_DIR}/target/release/minotari_payment_processor" | cut -d ' ' -f 1)"
+PP_SHA="$(shasum -a 256 "${TOOLS_DIR}/minotari_payment_processor" | cut -d ' ' -f 1)"
 PATCH_SHA="$(shasum -a 256 "${PATCH_FILE}" | cut -d ' ' -f 1)"
 printf '{\n  "schema_version": 1,\n  "payment_processor_patch_sha256": "%s",\n  "artifacts": {\n    "minotari": {"source_revision": "%s", "sha256": "%s"},\n    "minotari_console_wallet": {"source_revision": "%s", "sha256": "%s"},\n    "minotari_node": {"source_revision": "%s", "sha256": "%s"},\n    "minotari_payment_processor": {"source_revision": "%s", "sha256": "%s"}\n  }\n}\n' \
   "${PATCH_SHA}" "${MINOTARI_REV}" "${MINOTARI_SHA}" \

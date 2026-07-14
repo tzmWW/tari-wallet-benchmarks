@@ -178,6 +178,8 @@ pub struct FundingRecord {
     #[serde(default)]
     pub broadcast_to_confirmed_at_c_min_ms: Option<u128>,
     #[serde(default)]
+    pub tip_height_at_broadcast: Option<u64>,
+    #[serde(default)]
     pub tip_height_at_confirmation: Option<u64>,
     #[serde(default)]
     pub shared_funding_fee_microtari: Option<u64>,
@@ -288,6 +290,7 @@ impl Config {
                 || self.benchmark.s4_t_budget_secs != 900
                 || self.benchmark.s5_m != 100
                 || self.benchmark.s5_k != 10
+                || self.fee_rate()?.0 != 5
                 || self.benchmark.mode2_send_smoke
                 || self.benchmark.mode1_live_max_s1_txs != 0
                 || self.benchmark.mode1_live_max_s4_batch != 0
@@ -602,9 +605,7 @@ impl Default for Config {
                 minotari_console_wallet: PathBuf::from("tools/minotari_console_wallet"),
                 minotari_binary: PathBuf::from("tools/minotari"),
                 minotari_node: PathBuf::from("tools/minotari_node"),
-                payment_processor_binary: PathBuf::from(
-                    ".bench-cache/minotari_payment_processor/target/release/minotari_payment_processor",
-                ),
+                payment_processor_binary: PathBuf::from("tools/minotari_payment_processor"),
                 build_manifest: default_build_manifest(),
             },
             seeds: SeedConfig {

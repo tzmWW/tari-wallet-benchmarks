@@ -2,16 +2,23 @@ use super::mode2::capped_attempts;
 use super::*;
 use crate::payment_processor::PaymentProcessorDbSnapshot;
 
-pub(super) fn pp_snapshot_is_terminal_for_summary(
+pub(super) fn pp_observation_complete(
+    accepted_batch_ids: &[String],
     snapshot: &PaymentProcessorDbSnapshot,
-    accepted_batches: u32,
+    proofs: &BTreeMap<String, PpChainProof>,
 ) -> bool {
-    let accepted_batches = usize::try_from(accepted_batches).unwrap_or(usize::MAX);
-    snapshot.batches.len() >= accepted_batches
-        && snapshot
-            .batches
-            .iter()
-            .all(|batch| matches!(batch.status.as_str(), "CONFIRMED" | "FAILED" | "CANCELLED"))
+    !accepted_batch_ids.is_empty()
+        && accepted_batch_ids.iter().all(|id| {
+            snapshot
+                .batches
+                .iter()
+                .find(|batch| &batch.id == id)
+                .is_some_and(|batch| match batch.status.as_str() {
+                    "CONFIRMED" => proofs.contains_key(id),
+                    "FAILED" | "CANCELLED" => true,
+                    _ => false,
+                })
+        })
 }
 
 pub(super) async fn annotate_mode3_payment_processor(
@@ -227,6 +234,7 @@ async fn run_mode3_send_cells(
     let amount = parse_amount(&config.benchmark.mode3_payment_amount)?;
     let s1_rounds = s1_round_plan(config, config.benchmark.mode3_live_max_s1_batches);
     let pp_db_path = payment_processor::payment_receiver_db_path(config);
+    let s1_components_before = account_balance(&pp_db_path).ok();
     let s1_balance_before = account_snapshot(&pp_db_path)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
@@ -234,6 +242,10 @@ async fn run_mode3_send_cells(
     let mut s1_extra = serde_json::Map::new();
     s1_extra.insert("rounds".to_string(), s1_round_metrics(&s1_rounds));
     let mut s1 = s1.with_extra_metrics(s1_extra);
+    s1.tip_end_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let s1_components_after = account_balance(&pp_db_path).ok();
     let s1_balance_after = account_snapshot(&pp_db_path)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
@@ -246,6 +258,11 @@ async fn run_mode3_send_cells(
             .values()
             .map(|proof| proof.fee_microtari)
             .fold(0, u64::saturating_add),
+    );
+    add_balance_component_metrics(
+        &mut s1.extra_metrics,
+        s1_components_before,
+        s1_components_after,
     );
     s1.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -289,21 +306,46 @@ async fn run_mode3_send_cells(
         .await?;
     }
 
+    let s4_components_before = account_balance(&pp_db_path).ok();
     let s4_balance_before = account_snapshot(&pp_db_path)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
     let s4_recipients = derive_distinct_recipient_pool(128)?;
     let mut s4 = run_pp_s4_batches(config, context, &s4_recipients, amount).await;
+    s4.tip_end_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let s4_fee_microtari = s4.verified_fee_total();
+    let s4_confirmed_payments = s4.independently_confirmed_payments();
+    let s4_expected_balance = s4_balance_before.and_then(|before| {
+        before.checked_sub(
+            u64::from(s4_confirmed_payments)
+                .saturating_mul(amount.0)
+                .saturating_add(s4_fee_microtari),
+        )
+    });
+    if let Some(expected) = s4_expected_balance
+        && let Err(error) = wait_for_pp_receiver_balance(config, &pp_db_path, expected).await
+    {
+        let error = format!("PP S4 receiver state did not converge: {error:#}");
+        s4.errors.push(error.clone());
+        s4.state_observation_error = Some(error);
+    }
+    let s4_components_after = account_balance(&pp_db_path).ok();
     let s4_balance_after = account_snapshot(&pp_db_path)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
-    let s4_fee_microtari = s4.verified_fee_total();
     add_balance_reconciliation_metrics(
         &mut s4.extra_metrics,
         s4_balance_before,
         s4_balance_after,
-        u64::from(s4.accepted_payments).saturating_mul(amount.0),
+        u64::from(s4_confirmed_payments).saturating_mul(amount.0),
         s4_fee_microtari,
+    );
+    add_balance_component_metrics(
+        &mut s4.extra_metrics,
+        s4_components_before,
+        s4_components_after,
     );
     s4.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -327,6 +369,7 @@ async fn run_mode3_send_cells(
         .take(s5_items as usize)
         .collect::<Vec<_>>();
     let s5_recipient_set = s5_recipients.clone();
+    let s5_components_before = account_balance(&pp_db_path).ok();
     let s5_balance_before = account_snapshot(&pp_db_path)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
@@ -340,6 +383,9 @@ async fn run_mode3_send_cells(
         amount,
     )
     .await;
+    s5.tip_end_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
     s5.extra_metrics.insert(
         "recipient_set".to_string(),
         serde_json::json!(s5_recipient_set),
@@ -348,26 +394,49 @@ async fn run_mode3_send_cells(
         "s5_batch_size".to_string(),
         serde_json::json!(config.benchmark.s5_k),
     );
+    let s5_fee_microtari = s5.verified_fee_total();
+    let s5_confirmed_payments = s5.independently_confirmed_payments();
+    let s5_expected_balance = s5_balance_before.and_then(|before| {
+        before.checked_sub(
+            u64::from(s5_confirmed_payments)
+                .saturating_mul(amount.0)
+                .saturating_add(s5_fee_microtari),
+        )
+    });
+    if let Some(expected) = s5_expected_balance
+        && let Err(error) = wait_for_pp_receiver_balance(config, &pp_db_path, expected).await
+    {
+        let error = format!("PP S5 receiver state did not converge: {error:#}");
+        s5.errors.push(error.clone());
+        s5.state_observation_error = Some(error);
+    }
+    let s5_components_after = account_balance(&pp_db_path).ok();
+    let s5_balance_after = account_snapshot(&pp_db_path)
+        .ok()
+        .map(|snapshot| snapshot.available_microtari);
+    add_balance_reconciliation_metrics(
+        &mut s5.extra_metrics,
+        s5_balance_before,
+        s5_balance_after,
+        u64::from(s5_confirmed_payments).saturating_mul(amount.0),
+        s5_fee_microtari,
+    );
+    add_balance_component_metrics(
+        &mut s5.extra_metrics,
+        s5_components_before,
+        s5_components_after,
+    );
     s5.extra_metrics.insert(
         "s5_complete".to_string(),
         serde_json::json!(pp_summary_complete(&s5)),
     );
     s5.extra_metrics.insert(
         "s5_unavailable_reason".to_string(),
-        serde_json::json!((!pp_summary_complete(&s5)).then_some(
-            "one or more PP batches did not independently verify C_min-deep before timeout"
-        )),
-    );
-    let s5_balance_after = account_snapshot(&pp_db_path)
-        .ok()
-        .map(|snapshot| snapshot.available_microtari);
-    let s5_fee_microtari = s5.verified_fee_total();
-    add_balance_reconciliation_metrics(
-        &mut s5.extra_metrics,
-        s5_balance_before,
-        s5_balance_after,
-        u64::from(s5.accepted_payments).saturating_mul(amount.0),
-        s5_fee_microtari,
+        serde_json::json!(
+            (!pp_summary_complete(&s5)).then_some(
+                "one or more PP batches or receiver-state observations did not complete"
+            )
+        ),
     );
     s5.extra_metrics.insert(
         "unspent_before".to_string(),
@@ -482,7 +551,13 @@ async fn run_pp_s1_rounds(
             round_summary
                 .construction_complete_ms
                 .push(completed_offset_ms);
-            round_summary.record_batch(tx_index, submit_offset_ms, completed_offset_ms, result);
+            round_summary.record_batch(
+                tx_index,
+                submit_offset_ms,
+                completed_offset_ms,
+                vec![self_address.to_string(); round.outputs_per_tx.saturating_sub(1) as usize],
+                result,
+            );
             if round_summary.failed_batches > 0 {
                 break;
             }
@@ -579,6 +654,30 @@ async fn wait_for_pp_receiver_round_state(
     }
 }
 
+async fn wait_for_pp_receiver_balance(
+    config: &Config,
+    db_path: &Path,
+    expected_balance: u64,
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let timeout = config.timeout(config.timeouts.confirmation_secs);
+    let mut interval = time::interval(Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        let observed = account_snapshot(db_path)
+            .ok()
+            .map(|snapshot| snapshot.available_microtari);
+        if observed == Some(expected_balance) {
+            return Ok(());
+        }
+        if start.elapsed() >= timeout {
+            bail!(
+                "payment receiver balance did not converge within {timeout:?}: expected={expected_balance} observed={observed:?}"
+            );
+        }
+    }
+}
+
 pub(super) fn pp_receiver_state_ready(
     observed_outputs: Option<u64>,
     observed_balance: Option<u64>,
@@ -641,6 +740,7 @@ async fn run_pp_recipient_batches_sequential(
         let batch_index = u32::try_from(index + 1).unwrap_or(u32::MAX);
         println!("{label} batch {batch_index}/{attempted_batches} dispatching");
         let submit_offset_ms = start.elapsed().as_millis();
+        let expected_recipients = recipients.clone();
         let result = submit_pp_batch_to_recipients(
             &context.client,
             scenario,
@@ -651,7 +751,13 @@ async fn run_pp_recipient_batches_sequential(
         .await;
         let completed_offset_ms = start.elapsed().as_millis();
         summary.construction_complete_ms.push(completed_offset_ms);
-        summary.record_batch(batch_index, submit_offset_ms, completed_offset_ms, result);
+        summary.record_batch(
+            batch_index,
+            submit_offset_ms,
+            completed_offset_ms,
+            expected_recipients,
+            result,
+        );
     }
     summary
         .observe_db(config, pp_observation_timeout(config, scenario))
@@ -688,7 +794,7 @@ async fn run_pp_batches_concurrent(
         println!("{label} batch {batch_index}/{batch_count} dispatching");
         let context = context.clone_for_task();
         let submit_offset_ms = start.elapsed().as_millis();
-        pending.insert(batch_index, submit_offset_ms);
+        pending.insert(batch_index, (submit_offset_ms, recipient.clone()));
         let arm_start = start;
         join_set.spawn(async move {
             let result = submit_pp_batch(
@@ -704,6 +810,7 @@ async fn run_pp_batches_concurrent(
                 batch_index,
                 submit_offset_ms,
                 arm_start.elapsed().as_millis(),
+                recipient,
                 result,
             )
         });
@@ -714,20 +821,27 @@ async fn run_pp_batches_concurrent(
             break;
         };
         match result {
-            Ok((batch_index, submit_offset_ms, completed_ms, send)) => {
+            Ok((batch_index, submit_offset_ms, completed_ms, recipient, send)) => {
                 pending.remove(&batch_index);
                 summary.construction_complete_ms.push(completed_ms);
-                summary.record_batch(batch_index, submit_offset_ms, completed_ms, send);
+                summary.record_batch(
+                    batch_index,
+                    submit_offset_ms,
+                    completed_ms,
+                    vec![recipient],
+                    send,
+                );
             }
             Err(error) => summary.errors.push(format!("task join error: {error}")),
         }
     }
     let timed_out_at = start.elapsed().as_millis();
-    for (batch_index, submit_offset_ms) in pending {
+    for (batch_index, (submit_offset_ms, recipient)) in pending {
         summary.record_batch(
             batch_index,
             submit_offset_ms,
             timed_out_at,
+            vec![recipient],
             Err(anyhow::anyhow!(
                 "{label} absolute deadline expired before dispatch task completed"
             )),
@@ -902,7 +1016,11 @@ pub(super) fn record_pp_summary(
     };
     let status = if summary.blocked_upstream {
         CellStatus::BlockedUpstream
-    } else if terminal_failures == 0 && observation_complete && all_verified_ok {
+    } else if terminal_failures == 0
+        && observation_complete
+        && all_verified_ok
+        && summary.state_observation_error.is_none()
+    {
         CellStatus::Ok
     } else {
         CellStatus::Failed

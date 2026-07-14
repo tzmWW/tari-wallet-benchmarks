@@ -1,7 +1,7 @@
 # Baseline Status
 
 The former files in this directory were schema-v3 diagnostic output and were
-not valid under the current schema-v4 submission contract. They were removed to
+not valid under the current schema-v5 submission contract. They were removed to
 avoid presenting obsolete evidence as a deliverable.
 
 No replacement is fabricated during implementation. After an explicitly

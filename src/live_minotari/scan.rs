@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use rusqlite::types::ValueRef;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::time;
 
@@ -238,12 +239,12 @@ pub(super) fn record_blocked_checkpoint_scan(cell: &mut ScenarioCell, spec: Fres
     cell.notes.push(note.clone());
     cell.record_repetition(Repetition {
         run: 1,
-        status: CellStatus::Failed,
-        wall_ms: Some(0),
+        status: CellStatus::BlockedPrerequisite,
+        wall_ms: None,
         success_count: 0,
-        failure_count: 1,
-        fee_microtari: Some(0),
-        error: Some(note),
+        failure_count: 0,
+        fee_microtari: None,
+        error: None,
         metrics: Some(serde_json::json!({
             "blocked_prerequisite": true,
             "scan_checkpoint": spec.checkpoint.label(),
@@ -282,12 +283,12 @@ pub(super) fn record_blocked_prerequisite_cell(
     cell.notes.push(note.clone());
     cell.record_repetition(Repetition {
         run: 1,
-        status: CellStatus::Failed,
-        wall_ms: Some(0),
+        status: CellStatus::BlockedPrerequisite,
+        wall_ms: None,
         success_count: 0,
-        failure_count: 1,
-        fee_microtari: Some(0),
-        error: Some(note),
+        failure_count: 0,
+        fee_microtari: None,
+        error: None,
         metrics: Some(serde_json::json!({
             "blocked_prerequisite": true,
             "prerequisite": prerequisite,
@@ -500,8 +501,7 @@ async fn run_library_fresh_scan(
         ),
     )
     .await;
-    let account = account_snapshot(&db_path)?;
-    let (wall_ms, completion, scan_invocations, no_progress, stopped, more_blocks, scan_error) =
+    let (wall_ms, completion, scan_invocations, no_progress, stopped, more_blocks, mut scan_error) =
         match scan_result {
             Ok(report) => (
                 report.wall_ms,
@@ -527,11 +527,41 @@ async fn run_library_fresh_scan(
                 Some(format!("{error:#}")),
             ),
         };
-    let detected_outputs = detected_output_count(&db_path).unwrap_or_default();
-    let history_transactions = history_transaction_count(&db_path).unwrap_or_default();
-    let history_tx_ids = history_transaction_ids(&db_path).unwrap_or_default();
-    let recovered_output_commitments = recovered_output_commitments(&db_path).unwrap_or_default();
-    let spendable_outputs = spendable_output_count(&db_path).unwrap_or_default();
+    let account = match account_snapshot(&db_path) {
+        Ok(account) => account,
+        Err(error) => {
+            scan_error.get_or_insert_with(|| format!("reading final wallet state: {error:#}"));
+            AccountSnapshot::default()
+        }
+    };
+    let detected_outputs = detected_output_count(&db_path)
+        .map_err(|error| {
+            scan_error.get_or_insert_with(|| format!("reading recovered output count: {error:#}"));
+        })
+        .unwrap_or_default();
+    let history_transactions = history_transaction_count(&db_path)
+        .map_err(|error| {
+            scan_error.get_or_insert_with(|| format!("reading recovered history count: {error:#}"));
+        })
+        .unwrap_or_default();
+    let history_tx_ids = history_transaction_ids(&db_path)
+        .map_err(|error| {
+            scan_error
+                .get_or_insert_with(|| format!("reading recovered history identities: {error:#}"));
+        })
+        .unwrap_or_default();
+    let recovered_output_commitments = recovered_output_commitments(&db_path)
+        .map_err(|error| {
+            scan_error
+                .get_or_insert_with(|| format!("reading recovered output identities: {error:#}"));
+        })
+        .unwrap_or_default();
+    let spendable_outputs = spendable_output_count(&db_path)
+        .map_err(|error| {
+            scan_error
+                .get_or_insert_with(|| format!("reading final spendable output count: {error:#}"));
+        })
+        .unwrap_or_default();
 
     Ok(ScanMeasurement {
         wall_ms,
@@ -593,6 +623,10 @@ async fn run_mode1_fresh_scan(
     );
 
     let launch_tip = base_node_tip_snapshot(&config.network.base_node_http_url).await?;
+    let wait_target_height = requested_target
+        .as_ref()
+        .map(|target| target.height)
+        .unwrap_or(launch_tip.height);
     let tip_start = Some(launch_tip.height);
     let start = Instant::now();
     let mut command = Command::new(&config.paths.minotari_console_wallet);
@@ -613,53 +647,87 @@ async fn run_mode1_fresh_scan(
     let mut process =
         ManagedProcess::spawn(&log_stem, command, &config.paths.data_dir.join("logs"))?;
     let scan_pid = process.id();
-    let mut client = wait_for_mode1_grpc_address(config, &mut process, &grpc_address).await?;
-    let (scan_result, resource_peaks) = with_resource_sampling(
-        scan_pid,
-        wait_for_mode1_scan_to_tip(
+    let wallet_db = base_path.join("esmeralda/data/wallet/db/console_wallet.db");
+    let (attempt, resource_peaks) = with_resource_sampling(scan_pid, async {
+        let mut client = wait_for_mode1_grpc_address(config, &mut process, &grpc_address).await?;
+        let scan_result = wait_for_mode1_scan_to_tip(
             &mut process,
             &mut client,
-            requested_target.as_ref().unwrap_or(&launch_tip).height,
+            wait_target_height,
             config.timeout(config.timeouts.startup_secs),
             config.timeout(config.timeouts.scan_batch_secs),
-        ),
-    )
-    .await;
-    let scan_error = scan_result.as_ref().err().map(|error| format!("{error:#}"));
-    let grpc_height = match scan_result {
-        Ok(height) => height,
-        Err(_) => client
-            .get_state(grpc::GetStateRequest {})
+        )
+        .await;
+        let mut scan_error = scan_result.as_ref().err().map(|error| format!("{error:#}"));
+        let grpc_height = match scan_result {
+            Ok(height) => height,
+            Err(_) => client
+                .get_state(grpc::GetStateRequest {})
+                .await
+                .ok()
+                .map(|response| response.into_inner().scanned_height)
+                .unwrap_or_default(),
+        };
+        let available_microtari = match client
+            .get_balance(grpc::GetBalanceRequest { payment_id: None })
             .await
-            .ok()
-            .map(|response| response.into_inner().scanned_height)
-            .unwrap_or_default(),
+        {
+            Ok(response) => response.into_inner().available_balance,
+            Err(error) => {
+                scan_error.get_or_insert_with(|| {
+                    format!("reading final console-wallet balance: {error}")
+                });
+                0
+            }
+        };
+        let cursor = mode1_scan_cursor(&wallet_db).unwrap_or(AccountSnapshot {
+            max_height: grpc_height,
+            hash: None,
+            available_microtari,
+        });
+        let spendable_outputs = match mode1_unspent_count(&mut client).await {
+            Ok(count) => count,
+            Err(error) => {
+                scan_error.get_or_insert_with(|| {
+                    format!("reading final console-wallet outputs: {error:#}")
+                });
+                0
+            }
+        };
+        process.shutdown().await?;
+        Ok::<_, anyhow::Error>((cursor, spendable_outputs, available_microtari, scan_error))
+    })
+    .await;
+
+    let (cursor, spendable_outputs, available_microtari, mut scan_error) = match attempt {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = process.shutdown().await;
+            let (count, available) = mode1_unspent_db_snapshot(&wallet_db).unwrap_or_default();
+            (
+                mode1_scan_cursor(&wallet_db).unwrap_or(AccountSnapshot {
+                    max_height: 0,
+                    hash: None,
+                    available_microtari: available,
+                }),
+                count,
+                available,
+                Some(format!("{error:#}")),
+            )
+        }
     };
-    let available_microtari = client
-        .get_balance(grpc::GetBalanceRequest { payment_id: None })
-        .await
-        .ok()
-        .map(|response| response.into_inner().available_balance)
-        .unwrap_or_default();
-    let wallet_db = base_path.join("esmeralda/data/wallet/db/console_wallet.db");
-    let cursor = mode1_scan_cursor(&wallet_db).unwrap_or(AccountSnapshot {
-        max_height: grpc_height,
-        hash: None,
-        available_microtari,
-    });
-    let max_height = cursor.max_height;
-    let detected_outputs = detected_output_count(&wallet_db).unwrap_or_default();
-    let history_transactions = history_transaction_count(&wallet_db).unwrap_or_default();
-    let history_tx_ids = history_transaction_ids(&wallet_db).unwrap_or_default();
-    let recovered_output_commitments = recovered_output_commitments(&wallet_db).unwrap_or_default();
-    let spendable_outputs = mode1_unspent_count(&mut client).await.unwrap_or_default();
-    let completion = base_node_tip_snapshot(&config.network.base_node_http_url).await?;
+    let completion = match base_node_tip_snapshot(&config.network.base_node_http_url).await {
+        Ok(completion) => completion,
+        Err(error) => {
+            scan_error.get_or_insert_with(|| format!("reading scan completion tip: {error:#}"));
+            launch_tip.clone()
+        }
+    };
     let target = requested_target.unwrap_or_else(|| ChainTipSnapshot {
         height: cursor.max_height,
         hash: cursor.hash.clone().unwrap_or_default(),
     });
-    let mut scan_error = scan_error;
-    if cursor.hash.as_deref() != Some(target.hash.as_str()) {
+    if cursor.hash.as_deref() != Some(target.hash.as_str()) && cursor.max_height >= target.height {
         scan_error.get_or_insert_with(|| {
             format!(
                 "console-wallet cursor hash mismatch at target {}: expected {}, observed {}",
@@ -683,9 +751,29 @@ async fn run_mode1_fresh_scan(
             scan_error.get_or_insert_with(|| format!("verifying console-wallet target: {error:#}"));
         }
     }
-    let tip_end = Some(target.height);
-    process.shutdown().await?;
-
+    let max_height = cursor.max_height;
+    let detected_outputs = detected_output_count(&wallet_db)
+        .map_err(|error| {
+            scan_error.get_or_insert_with(|| format!("reading recovered output count: {error:#}"));
+        })
+        .unwrap_or_default();
+    let history_transactions = history_transaction_count(&wallet_db)
+        .map_err(|error| {
+            scan_error.get_or_insert_with(|| format!("reading recovered history count: {error:#}"));
+        })
+        .unwrap_or_default();
+    let history_tx_ids = history_transaction_ids(&wallet_db)
+        .map_err(|error| {
+            scan_error
+                .get_or_insert_with(|| format!("reading recovered history identities: {error:#}"));
+        })
+        .unwrap_or_default();
+    let output_commitments = recovered_output_commitments(&wallet_db)
+        .map_err(|error| {
+            scan_error
+                .get_or_insert_with(|| format!("reading recovered output identities: {error:#}"));
+        })
+        .unwrap_or_default();
     Ok(ScanMeasurement {
         wall_ms: start.elapsed().as_millis(),
         birthday: spec.birthday(),
@@ -694,14 +782,14 @@ async fn run_mode1_fresh_scan(
         cursor_hash: cursor.hash,
         available_microtari,
         tip_start,
-        tip_end,
+        tip_end: Some(target.height),
         tip_target_hash: Some(target.hash),
         tip_completion: Some(completion.height),
         tip_completion_hash: Some(completion.hash),
         detected_outputs,
         history_transactions,
         history_tx_ids,
-        recovered_output_commitments,
+        recovered_output_commitments: output_commitments,
         spendable_outputs,
         resource_peaks,
         expectations,
@@ -712,6 +800,20 @@ async fn run_mode1_fresh_scan(
         scan_last_more_blocks: None,
         scan_error,
     })
+}
+
+fn mode1_unspent_db_snapshot(db_path: &Path) -> anyhow::Result<(u64, u64)> {
+    let conn = Connection::open(db_path)?;
+    let (count, value): (i64, Option<i64>) = conn.query_row(
+        "SELECT COUNT(*), SUM(value) FROM outputs WHERE CAST(status AS TEXT) IN ('0', 'UNSPENT')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((
+        u64::try_from(count).context("console-wallet unspent count is negative")?,
+        u64::try_from(value.unwrap_or_default())
+            .context("console-wallet unspent value is negative")?,
+    ))
 }
 
 fn fresh_scan_db_path(config: &Config, mode: &str, spec: FreshScanSpec, run: u32) -> PathBuf {
@@ -769,7 +871,12 @@ fn detected_output_count(db_path: &Path) -> anyhow::Result<u64> {
 
 fn history_transaction_count(db_path: &Path) -> anyhow::Result<u64> {
     let conn = Connection::open(db_path)?;
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM completed_transactions", [], |row| {
+    let table = if table_exists(&conn, "displayed_transactions")? {
+        "displayed_transactions"
+    } else {
+        "completed_transactions"
+    };
+    let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
         row.get(0)
     })?;
     Ok(u64::try_from(count).unwrap_or_default())
@@ -777,20 +884,44 @@ fn history_transaction_count(db_path: &Path) -> anyhow::Result<u64> {
 
 fn history_transaction_ids(db_path: &Path) -> anyhow::Result<BTreeSet<String>> {
     let conn = Connection::open(db_path)?;
-    let columns = table_columns_for_scan(&conn, "completed_transactions")?;
+    let table = if table_exists(&conn, "displayed_transactions")? {
+        "displayed_transactions"
+    } else {
+        "completed_transactions"
+    };
+    let columns = table_columns_for_scan(&conn, table)?;
     let column = if columns.contains("tx_id") {
         "tx_id"
+    } else if columns.contains("id") {
+        "id"
     } else if columns.contains("transaction_id") {
         "transaction_id"
     } else {
-        bail!("completed_transactions has no transaction identity column");
+        bail!("{table} has no transaction identity column");
     };
     let mut statement = conn.prepare(&format!(
-        "SELECT CAST({column} AS TEXT) FROM completed_transactions WHERE {column} IS NOT NULL"
+        "SELECT {column} FROM {table} WHERE {column} IS NOT NULL"
     ))?;
     Ok(statement
-        .query_map([], |row| row.get::<_, String>(0))?
+        .query_map([], |row| {
+            Ok(match row.get_ref(0)? {
+                ValueRef::Integer(value) => (value as u64).to_string(),
+                ValueRef::Text(value) => String::from_utf8_lossy(value).into_owned(),
+                ValueRef::Blob(value) => hex::encode(value),
+                ValueRef::Real(value) => value.to_string(),
+                ValueRef::Null => String::new(),
+            })
+        })?
+        .filter(|row| row.as_ref().is_ok_and(|value| !value.is_empty()))
         .collect::<Result<_, _>>()?)
+}
+
+fn table_exists(conn: &Connection, table: &str) -> anyhow::Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |row| row.get(0),
+    )?)
 }
 
 fn recovered_output_commitments(db_path: &Path) -> anyhow::Result<BTreeSet<String>> {
@@ -907,6 +1038,25 @@ pub(super) fn spendable_output_amounts(db_path: &Path) -> anyhow::Result<Vec<u64
         .collect()
 }
 
+pub(super) fn spendable_wallet_outputs(
+    db_path: &Path,
+    confirmation_window: u64,
+) -> anyhow::Result<Vec<DbWalletOutput>> {
+    let pool = init_db(db_path.to_path_buf())?;
+    let conn = pool.get()?;
+    let account = get_accounts(&conn, None)?
+        .into_iter()
+        .next()
+        .context("no account")?;
+    let tip_height = get_latest_scanned_tip_block_by_account(&conn, account.id)?
+        .map(|tip| tip.height)
+        .unwrap_or_default();
+    let min_height = tip_height.saturating_sub(confirmation_window);
+    Ok(db::fetch_unspent_outputs(
+        &conn, account.id, min_height, tip_height,
+    )?)
+}
+
 fn active_output_predicate(conn: &Connection) -> anyhow::Result<&'static str> {
     let mut stmt = conn.prepare("PRAGMA table_info(outputs)")?;
     let columns = stmt
@@ -951,5 +1101,23 @@ mod tests {
 
         assert_eq!(spendable_output_count(&db_path).unwrap(), 1);
         assert_eq!(spendable_output_amounts(&db_path).unwrap(), vec![100]);
+    }
+
+    #[test]
+    fn history_ids_normalize_signed_sqlite_integers_as_u64() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("wallet.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE completed_transactions (tx_id INTEGER);\n\
+             INSERT INTO completed_transactions (tx_id) VALUES (-1), (42);",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            history_transaction_ids(&db_path).unwrap(),
+            BTreeSet::from([u64::MAX.to_string(), "42".to_string()])
+        );
     }
 }

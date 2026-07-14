@@ -349,6 +349,9 @@
         "shared_funding_fee_microtari": {
           "$ref": "#/$defs/nullable_integer"
         },
+        "tip_height_at_broadcast": {
+          "$ref": "#/$defs/nullable_integer"
+        },
         "tip_height_at_confirmation": {
           "$ref": "#/$defs/nullable_integer"
         },
@@ -451,6 +454,12 @@
             "blocked_prerequisite": {
               "type": "boolean"
             },
+            "s4_arms": {
+              "items": {
+                "$ref": "#/$defs/s4_arm"
+              },
+              "type": "array"
+            },
             "s5_arms": {
               "additionalProperties": true,
               "type": "object"
@@ -498,6 +507,96 @@
         "failure_count",
         "fee_microtari",
         "error"
+      ],
+      "type": "object"
+    },
+    "s4_arm": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "api_acceptance_rate": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "attempted": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "configured_batch": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "confirmed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmed_success_rate": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "distinct_recipient_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_serialization_gap_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "recipients": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "recipients_are_distinct": {
+          "type": "boolean"
+        },
+        "rejected": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "serialization_timing_reason": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "stalled": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timed_out": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wall_ms": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "configured_batch",
+        "wall_ms",
+        "attempted",
+        "accepted",
+        "confirmed",
+        "rejected",
+        "stalled",
+        "timed_out",
+        "confirmed_success_rate",
+        "api_acceptance_rate",
+        "max_serialization_gap_ms",
+        "serialization_timing_reason",
+        "recipients",
+        "distinct_recipient_count",
+        "recipients_are_distinct"
       ],
       "type": "object"
     },
@@ -605,10 +704,22 @@
     "transaction_observation": {
       "additionalProperties": false,
       "properties": {
+        "api_accepted": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "api_error": {
+          "$ref": "#/$defs/nullable_string"
+        },
         "attempt_index": {
           "$ref": "#/$defs/nullable_integer"
         },
         "batch_index": {
+          "$ref": "#/$defs/nullable_integer"
+        },
+        "broadcast_start_offset_ms": {
           "$ref": "#/$defs/nullable_integer"
         },
         "change_output_count": {
@@ -620,6 +731,9 @@
         "confirmation_ms": {
           "$ref": "#/$defs/nullable_integer"
         },
+        "confirmation_timing_origin": {
+          "$ref": "#/$defs/nullable_string"
+        },
         "confirmation_timing_reason": {
           "$ref": "#/$defs/nullable_string"
         },
@@ -629,11 +743,20 @@
         "construction_ms": {
           "$ref": "#/$defs/nullable_integer"
         },
+        "construction_timing_origin": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "construction_timing_reason": {
+          "$ref": "#/$defs/nullable_string"
+        },
         "error": {
           "$ref": "#/$defs/nullable_string"
         },
         "fee_microtari": {
           "$ref": "#/$defs/nullable_integer"
+        },
+        "fee_unavailable_reason": {
+          "$ref": "#/$defs/nullable_string"
         },
         "input_count": {
           "$ref": "#/$defs/nullable_integer"
@@ -659,8 +782,20 @@
         "payment_output_count": {
           "$ref": "#/$defs/nullable_integer"
         },
+        "recipient": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "recipients": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "submission_ms": {
           "$ref": "#/$defs/nullable_integer"
+        },
+        "submission_timing_origin": {
+          "$ref": "#/$defs/nullable_string"
         },
         "submit_offset_ms": {
           "$ref": "#/$defs/nullable_integer"
@@ -845,7 +980,7 @@
       "type": "string"
     },
     "schema_version": {
-      "const": 4
+      "const": 5
     },
     "versions": {
       "additionalProperties": {

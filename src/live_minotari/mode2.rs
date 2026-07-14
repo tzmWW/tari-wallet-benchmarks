@@ -109,7 +109,17 @@ pub(super) async fn annotate_mode2_live_scenarios(
 
     let mut s1_request = request.clone();
     s1_request.recipient = sender_seed.address.clone();
-    let s1 = run_mode2_s1_rounds(config, s1_request).await;
+    let s1_components_before = account_balance(&config.modes.new_wallet_database).ok();
+    let mut s1 = run_mode2_s1_rounds(config, s1_request).await;
+    s1.tip_end_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let s1_components_after = account_balance(&config.modes.new_wallet_database).ok();
+    add_balance_component_metrics(
+        &mut s1.extra_metrics,
+        s1_components_before,
+        s1_components_after,
+    );
     record_mode2_send_summary(
         profile,
         ScenarioName::S1,
@@ -155,11 +165,16 @@ pub(super) async fn annotate_mode2_live_scenarios(
         )
         .await?;
     }
+    let s4_components_before = account_balance(&config.modes.new_wallet_database).ok();
     let s4_balance_before = account_snapshot(&config.modes.new_wallet_database)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
     let s4_recipients = derive_distinct_recipient_pool(128)?;
     let mut s4 = run_s4_batches(config, request.clone(), &s4_recipients).await?;
+    s4.tip_end_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let s4_components_after = account_balance(&config.modes.new_wallet_database).ok();
     let s4_balance_after = account_snapshot(&config.modes.new_wallet_database)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
@@ -169,6 +184,11 @@ pub(super) async fn annotate_mode2_live_scenarios(
         s4_balance_after,
         u64::from(s4.success_count).saturating_mul(request.amount.0),
         s4.fee_microtari,
+    );
+    add_balance_component_metrics(
+        &mut s4.extra_metrics,
+        s4_components_before,
+        s4_components_after,
     );
     s4.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -198,6 +218,7 @@ pub(super) async fn annotate_mode2_live_scenarios(
         .take(s5_attempts as usize)
         .collect::<Vec<_>>();
     let s5_recipient_set = s5_recipients.clone();
+    let s5_components_before = account_balance(&config.modes.new_wallet_database).ok();
     let s5_balance_before = account_snapshot(&config.modes.new_wallet_database)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
@@ -244,6 +265,10 @@ pub(super) async fn annotate_mode2_live_scenarios(
         ))
     };
     s5.wall_ms = s5_start.elapsed().as_millis();
+    s5.tip_end_height = base_node_tip_height(&config.network.base_node_http_url)
+        .await
+        .ok();
+    let s5_components_after = account_balance(&config.modes.new_wallet_database).ok();
     let s5_balance_after = account_snapshot(&config.modes.new_wallet_database)
         .ok()
         .map(|snapshot| snapshot.available_microtari);
@@ -253,6 +278,11 @@ pub(super) async fn annotate_mode2_live_scenarios(
         s5_balance_after,
         u64::from(s5.success_count).saturating_mul(s5_amount_microtari),
         s5.fee_microtari,
+    );
+    add_balance_component_metrics(
+        &mut s5.extra_metrics,
+        s5_components_before,
+        s5_components_after,
     );
     s5.extra_metrics.insert(
         "unspent_before".to_string(),
@@ -370,13 +400,14 @@ fn record_mode2_verification_loop_metrics(
             .and_then(serde_json::Value::as_str)
             .and_then(|tx_id| summary.confirmation_observed_offsets_ms.get(tx_id).copied())
             .map(|relative| verification_start_offset_ms.saturating_add(relative));
-        let submit_offset_ms = timing_u128(timing, "submit_offset_ms").unwrap_or_default();
+        let broadcast_start_offset_ms =
+            timing_u128(timing, "broadcast_start_offset_ms").unwrap_or_default();
         if let Some(confirmed_offset_ms) = confirmed_offset_ms
             && let Some(map) = timing.as_object_mut()
         {
             map.insert(
                 "broadcast_to_confirmed_at_c_min_ms".to_string(),
-                serde_json::json!(confirmed_offset_ms.saturating_sub(submit_offset_ms)),
+                serde_json::json!(confirmed_offset_ms.saturating_sub(broadcast_start_offset_ms)),
             );
         }
     }
@@ -488,26 +519,27 @@ async fn run_mode2_s1_rounds(
         let round_balance_before = account_snapshot(&request.db_path)
             .ok()
             .map(|snapshot| snapshot.available_microtari);
-        let mut spendable_amounts = match spendable_output_amounts(&request.db_path) {
-            Ok(amounts) => amounts,
-            Err(error) => {
-                round_summary.failure_count = round_summary.failure_count.saturating_add(1);
-                round_summary.errors.push(format!(
-                    "mode2 S1 round {} could not read spendable amounts: {error:#}",
-                    round.round_index
-                ));
-                total.add_batch(round.round_index, round_summary);
-                break;
-            }
-        };
-        spendable_amounts.sort_unstable_by(|a, b| b.cmp(a));
-        if spendable_amounts.len() != round.tx_count as usize {
+        let mut spendable_outputs =
+            match spendable_wallet_outputs(&request.db_path, request.confirmation_window) {
+                Ok(outputs) => outputs,
+                Err(error) => {
+                    round_summary.failure_count = round_summary.failure_count.saturating_add(1);
+                    round_summary.errors.push(format!(
+                        "mode2 S1 round {} could not read spendable outputs: {error:#}",
+                        round.round_index
+                    ));
+                    total.add_batch(round.round_index, round_summary);
+                    break;
+                }
+            };
+        spendable_outputs.sort_unstable_by_key(|output| std::cmp::Reverse(output.output.value()));
+        if spendable_outputs.len() != round.tx_count as usize {
             round_summary.failure_count = round_summary.failure_count.saturating_add(1);
             round_summary.errors.push(format!(
                 "mode2 S1 round {} expected {} spendable inputs before dispatch, observed {}; refusing noncanonical state",
                 round.round_index,
                 round.tx_count,
-                spendable_amounts.len()
+                spendable_outputs.len()
             ));
             total.add_batch(round.round_index, round_summary);
             break;
@@ -517,35 +549,25 @@ async fn run_mode2_s1_rounds(
                 "new_wallet/S1 round {} tx {}/{} outputs={}",
                 round.round_index, tx_index, round.tx_count, round.outputs_per_tx
             );
-            let input = spendable_amounts[(tx_index - 1) as usize];
+            let selected = spendable_outputs[(tx_index - 1) as usize].clone();
             let submit_offset_ms = round_start.elapsed().as_millis();
-            let result = exact_no_change_split(
-                input,
+            let result = construct_sign_broadcast_exact_split_owned(
+                request.clone(),
+                selected,
                 round.outputs_per_tx,
-                request.fee_rate.0,
-                STEALTH_OUTPUT_GRAMS,
             )
-            .map(|plan| {
-                plan.child_amounts
-                    .into_iter()
-                    .map(|amount| (request.recipient.clone(), amount))
-                    .collect()
-            });
-            let result = match result {
-                Ok(recipients) => {
-                    construct_sign_broadcast_one_sided_recipient_amounts_owned(
-                        request.clone(),
-                        recipients,
-                    )
-                    .await
-                }
-                Err(error) => Err(error),
-            };
+            .await;
             let completed_offset_ms = round_start.elapsed().as_millis();
             round_summary
                 .construction_complete_ms
                 .push(completed_offset_ms);
-            round_summary.record_attempt(tx_index, submit_offset_ms, completed_offset_ms, result);
+            round_summary.record_attempt(
+                tx_index,
+                submit_offset_ms,
+                completed_offset_ms,
+                request.recipient.clone(),
+                result,
+            );
         }
         let mut refresh_note = None;
         if !round_summary.tx_ids.is_empty() {
@@ -681,6 +703,7 @@ async fn run_s4_batches(
     recipients: &[String],
 ) -> anyhow::Result<ScenarioSendSummary> {
     let mut total = ScenarioSendSummary::default();
+    let mut all_state_refreshes_ok = true;
     let start = Instant::now();
     for configured_batch in &config.benchmark.concurrent_batches {
         let attempts = capped_attempts(*configured_batch, config.benchmark.mode2_live_max_s4_batch);
@@ -714,6 +737,49 @@ async fn run_s4_batches(
                 verification_wall_ms,
             );
         }
+        if !batch.tx_ids.is_empty() {
+            let refresh_budget = deadline
+                .saturating_duration_since(time::Instant::now())
+                .min(config.timeout(config.timeouts.scan_batch_secs));
+            let refresh = if refresh_budget.is_zero() {
+                Err(anyhow::anyhow!(
+                    "S4 absolute deadline expired before state refresh"
+                ))
+            } else {
+                scan_to_tip(
+                    &request.db_path,
+                    &request.password,
+                    &request.base_node_url,
+                    config.benchmark.scan_batch_size,
+                    config.benchmark.c_min,
+                    refresh_budget,
+                )
+                .await
+            };
+            match refresh {
+                Ok(report) => {
+                    batch.extra_metrics.insert(
+                        "post_confirmation_refresh".to_string(),
+                        serde_json::json!({
+                            "ok": true,
+                            "scanned_height": report.max_height,
+                            "target_height": report.target_tip,
+                            "wall_ms": report.wall_ms
+                        }),
+                    );
+                }
+                Err(error) => {
+                    all_state_refreshes_ok = false;
+                    batch.errors.push(format!(
+                        "new_wallet/S4 batch {configured_batch} state refresh failed: {error:#}"
+                    ));
+                    batch.extra_metrics.insert(
+                        "post_confirmation_refresh".to_string(),
+                        serde_json::json!({"ok": false, "error": format!("{error:#}")}),
+                    );
+                }
+            }
+        }
         batch.wall_ms = arm_start.elapsed().as_millis();
         if !batch.tx_ids.is_empty() && !mode2_summary_complete(&batch) {
             batch.errors.push(format!(
@@ -723,6 +789,10 @@ async fn run_s4_batches(
         total.add_batch(*configured_batch, batch);
     }
     total.wall_ms = start.elapsed().as_millis();
+    total.extra_metrics.insert(
+        "post_confirmation_state_observed".to_string(),
+        serde_json::json!(all_state_refreshes_ok),
+    );
     Ok(total)
 }
 
@@ -743,11 +813,17 @@ async fn run_send_attempts_to_recipients_sequential(
         println!("{label} attempt {attempt}/{attempts} dispatching");
         let submit_offset_ms = start.elapsed().as_millis();
         let mut request = request.clone();
-        request.recipient = recipient;
+        request.recipient = recipient.clone();
         let result = construct_sign_broadcast_one_sided_owned(request).await;
         let completed_offset_ms = start.elapsed().as_millis();
         summary.construction_complete_ms.push(completed_offset_ms);
-        summary.record_attempt(attempt, submit_offset_ms, completed_offset_ms, result);
+        summary.record_attempt(
+            attempt,
+            submit_offset_ms,
+            completed_offset_ms,
+            recipient,
+            result,
+        );
     }
     summary.wall_ms = start.elapsed().as_millis();
     summary
@@ -772,9 +848,9 @@ async fn run_send_attempts_concurrent(
         let attempt = u32::try_from(index + 1).unwrap_or(u32::MAX);
         println!("{label} attempt {attempt}/{attempts} dispatching");
         let mut request = request.clone();
-        request.recipient = recipient;
+        request.recipient = recipient.clone();
         let submit_offset_ms = start.elapsed().as_millis();
-        pending.insert(attempt, submit_offset_ms);
+        pending.insert(attempt, (submit_offset_ms, recipient.clone()));
         let arm_start = start;
         join_set.spawn(async move {
             let result = construct_sign_broadcast_one_sided_owned(request).await;
@@ -782,6 +858,7 @@ async fn run_send_attempts_concurrent(
                 attempt,
                 submit_offset_ms,
                 arm_start.elapsed().as_millis(),
+                recipient,
                 result,
             )
         });
@@ -792,20 +869,21 @@ async fn run_send_attempts_concurrent(
             break;
         };
         match result {
-            Ok((attempt, submit_offset_ms, completed_ms, send)) => {
+            Ok((attempt, submit_offset_ms, completed_ms, recipient, send)) => {
                 pending.remove(&attempt);
                 summary.construction_complete_ms.push(completed_ms);
-                summary.record_attempt(attempt, submit_offset_ms, completed_ms, send);
+                summary.record_attempt(attempt, submit_offset_ms, completed_ms, recipient, send);
             }
             Err(error) => summary.errors.push(format!("task join error: {error}")),
         }
     }
     let timed_out_at = start.elapsed().as_millis();
-    for (attempt, submit_offset_ms) in pending {
+    for (attempt, (submit_offset_ms, recipient)) in pending {
         summary.record_attempt(
             attempt,
             submit_offset_ms,
             timed_out_at,
+            recipient,
             Err(anyhow::anyhow!(
                 "{label} absolute deadline expired before dispatch task completed"
             )),
@@ -879,11 +957,17 @@ fn mode2_send_repetition(summary: &ScenarioSendSummary, scenario: ScenarioName) 
         u32::try_from(verified.iter().filter(|tx| tx.confirmed).count()).unwrap_or(u32::MAX);
     let terminal_failures = summary.attempted.saturating_sub(confirmed);
 
-    let status = if terminal_failures == 0 && verification_complete && all_verified_ok {
-        CellStatus::Ok
-    } else {
-        CellStatus::Failed
-    };
+    let state_observed = summary
+        .extra_metrics
+        .get("post_confirmation_state_observed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let status =
+        if terminal_failures == 0 && verification_complete && all_verified_ok && state_observed {
+            CellStatus::Ok
+        } else {
+            CellStatus::Failed
+        };
 
     Repetition {
         run: 1,

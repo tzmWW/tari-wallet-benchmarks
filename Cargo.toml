@@ -35,7 +35,7 @@ toml = "0.9.8"
 tonic = { version = "0.13.1", default-features = false, features = ["transport"], optional = true }
 url = "2.5.7"
 
-minotari = { git = "https://github.com/tzmWW/minotari-cli", rev = "c2b8d7b65a3b4320d85b7ba118145d190c264777", package = "minotari", optional = true }
+minotari = { git = "https://github.com/tzmWW/minotari-cli", rev = "1391dbd2155c96e885379d72b76e33582f0aad87", package = "minotari", optional = true }
 minotari_wallet_grpc_client = { version = "=5.3.1-pre.0", optional = true }
 
 [dev-dependencies]

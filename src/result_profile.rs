@@ -20,7 +20,7 @@ use crate::{
 #[path = "profile_validation/mod.rs"]
 pub mod profile_validation;
 
-pub const RESULT_SCHEMA_VERSION: u32 = 4;
+pub const RESULT_SCHEMA_VERSION: u32 = 5;
 pub const REFERENCE_BASE_NODE_REVISION: &str = "v5.4.0";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,6 +115,7 @@ pub enum CellStatus {
     Ok,
     Failed,
     BlockedUpstream,
+    BlockedPrerequisite,
     NotApplicable,
     HarnessError,
     Partial,
@@ -127,6 +128,7 @@ pub struct S0FundingTransactionEvidence {
     pub construction_ms: u128,
     pub broadcast_to_mempool_ms: u128,
     pub broadcast_to_confirmed_at_c_min_ms: u128,
+    pub tip_height_at_broadcast: Option<u64>,
     pub mined_height: u64,
     pub tip_height_at_confirmation: u64,
 }
@@ -138,6 +140,7 @@ pub struct S0FundingSubmissionEvidence {
     pub fee_microtari: u64,
     pub construction_ms: u128,
     pub broadcast_to_mempool_ms: u128,
+    pub tip_height_at_broadcast: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -312,7 +315,9 @@ fn status_pair(status: &CellStatus, blocked: bool) -> (ExecutionStatus, OutcomeS
         );
     }
     match status {
-        CellStatus::PendingFunding | CellStatus::ReadyForLiveRun => (
+        CellStatus::PendingFunding
+        | CellStatus::ReadyForLiveRun
+        | CellStatus::BlockedPrerequisite => (
             ExecutionStatus::BlockedPrerequisite,
             OutcomeStatus::Unavailable,
         ),
@@ -331,7 +336,7 @@ fn status_from_pair(execution: ExecutionStatus, outcome: OutcomeStatus) -> CellS
         (ExecutionStatus::Completed, OutcomeStatus::Success) => CellStatus::Ok,
         (ExecutionStatus::Completed, OutcomeStatus::Partial) => CellStatus::Partial,
         (ExecutionStatus::Completed, _) => CellStatus::Failed,
-        (ExecutionStatus::BlockedPrerequisite, _) => CellStatus::BlockedUpstream,
+        (ExecutionStatus::BlockedPrerequisite, _) => CellStatus::BlockedPrerequisite,
         (ExecutionStatus::HarnessError, _) => CellStatus::HarnessError,
         (ExecutionStatus::NotApplicable, _) => CellStatus::NotApplicable,
     }
@@ -380,13 +385,23 @@ pub struct TransactionObservation {
     pub batch_index: Option<u32>,
     pub submit_offset_ms: Option<u128>,
     pub construction_complete_offset_ms: Option<u128>,
+    pub broadcast_start_offset_ms: Option<u128>,
     pub construction_ms: Option<u128>,
+    pub construction_timing_origin: Option<String>,
+    pub construction_timing_reason: Option<String>,
     pub submission_ms: Option<u128>,
+    pub submission_timing_origin: Option<String>,
     pub mempool_available: Option<bool>,
     pub mempool_reason: Option<String>,
     pub confirmation_ms: Option<u128>,
+    pub confirmation_timing_origin: Option<String>,
     pub confirmation_timing_reason: Option<String>,
     pub fee_microtari: Option<u64>,
+    pub fee_unavailable_reason: Option<String>,
+    pub recipient: Option<String>,
+    pub recipients: Vec<String>,
+    pub api_accepted: Option<bool>,
+    pub api_error: Option<String>,
     pub terminal_outcome: String,
     pub error: Option<String>,
     pub mined_height: Option<u64>,

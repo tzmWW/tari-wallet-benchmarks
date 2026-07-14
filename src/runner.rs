@@ -768,6 +768,7 @@ fn validate_s0_funding_evidence(
             || funding.broadcast_to_mempool_ms != Some(transaction.broadcast_to_mempool_ms)
             || funding.broadcast_to_confirmed_at_c_min_ms
                 != Some(transaction.broadcast_to_confirmed_at_c_min_ms)
+            || funding.tip_height_at_broadcast != transaction.tip_height_at_broadcast
             || funding.tip_height_at_confirmation != Some(transaction.tip_height_at_confirmation)
             || funding.shared_funding_fee_microtari != Some(transaction.fee_microtari)
             || funding.funding_fee_attribution.as_deref()
@@ -803,6 +804,7 @@ fn config_with_s0_evidence(config: &Config, evidence_path: &Path) -> anyhow::Res
         construction_ms: Some(transaction.construction_ms),
         broadcast_to_mempool_ms: Some(transaction.broadcast_to_mempool_ms),
         broadcast_to_confirmed_at_c_min_ms: Some(transaction.broadcast_to_confirmed_at_c_min_ms),
+        tip_height_at_broadcast: transaction.tip_height_at_broadcast,
         tip_height_at_confirmation: Some(transaction.tip_height_at_confirmation),
         shared_funding_fee_microtari: Some(transaction.fee_microtari),
         funding_fee_attribution: Some(

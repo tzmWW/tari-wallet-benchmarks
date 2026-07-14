@@ -78,7 +78,7 @@ fn schema_command_writes_json() {
 }
 
 #[test]
-fn validate_and_summarize_profile_commands_use_schema_v4() {
+fn validate_and_summarize_profile_commands_use_current_schema() {
     let tempdir = tempfile::tempdir().unwrap();
     let profile_path = tempdir.path().join("checkpoint.json");
     let summary_path = tempdir.path().join("summary.md");

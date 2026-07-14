@@ -637,7 +637,7 @@ struct PaymentBatchChainFields {
 fn payment_batch_chain_fields(json: &str) -> anyhow::Result<PaymentBatchChainFields> {
     let value: serde_json::Value =
         serde_json::from_str(json).context("decoding PP signed batch payload JSON")?;
-    let signed = find_signed_transaction(&value)
+    let signed = find_final_payment_signed_transaction(&value)
         .context("PP signed batch payload contains no signed transaction")?;
     let kernel = signed
         .signed_transaction
@@ -665,11 +665,7 @@ fn payment_batch_chain_fields(json: &str) -> anyhow::Result<PaymentBatchChainFie
         .iter()
         .map(|output| hex::encode(output.commitment().as_bytes()))
         .collect();
-    let chain_tx_id = format!(
-        "{}:{}",
-        hex::encode(&kernel_excess_sig_nonce),
-        hex::encode(&kernel_excess_sig)
-    );
+    let chain_tx_id = signed.signed_transaction.tx_id.to_string();
     Ok(PaymentBatchChainFields {
         chain_tx_id,
         fee_microtari: kernel.fee.0,
@@ -679,6 +675,27 @@ fn payment_batch_chain_fields(json: &str) -> anyhow::Result<PaymentBatchChainFie
         total_output_count,
         output_commitments,
     })
+}
+
+fn find_final_payment_signed_transaction(
+    value: &serde_json::Value,
+) -> Option<SignedOneSidedTransactionResult> {
+    if let Some(steps) = value.get("steps").and_then(serde_json::Value::as_array) {
+        return steps
+            .iter()
+            .filter(|step| step["is_consolidation"] == false)
+            .max_by_key(|step| step["step_index"].as_u64().unwrap_or_default())
+            .and_then(|step| step.get("payload"))
+            .and_then(|payload| {
+                if payload["type"] != "Signed" {
+                    return None;
+                }
+                payload["data"]
+                    .as_str()
+                    .and_then(|json| serde_json::from_str(json).ok())
+            });
+    }
+    find_signed_transaction(value)
 }
 
 fn find_signed_transaction(value: &serde_json::Value) -> Option<SignedOneSidedTransactionResult> {
