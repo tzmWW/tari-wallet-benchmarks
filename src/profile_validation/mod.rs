@@ -1165,7 +1165,9 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
                     || metrics["H_tip_completion"].as_u64().is_none()
                     || metrics["H_tip_completion_hash"].as_str().is_none()
                     || metrics["expected_history_tx_ids"].as_array().is_none()
+                    || metrics["expected_output_commitments"].as_object().is_none()
                     || metrics["missing_history_tx_ids"] != json!([])
+                    || metrics["missing_history_output_tx_ids"] != json!([])
                     || metrics["resource_sampling_window"] != "scan_wall_window"
                     || metrics["resource_sampling_process"].as_str().is_none()
                 {
@@ -1318,7 +1320,11 @@ fn validate_s1_exact_outputs(document: &Value) -> anyhow::Result<()> {
             .as_array()
             .and_then(|runs| runs.last())
             .and_then(|run| run.get("metrics"))
-            .and_then(|metrics| metrics.get("unspent_after"))
+            .and_then(|metrics| {
+                metrics
+                    .get("unspent_after")
+                    .or_else(|| metrics.get("extra")?.get("unspent_after"))
+            })
             .and_then(Value::as_u64);
         if exact != Some(512) {
             bail!("successful {mode}/S1 must prove unspent_after=512");

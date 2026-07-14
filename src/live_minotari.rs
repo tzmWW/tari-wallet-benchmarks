@@ -4115,24 +4115,19 @@ fn scan_expectations_from_profile(
             expected_available_microtari: Some(0),
             expected_history_transactions: Some(0),
             expected_history_tx_ids: BTreeSet::new(),
+            expected_output_commitments: BTreeMap::new(),
         },
         ScanCheckpoint::PostS1 => scenario_scan_expectations(profile, mode, ScenarioName::S1)
             .with_fallback_outputs(Some(u64::from(config.benchmark.volume_target)))
-            .with_expected_history(verified_history_transaction_ids(
-                profile,
-                mode,
-                &[ScenarioName::S1],
-            )),
+            .with_expected_chain_history(profile, mode, &[ScenarioName::S1]),
         ScanCheckpoint::PostS1Partial => {
             scenario_scan_expectations(profile, mode, ScenarioName::S1)
         }
         ScanCheckpoint::PostS5Complete | ScanCheckpoint::PostS5Partial => {
-            scenario_scan_expectations(profile, mode, ScenarioName::S5).with_expected_history(
-                verified_history_transaction_ids(
-                    profile,
-                    mode,
-                    &[ScenarioName::S1, ScenarioName::S4, ScenarioName::S5],
-                ),
+            scenario_scan_expectations(profile, mode, ScenarioName::S5).with_expected_chain_history(
+                profile,
+                mode,
+                &[ScenarioName::S1, ScenarioName::S4, ScenarioName::S5],
             )
         }
         ScanCheckpoint::PostS1Blocked => ScanExpectations::default(),
@@ -4150,12 +4145,15 @@ fn scenario_scan_expectations(
     ScanExpectations {
         expected_outputs: metrics
             .get("unspent_after")
+            .or_else(|| metrics.get("extra")?.get("unspent_after"))
             .and_then(serde_json::Value::as_u64),
         expected_available_microtari: metrics
             .get("balance_after_microtari")
+            .or_else(|| metrics.get("extra")?.get("balance_after_microtari"))
             .and_then(serde_json::Value::as_u64),
         expected_history_transactions: None,
         expected_history_tx_ids: BTreeSet::new(),
+        expected_output_commitments: BTreeMap::new(),
     }
 }
 
@@ -4174,6 +4172,34 @@ fn verified_history_transaction_ids(
         .iter()
         .filter(|tx| tx.mode == mode && tx.confirmed && scenarios.contains(tx.scenario.as_str()))
         .map(|tx| tx.tx_id.clone())
+        .collect()
+}
+
+fn verified_history_output_commitments(
+    profile: &ResultProfile,
+    mode: &str,
+    scenarios: &[ScenarioName],
+) -> BTreeMap<String, BTreeSet<String>> {
+    scenarios
+        .iter()
+        .filter_map(|scenario| scenario_metrics(profile, mode, *scenario))
+        .filter_map(|metrics| metrics.get("transaction_observations"))
+        .filter_map(serde_json::Value::as_array)
+        .flatten()
+        .filter(|observation| observation["terminal_outcome"] == "confirmed")
+        .filter_map(|observation| {
+            let tx_id = observation["tx_id"]
+                .as_str()
+                .or_else(|| observation["batch_id"].as_str())?
+                .to_string();
+            let commitments = observation["output_commitments"]
+                .as_array()?
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect::<BTreeSet<_>>();
+            Some((tx_id, commitments))
+        })
         .collect()
 }
 
@@ -4200,9 +4226,22 @@ impl ScanExpectations {
         self
     }
 
-    fn with_expected_history(mut self, expected: BTreeSet<String>) -> Self {
+    fn with_expected_chain_history(
+        mut self,
+        profile: &ResultProfile,
+        mode: &str,
+        scenarios: &[ScenarioName],
+    ) -> Self {
         self.expected_history_transactions = None;
-        self.expected_history_tx_ids = expected;
+        if mode == "old_wallet" {
+            self.expected_history_tx_ids =
+                verified_history_transaction_ids(profile, mode, scenarios);
+        } else {
+            // One-sided receive history has wallet-local IDs, so chain output
+            // commitments are the stable identity shared with fresh recovery.
+            self.expected_output_commitments =
+                verified_history_output_commitments(profile, mode, scenarios);
+        }
         self
     }
 }
@@ -4298,6 +4337,7 @@ struct ScanExpectations {
     expected_available_microtari: Option<u64>,
     expected_history_transactions: Option<u64>,
     expected_history_tx_ids: BTreeSet<String>,
+    expected_output_commitments: BTreeMap<String, BTreeSet<String>>,
 }
 
 struct ScanMeasurement {
@@ -4361,6 +4401,13 @@ impl ScanMeasurement {
             .difference(&self.expectations.expected_history_tx_ids)
             .cloned()
             .collect::<Vec<_>>();
+        let missing_history_output_tx_ids = self
+            .expectations
+            .expected_output_commitments
+            .iter()
+            .filter(|(_, commitments)| commitments.is_disjoint(&self.recovered_output_commitments))
+            .map(|(tx_id, _)| tx_id.clone())
+            .collect::<Vec<_>>();
         serde_json::json!({
             "T_scan_ms": self.wall_ms,
             "mode": mode,
@@ -4372,9 +4419,11 @@ impl ScanMeasurement {
             "expected_available_microtari": self.expectations.expected_available_microtari,
             "expected_history_transactions": self.expectations.expected_history_transactions,
             "expected_history_tx_ids": self.expectations.expected_history_tx_ids,
+            "expected_output_commitments": self.expectations.expected_output_commitments,
             "recovered_history_tx_ids": self.history_tx_ids,
             "recovered_output_commitments": self.recovered_output_commitments,
             "missing_history_tx_ids": missing_history_tx_ids,
+            "missing_history_output_tx_ids": missing_history_output_tx_ids,
             "unexpected_history_tx_ids": unexpected_history_tx_ids,
             "balance_matches_expected": self.expectations.expected_available_microtari.map(|expected| expected == self.available_microtari),
             "balance_delta_microtari": self.expectations.expected_available_microtari.map(|expected| i128::from(expected) - i128::from(self.available_microtari)),
@@ -4398,8 +4447,8 @@ impl ScanMeasurement {
             "detected_outputs": self.detected_outputs,
             "history_transactions": self.history_transactions,
             "history_count_matches_expected": self.expectations.expected_history_transactions.map(|expected| self.history_transactions == expected),
-            "history_matches_expected": self.expectations.expected_history_tx_ids.is_subset(&self.history_tx_ids),
-            "history_identities_match_expected": self.expectations.expected_history_tx_ids.is_subset(&self.history_tx_ids),
+            "history_matches_expected": self.history_identities_match_expected(),
+            "history_identities_match_expected": self.history_identities_match_expected(),
             "spendable_outputs": self.spendable_outputs,
             "available_microtari": self.available_microtari,
             "max_height": self.max_height,
@@ -4435,11 +4484,12 @@ impl ScanMeasurement {
                 .expectations
                 .expected_history_tx_ids
                 .is_subset(&self.history_tx_ids)
+            && self.history_output_commitments_match_expected()
     }
 
     fn scan_verification_error(&self) -> String {
         format!(
-            "scan verification mismatch: scan_error={:?} max_height={} tip_end={:?} tip_lag_blocks={:?} tip_lag_tolerance_blocks={} expected_outputs={:?} spendable_outputs={} detected_outputs={} expected_available_microtari={:?} available_microtari={} expected_history_transactions={:?} history_transactions={} missing_history_tx_ids={:?}",
+            "scan verification mismatch: scan_error={:?} max_height={} tip_end={:?} tip_lag_blocks={:?} tip_lag_tolerance_blocks={} expected_outputs={:?} spendable_outputs={} detected_outputs={} expected_available_microtari={:?} available_microtari={} expected_history_transactions={:?} history_transactions={} missing_history_tx_ids={:?} missing_history_output_tx_ids={:?}",
             self.scan_error,
             self.max_height,
             self.tip_end,
@@ -4455,8 +4505,30 @@ impl ScanMeasurement {
             self.expectations
                 .expected_history_tx_ids
                 .difference(&self.history_tx_ids)
+                .collect::<Vec<_>>(),
+            self.expectations
+                .expected_output_commitments
+                .iter()
+                .filter(
+                    |(_, commitments)| commitments.is_disjoint(&self.recovered_output_commitments)
+                )
+                .map(|(tx_id, _)| tx_id)
                 .collect::<Vec<_>>()
         )
+    }
+
+    fn history_output_commitments_match_expected(&self) -> bool {
+        self.expectations
+            .expected_output_commitments
+            .values()
+            .all(|commitments| !commitments.is_disjoint(&self.recovered_output_commitments))
+    }
+
+    fn history_identities_match_expected(&self) -> bool {
+        self.expectations
+            .expected_history_tx_ids
+            .is_subset(&self.history_tx_ids)
+            && self.history_output_commitments_match_expected()
     }
 
     fn tip_lag_blocks(&self) -> Option<u64> {
@@ -5121,6 +5193,60 @@ mod tests {
                 .scan_verification_error()
                 .contains("max_height=627100")
         );
+    }
+
+    #[test]
+    fn library_scan_verifies_chain_history_by_output_commitment() {
+        let expected = BTreeSet::from(["commitment-a".to_string()]);
+        let measurement = ScanMeasurement {
+            birthday: 0,
+            birthday_start_height: 0,
+            max_height: 10,
+            cursor_hash: Some("target".to_string()),
+            wall_ms: 1,
+            available_microtari: 1,
+            tip_start: Some(10),
+            tip_end: Some(10),
+            tip_target_hash: Some("target".to_string()),
+            tip_completion: Some(10),
+            tip_completion_hash: Some("target".to_string()),
+            detected_outputs: 1,
+            history_transactions: 1,
+            history_tx_ids: BTreeSet::from(["wallet-local-id".to_string()]),
+            recovered_output_commitments: expected.clone(),
+            spendable_outputs: 1,
+            resource_peaks: ResourcePeaks::default(),
+            expectations: ScanExpectations {
+                expected_outputs: Some(1),
+                expected_available_microtari: Some(1),
+                expected_output_commitments: BTreeMap::from([(
+                    "chain-tx-id".to_string(),
+                    expected,
+                )]),
+                ..ScanExpectations::default()
+            },
+            tip_lag_tolerance_blocks: 0,
+            scan_invocations: 1,
+            scan_no_progress_attempts: 0,
+            scan_stopped_without_progress: false,
+            scan_last_more_blocks: Some(false),
+            scan_error: None,
+        };
+
+        assert!(measurement.scan_verification_ok());
+        let metrics = measurement.metrics(
+            "new_wallet",
+            FreshScanSpec {
+                scenario: ScenarioName::S2,
+                wallet_state: FreshScanWalletState::FundedGenesis,
+                checkpoint: ScanCheckpoint::PostS1,
+            },
+        );
+        assert_eq!(
+            metrics["missing_history_output_tx_ids"],
+            serde_json::json!([])
+        );
+        assert_eq!(metrics["history_identities_match_expected"], true);
     }
 
     #[test]

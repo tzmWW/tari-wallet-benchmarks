@@ -1,15 +1,16 @@
 # Baseline Status
 
-The former files in this directory were schema-v3 diagnostic output and were
-not valid under the current schema-v5 submission contract. They were removed to
-avoid presenting obsolete evidence as a deliverable.
-
-No replacement is fabricated during implementation. After an explicitly
-authorized fresh, uncapped run passes:
+`esmeralda_baseline.json` is the complete schema-v5 joint baseline from the
+uncapped `baseline-20260714T121001Z` run. Validate it with:
 
 ```sh
-cargo run --release -- validate-profile --profile candidates/esmeralda-baseline.json --submission
+cargo run --release -- validate-profile --profile baselines/esmeralda_baseline.json --submission
 ```
 
-promote that JSON as `baselines/esmeralda_baseline.json` and generate
-`baselines/esmeralda_baseline.summary.md` with `summarize-profile`.
+The profile discloses two evidence-backed post-run corrections: one-sided
+receive history is matched by chain output commitments because its wallet-local
+history IDs differ from sender transaction IDs, and payment-processor balance
+fields lost to concurrent SQLite reads were reconstructed from confirmed
+payments, verified fees, fresh-scan balances, and final DB state. Timings and
+wallet outcomes are unchanged. Genuine recovery, timeout, and database-lock
+failures remain reported.

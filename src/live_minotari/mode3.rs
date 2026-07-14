@@ -245,10 +245,17 @@ async fn run_mode3_send_cells(
     s1.tip_end_height = base_node_tip_height(&config.network.base_node_http_url)
         .await
         .ok();
-    let s1_components_after = account_balance(&pp_db_path).ok();
+    let s1_components_after = account_balance(&pp_db_path)
+        .ok()
+        .or_else(|| s1.extra_metrics.get("balance_after").cloned());
     let s1_balance_after = account_snapshot(&pp_db_path)
         .ok()
-        .map(|snapshot| snapshot.available_microtari);
+        .map(|snapshot| snapshot.available_microtari)
+        .or_else(|| {
+            s1_components_after
+                .as_ref()
+                .and_then(|balance| amount_field_as_microtari(balance, "available"))
+        });
     add_balance_reconciliation_metrics(
         &mut s1.extra_metrics,
         s1_balance_before,
@@ -264,10 +271,12 @@ async fn run_mode3_send_cells(
         s1_components_before,
         s1_components_after,
     );
-    s1.extra_metrics.insert(
-        "unspent_after".to_string(),
-        serde_json::json!(spendable_output_count(&pp_db_path).ok()),
-    );
+    if let Ok(unspent_after) = spendable_output_count(&pp_db_path) {
+        s1.extra_metrics.insert(
+            "unspent_after".to_string(),
+            serde_json::json!(unspent_after),
+        );
+    }
     record_pp_summary(
         profile,
         ScenarioName::S1,
@@ -590,6 +599,7 @@ async fn run_pp_s1_rounds(
             }
         }
         let observed_utxos = spendable_output_count(&db_path).ok();
+        let balance_after = account_balance(&db_path).ok();
         let round_balance_after = account_snapshot(&db_path)
             .ok()
             .map(|snapshot| snapshot.available_microtari);
@@ -607,6 +617,14 @@ async fn run_pp_s1_rounds(
                 "fee_only_balance_delta_ok": fee_only_balance_delta_ok,
                 "wall_ms": round_summary.wall_ms
             }),
+        );
+        round_summary.extra_metrics.insert(
+            "unspent_after".to_string(),
+            serde_json::json!(observed_utxos),
+        );
+        round_summary.extra_metrics.insert(
+            "balance_after".to_string(),
+            serde_json::json!(balance_after),
         );
         if observed_utxos != Some(u64::from(round.target_utxos_after))
             || !fee_only_balance_delta_ok
