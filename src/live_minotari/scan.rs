@@ -937,19 +937,32 @@ fn table_exists(conn: &Connection, table: &str) -> anyhow::Result<bool> {
 fn recovered_output_commitments(db_path: &Path) -> anyhow::Result<BTreeSet<String>> {
     let conn = Connection::open(db_path)?;
     let columns = table_columns_for_scan(&conn, "outputs")?;
-    let column = if columns.contains("commitment") {
+    let expression = if columns.contains("commitment") {
         "commitment"
     } else if columns.contains("commitment_data") {
         "commitment_data"
+    } else if columns.contains("wallet_output_json") {
+        "json_extract(wallet_output_json, '$.commitment')"
     } else {
         bail!("outputs has no commitment identity column");
     };
     let mut statement = conn.prepare(&format!(
-        "SELECT {column} FROM outputs WHERE {column} IS NOT NULL"
+        "SELECT {expression} FROM outputs WHERE {expression} IS NOT NULL"
     ))?;
     Ok(statement
-        .query_map([], |row| row.get::<_, Vec<u8>>(0))?
-        .map(|row| row.map(hex::encode))
+        .query_map([], |row| {
+            Ok(match row.get_ref(0)? {
+                ValueRef::Blob(value) => hex::encode(value),
+                ValueRef::Text(value) => String::from_utf8_lossy(value).into_owned(),
+                value => {
+                    return Err(rusqlite::Error::InvalidColumnType(
+                        0,
+                        "commitment".to_string(),
+                        value.data_type(),
+                    ));
+                }
+            })
+        })?
         .collect::<Result<_, _>>()?)
 }
 
@@ -1128,6 +1141,23 @@ mod tests {
         assert_eq!(
             history_transaction_ids(&db_path).unwrap(),
             BTreeSet::from([u64::MAX.to_string(), "42".to_string()])
+        );
+    }
+
+    #[test]
+    fn recovered_commitments_support_current_wallet_json_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("wallet.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE outputs (wallet_output_json TEXT NOT NULL);
+             INSERT INTO outputs VALUES ('{\"commitment\":\"deadbeef\"}');",
+        )
+        .unwrap();
+
+        assert_eq!(
+            recovered_output_commitments(&db_path).unwrap(),
+            BTreeSet::from(["deadbeef".to_string()])
         );
     }
 }
