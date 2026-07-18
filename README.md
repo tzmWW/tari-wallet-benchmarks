@@ -52,9 +52,13 @@ pinned local node, then replace `REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY` with its
 `whoami` public key. Canonical live configuration rejects a remote scan endpoint,
 a local authority endpoint, or identical scan/authority URLs.
 
-The second fetch script applies the tracked PP fee patch and writes
-`tools/build-manifest.json`. Preflight verifies every source revision, the patch
-SHA-256, and each runtime binary SHA-256.
+The fetchers build from upstream bases plus the ordered patches in `patches/`.
+They verify immutable patch SHA-256 values, each intermediate/final Git tree,
+and the complete diff before building. The second fetcher writes typed schema-v2
+`tools/build-manifest.json`; preflight fails closed unless its upstream bases,
+ordered patches, result trees, and every runtime artifact SHA-256 match the
+provenance embedded by `build.rs`. CI performs the source checks without building
+large binaries via each script's `--verify-only` mode.
 
 For a local node, set `network.base_node_http_url` to its HTTP endpoint and set
 `network.mode1_base_node_service_peer` to `public_key::multiaddr`. Keep
@@ -103,3 +107,7 @@ locks the candidate namespace, rejects dirty PP/signer state, stores child logs
 under the namespace, and terminates managed process groups on SIGINT/SIGTERM.
 
 See `RUNBOOK.md` for protocol and recovery details.
+
+## License
+
+BSD-3-Clause. See `LICENSE`.

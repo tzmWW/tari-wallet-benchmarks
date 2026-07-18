@@ -38,6 +38,10 @@ url = "2.5.7"
 minotari = { git = "https://github.com/tzmWW/minotari-cli", rev = "1391dbd2155c96e885379d72b76e33582f0aad87", package = "minotari", optional = true }
 minotari_wallet_grpc_client = { version = "=5.3.1-pre.0", optional = true }
 
+[build-dependencies]
+hex = "0.4.3"
+sha2 = "0.10.9"
+
 [dev-dependencies]
 assert_cmd = "2.0.17"
 predicates = "3.1.3"

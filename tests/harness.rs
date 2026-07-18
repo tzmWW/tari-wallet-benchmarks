@@ -2,7 +2,9 @@ use std::{fs, path::Path};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use sha2::{Digest, Sha256};
 use wallet_bench::{
+    build_manifest::BUILD_MANIFEST_SCHEMA_VERSION,
     config::Config,
     env_capture,
     modes::ModeName,
@@ -46,6 +48,51 @@ fn canonical_pins_are_consistent_across_build_inputs() {
             "{path}"
         );
     }
+}
+
+#[test]
+fn source_provenance_inputs_are_immutable_and_verifiable() {
+    assert_eq!(BUILD_MANIFEST_SCHEMA_VERSION, 2);
+    let patches = [
+        (
+            "patches/minotari-fixed-range-scan.patch",
+            "8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d",
+        ),
+        (
+            "patches/minotari-exact-output-locking.patch",
+            "56f65ce897c1f428aeb8858faefeaf691d66e4cfa4e3027bd27b2ac856461b63",
+        ),
+        (
+            "patches/minotari-wallet-password-env.patch",
+            "c8f203f78cf5a2549be49e1e52e27474e13955a89c79a54658a0e2c06ae039c9",
+        ),
+        (
+            "patches/payment-processor-fee-rate.patch",
+            "69c3001b4474d478822651810dc5f25cae5c8bfede2f9bc756de6ded37dc89fe",
+        ),
+    ];
+    for (path, expected) in patches {
+        assert_eq!(
+            hex::encode(Sha256::digest(fs::read(path).unwrap())),
+            expected
+        );
+    }
+
+    for script in [
+        "scripts/fetch-minotari-cli.sh",
+        "scripts/fetch-payment-processor.sh",
+    ] {
+        let contents = fs::read_to_string(script).unwrap();
+        assert!(contents.contains("--verify-only"), "{script}");
+        assert!(
+            contents.contains("diff --cached --full-index --binary"),
+            "{script}"
+        );
+        assert!(contents.contains("write-tree"), "{script}");
+    }
+    let license = fs::read_to_string("LICENSE").unwrap();
+    assert!(license.contains("BSD 3-Clause License"));
+    assert!(license.contains("Tari Wallet Benchmarks contributors"));
 }
 
 #[test]

@@ -198,14 +198,22 @@ pub async fn start_payment_receiver(
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let command = payment_receiver_command(config, password, &db_path);
+    ManagedProcess::spawn(
+        "mode3-payment-receiver",
+        command,
+        &config.paths.data_dir.join("logs"),
+    )
+}
+
+fn payment_receiver_command(config: &Config, password: &str, db_path: &Path) -> Command {
     let api_port = listen_port(&config.modes.payment_receiver_listen, 9146);
     let mut command = Command::new(&config.paths.minotari_binary);
     command
+        .env("MINOTARI_WALLET_PASSWORD", password)
         .arg("--network")
         .arg("esmeralda")
         .arg("daemon")
-        .arg("--password")
-        .arg(password)
         .arg("--base-url")
         .arg(&config.network.base_node_http_url)
         .arg("--batch-size")
@@ -219,11 +227,7 @@ pub async fn start_payment_receiver(
         .arg(config.benchmark.mode3_worker_sleep_secs.to_string())
         .arg("--api-port")
         .arg(api_port.to_string());
-    ManagedProcess::spawn(
-        "mode3-payment-receiver",
-        command,
-        &config.paths.data_dir.join("logs"),
-    )
+    command
 }
 
 pub async fn start_payment_processor(
@@ -824,7 +828,7 @@ mod tests {
 
     use super::{
         build_env, inspect_payment_processor_db, payment_processor_db_path,
-        payment_processor_http_error_message,
+        payment_processor_http_error_message, payment_receiver_command, payment_receiver_db_path,
     };
 
     #[test]
@@ -843,6 +847,24 @@ mod tests {
         );
         assert!(env.vars.contains_key("CONSOLE_WALLET_PASSWORD"));
         assert_eq!(env.vars.get("FEE_PER_GRAM").map(String::as_str), Some("5"));
+    }
+
+    #[test]
+    fn payment_receiver_password_is_passed_only_by_environment() {
+        let cfg = Config::default();
+        let db_path = payment_receiver_db_path(&cfg);
+        let command = payment_receiver_command(&cfg, "test-secret-password", &db_path);
+        let command = command.as_std();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(!args.iter().any(|arg| arg == "--password"));
+        assert!(!args.iter().any(|arg| arg == "test-secret-password"));
+        assert!(command.get_envs().any(|(name, value)| {
+            name == "MINOTARI_WALLET_PASSWORD"
+                && value.is_some_and(|value| value == "test-secret-password")
+        }));
     }
 
     #[test]

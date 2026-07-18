@@ -14,6 +14,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake lsof protobuf-compiler sqlite3
       - name: Install ast-grep
         run: npm install --global @ast-grep/cli
+      - name: Verify pinned source provenance
+        run: |
+          scripts/fetch-minotari-cli.sh --verify-only .bench-cache tools
+          scripts/fetch-payment-processor.sh --verify-only .bench-cache tools
       - name: Format
         run: cargo fmt --check
       - name: Check

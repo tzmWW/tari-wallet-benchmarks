@@ -96,32 +96,41 @@ cargo test --all-features
 ast-grep scan
 ```
 
-The fetch scripts pin:
+The fetch scripts pin upstream bases and verify their exact Git trees:
 
-- minotari CLI/scanner: `tzmWW/minotari-cli@1391dbd2155c96e885379d72b76e33582f0aad87`
-- console wallet: `9f5adb7183dc2ec285f5c8fae05f4be9735d9749`
-- node: `v5.4.0`
-- payment processor: `f0572c98cbfac7377412dc6d4094c7d7dfc5de2c`
+- minotari CLI/scanner upstream base: `tari-project/minotari-cli@360c4848a54d65fd710266233cc9277b0f785e74`
+- console wallet: `tari-project/tari@9f5adb7183dc2ec285f5c8fae05f4be9735d9749`
+- node: `tari-project/tari@v5.4.0`
+- payment processor: `tari-project/minotari_payment_processor@f0572c98cbfac7377412dc6d4094c7d7dfc5de2c`
 
-The minotari pin is exactly two commits ahead of upstream `360c4848`:
+Minotari is built by applying three tracked patches in order. The first two are
+immutable full diffs of the former `c2b8d7b` and `1391dbd` fork commits:
 
-- `c2b8d7b` makes the processor, rather than the downloader, publish fixed-range
-  scan completion after queued blocks are persisted; it also fixes inclusive
-  range arithmetic and clips responses at the requested end height. Without it,
-  two pre-funding runs stopped at batch boundaries and could not prove the shared
-  exact B0 anchor.
-- `1391dbd` adds atomic caller-selected output locking and exact-shape fee
-  estimation. S1 must bind every planned 1-input transaction to a specific
-  parent and consume it without change; the upstream selection API cannot express
-  that invariant and previously selected a different input or under-estimated a
-  fee. The full comparison is
-  `https://github.com/tzmWW/minotari-cli/compare/360c4848a54d65fd710266233cc9277b0f785e74...1391dbd2155c96e885379d72b76e33582f0aad87`.
+- `patches/minotari-fixed-range-scan.patch` makes the processor, rather than the
+  downloader, publish fixed-range scan completion after queued blocks are
+  persisted; it also fixes inclusive range arithmetic and clips responses at the
+  requested end height. Without it, two pre-funding runs stopped at batch
+  boundaries and could not prove the shared exact B0 anchor.
+- `patches/minotari-exact-output-locking.patch` adds atomic caller-selected output
+  locking and exact-shape fee estimation. S1 must bind every planned 1-input
+  transaction to a specific parent and consume it without change; the upstream
+  selection API cannot express that invariant and previously selected a different
+  input or under-estimated a fee.
+- `patches/minotari-wallet-password-env.patch` enables Clap's environment support
+  and accepts `MINOTARI_WALLET_PASSWORD`, so the payment receiver does not expose
+  its wallet password in process arguments.
 
 The PP build applies `patches/payment-processor-fee-rate.patch` to both ordinary
 payment construction and self-spend consolidation. Upstream hard-codes `5`; the
 bounty requires the exposed `benchmark.fee_rate` to control every mode, so the
-patch makes both paths require the harness-provided `FEE_PER_GRAM`. The fetch
-script verifies that this is the only PP source change and records its hash.
+patch makes both paths require the harness-provided `FEE_PER_GRAM`.
+
+Both fetchers verify known patch hashes, every intermediate/final tree, and the
+SHA-256 of the complete binary diff. Use `--verify-only` to perform those checks
+without compiling. A normal PP build emits schema-v2 `tools/build-manifest.json`
+with upstream bases, ordered patch hashes/result trees, and artifact hashes;
+runtime preflight compares it against provenance embedded by `build.rs` and fails
+closed on missing, extra, reordered, or changed claims.
 
 ### Source Wallet
 
@@ -278,3 +287,5 @@ runs.
 `query-tx` are noncanonical operator diagnostics/recovery commands. They are not
 called by measured scenarios and must not be used to alter a candidate between
 cells.
+
+The harness source is licensed under BSD-3-Clause; see `LICENSE`.

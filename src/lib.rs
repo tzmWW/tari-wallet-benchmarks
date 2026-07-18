@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+pub mod build_manifest;
 pub mod cli;
 pub mod config;
 pub mod env_capture;

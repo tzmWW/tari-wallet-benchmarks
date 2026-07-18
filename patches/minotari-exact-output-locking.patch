@@ -1,0 +1,250 @@
+diff --git a/minotari/src/db/outputs.rs b/minotari/src/db/outputs.rs
+index f49c651a8dafdc4bff3d5a8fb9e011d6af441c6d..6dcdb5549d6eb9c19ef10681edd59062954c6025 100644
+--- a/minotari/src/db/outputs.rs
++++ b/minotari/src/db/outputs.rs
+@@ -344,7 +344,7 @@ pub fn lock_output(
+     output_id: i64,
+     locked_by_request_id: &str,
+     locked_at: DateTime<Utc>,
+-) -> WalletDbResult<()> {
++) -> WalletDbResult<bool> {
+     info!(
+         target: "audit",
+         output_id = output_id,
+@@ -355,7 +355,7 @@ pub fn lock_output(
+     let locked_status = OutputStatus::Locked.to_string();
+     let unspent_status = OutputStatus::Unspent.to_string();
+ 
+-    conn.execute(
++    let affected = conn.execute(
+         r#"
+         UPDATE outputs
+         SET status = :locked_status, locked_by_request_id = :req_id, locked_at = :locked_at
+@@ -370,7 +370,7 @@ pub fn lock_output(
+         },
+     )?;
+ 
+-    Ok(())
++    Ok(affected == 1)
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq)]
+diff --git a/minotari/src/transactions/fund_locker.rs b/minotari/src/transactions/fund_locker.rs
+index 07894936e44ecc53e15ec14d02e191e3770da95d..e6f4b383c86db7b8a8c2186a6528f36d73b450d2 100644
+--- a/minotari/src/transactions/fund_locker.rs
++++ b/minotari/src/transactions/fund_locker.rs
+@@ -229,7 +229,9 @@ impl FundLocker {
+         )?;
+ 
+         for utxo in &utxo_selection.utxos {
+-            db::lock_output(&transaction, utxo.id, &pending_tx_id, expires_at)?;
++            if !db::lock_output(&transaction, utxo.id, &pending_tx_id, expires_at)? {
++                anyhow::bail!("selected output {} was no longer unspent", utxo.id);
++            }
+         }
+ 
+         transaction.commit()?;
+@@ -249,6 +251,84 @@ impl FundLocker {
+             fee_with_change: utxo_selection.fee_with_change,
+         })
+     }
++
++    /// Locks one caller-selected spendable output for an exact no-change transaction.
++    #[allow(clippy::too_many_arguments)]
++    pub fn lock_specific_output(
++        &self,
++        account_id: i64,
++        output_id: i64,
++        amount: MicroMinotari,
++        fee: MicroMinotari,
++        idempotency_key: Option<String>,
++        seconds_to_lock_utxos: u64,
++        confirmation_window: u64,
++    ) -> Result<LockFundsResult, anyhow::Error> {
++        let mut conn = self.db_pool.get()?;
++        if let Some(idempotency_key_str) = &idempotency_key
++            && let Some(response) =
++                db::find_pending_transaction_locked_funds_by_idempotency_key(&conn, idempotency_key_str, account_id)?
++        {
++            return Ok(response);
++        }
++
++        let _guard = FUND_LOCK_MUTEX
++            .lock()
++            .expect("Fund locker mutex poisoned - a prior lock call panicked");
++        if let Some(idempotency_key_str) = &idempotency_key
++            && let Some(response) =
++                db::find_pending_transaction_locked_funds_by_idempotency_key(&conn, idempotency_key_str, account_id)?
++        {
++            return Ok(response);
++        }
++
++        let tip_height = db::get_latest_scanned_tip_block_by_account(&conn, account_id)?
++            .map(|tip| tip.height)
++            .unwrap_or_default();
++        let min_height = tip_height.saturating_sub(confirmation_window);
++        let output = db::fetch_unspent_outputs(&conn, account_id, min_height, tip_height)?
++            .into_iter()
++            .find(|output| output.id == output_id)
++            .ok_or_else(|| anyhow::anyhow!("output {output_id} is not spendable for account {account_id}"))?;
++        let required = amount
++            .checked_add(fee)
++            .ok_or_else(|| anyhow::anyhow!("specific-output amount and fee overflow"))?;
++        if output.output.value() != required {
++            anyhow::bail!(
++                "specific output {} has value {}, expected exact no-change total {}",
++                output_id,
++                output.output.value(),
++                required
++            );
++        }
++
++        let transaction = conn.transaction()?;
++        #[allow(clippy::cast_possible_wrap)]
++        let expires_at = Utc::now() + Duration::seconds(seconds_to_lock_utxos as i64);
++        let idempotency_key = idempotency_key.unwrap_or_else(|| Uuid::new_v4().to_string());
++        let pending_tx_id = db::create_pending_transaction(
++            &transaction,
++            &idempotency_key,
++            account_id,
++            false,
++            output.output.value(),
++            fee,
++            fee,
++            expires_at,
++        )?;
++        if !db::lock_output(&transaction, output.id, &pending_tx_id, expires_at)? {
++            anyhow::bail!("specific output {} was no longer unspent", output.id);
++        }
++        transaction.commit()?;
++
++        Ok(LockFundsResult {
++            utxos: vec![output.output],
++            requires_change_output: false,
++            total_value: required,
++            fee_without_change: fee,
++            fee_with_change: fee,
++        })
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -531,4 +611,71 @@ mod tests {
+         assert!(!r_a.utxos.is_empty(), "A got UTXOs");
+         assert!(!r_b.utxos.is_empty(), "B got UTXOs");
+     }
++
++    #[test]
++    fn lock_specific_output_locks_only_requested_parent() {
++        let (pool, account_id, _temp) = setup_test_env(3, 1_000_000);
++        let output_id: i64 = pool
++            .get()
++            .expect("connection")
++            .query_row("SELECT id FROM outputs WHERE value = 2000000", [], |row| row.get(0))
++            .expect("target output");
++
++        let result = FundLocker::new(pool.clone())
++            .lock_specific_output(
++                account_id,
++                output_id,
++                MicroMinotari(1_999_340),
++                MicroMinotari(660),
++                Some("specific-parent".to_string()),
++                3600,
++                100,
++            )
++            .expect("specific lock succeeds");
++
++        assert_eq!(result.utxos.len(), 1);
++        assert_eq!(result.utxos[0].value(), MicroMinotari(2_000_000));
++        assert!(!result.requires_change_output);
++        assert_eq!(result.fee_without_change, MicroMinotari(660));
++        let conn = pool.get().expect("connection");
++        let locked_id: i64 = conn
++            .query_row("SELECT id FROM outputs WHERE status = 'LOCKED'", [], |row| row.get(0))
++            .expect("locked output");
++        assert_eq!(locked_id, output_id);
++    }
++
++    #[test]
++    fn lock_specific_output_rejects_non_exact_or_unspendable_parent_atomically() {
++        let (pool, account_id, _temp) = setup_test_env(1, 1_000_000);
++        let output_id: i64 = pool
++            .get()
++            .expect("connection")
++            .query_row("SELECT id FROM outputs", [], |row| row.get(0))
++            .expect("target output");
++        let locker = FundLocker::new(pool.clone());
++
++        let error = locker
++            .lock_specific_output(
++                account_id,
++                output_id,
++                MicroMinotari(999_000),
++                MicroMinotari(500),
++                None,
++                3600,
++                100,
++            )
++            .expect_err("non-exact total must fail");
++        assert!(error.to_string().contains("expected exact no-change total"));
++        let conn = pool.get().expect("connection");
++        let pending: i64 = conn
++            .query_row("SELECT COUNT(*) FROM pending_transactions", [], |row| row.get(0))
++            .expect("pending count");
++        let locked: i64 = conn
++            .query_row("SELECT COUNT(*) FROM outputs WHERE status = 'LOCKED'", [], |row| {
++                row.get(0)
++            })
++            .expect("locked count");
++        assert_eq!(pending, 0);
++        assert_eq!(locked, 0);
++    }
+ }
+diff --git a/minotari/src/transactions/one_sided_transaction.rs b/minotari/src/transactions/one_sided_transaction.rs
+index 31399da999c4d2a6e96e484344972dc6a1a552cc..4801962ad732f8bf127606596efaa4cc329da37d 100644
+--- a/minotari/src/transactions/one_sided_transaction.rs
++++ b/minotari/src/transactions/one_sided_transaction.rs
+@@ -262,4 +262,42 @@ impl OneSidedTransaction {
+ 
+         Ok(result)
+     }
++
++    /// Estimates the fee from the exact input and stealth-output shapes used by
++    /// [`create_unsigned_transaction`](Self::create_unsigned_transaction).
++    pub fn estimate_fee_without_change(
++        &self,
++        account: &AccountRow,
++        inputs: &[tari_transaction_components::transaction_components::WalletOutput],
++        recipients: &[Recipient],
++        fee_per_gram: MicroMinotari,
++    ) -> Result<MicroMinotari, anyhow::Error> {
++        if inputs.is_empty() {
++            return Err(anyhow!("No inputs provided"));
++        }
++        if recipients.is_empty() {
++            return Err(anyhow!("No recipients provided"));
++        }
++        let key_manager = account.get_key_manager(&self.password)?;
++        let consensus_constants = ConsensusConstantsBuilder::new(self.network).build();
++        let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager, self.network)?;
++        tx_builder.with_fee_per_gram(fee_per_gram);
++        for input in inputs {
++            tx_builder.with_input(input.clone())?;
++        }
++        for recipient in recipients {
++            let memo = recipient
++                .payment_id
++                .as_ref()
++                .and_then(|payment_id| MemoField::new_open_from_string(payment_id, TxType::PaymentToOther).ok())
++                .unwrap_or_else(MemoField::new_empty);
++            tx_builder.add_stealth_recipient(
++                recipient.address.clone(),
++                recipient.amount,
++                OutputFeatures::default(),
++                memo,
++            )?;
++        }
++        Ok(tx_builder.get_fee_estimate_without_change()?)
++    }
+ }

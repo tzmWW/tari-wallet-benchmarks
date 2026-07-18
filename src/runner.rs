@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+#[cfg(feature = "live-minotari")]
 use sha2::{Digest, Sha256};
 use sysinfo::Disks;
 #[cfg(feature = "live-minotari")]
@@ -23,19 +24,6 @@ pub struct S0FundingEvidence {
     pub birthday_start_height: u64,
     pub submission: crate::result_profile::S0FundingSubmissionEvidence,
     pub transaction: Option<crate::result_profile::S0FundingTransactionEvidence>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct BuildManifest {
-    schema_version: u32,
-    artifacts: std::collections::BTreeMap<String, BuildArtifact>,
-    payment_processor_patch_sha256: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct BuildArtifact {
-    source_revision: String,
-    sha256: String,
 }
 
 use crate::{
@@ -140,7 +128,7 @@ fn preflight_checks(
         bail!("preflight failed:\n{}", missing.join("\n"));
     }
     if verify_manifest {
-        verify_build_manifest(config)?;
+        crate::build_manifest::verify(config)?;
     }
 
     if check_funds {
@@ -1768,68 +1756,7 @@ fn check_binary(path: &Path, label: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn verify_build_manifest(config: &Config) -> anyhow::Result<()> {
-    let bytes = fs::read(&config.paths.build_manifest).with_context(|| {
-        format!(
-            "reading build manifest {} (rerun both fetch scripts)",
-            config.paths.build_manifest.display()
-        )
-    })?;
-    let manifest: BuildManifest =
-        serde_json::from_slice(&bytes).context("parsing build manifest")?;
-    if manifest.schema_version != 1 {
-        bail!(
-            "unsupported build manifest schema {}",
-            manifest.schema_version
-        );
-    }
-    let checks = [
-        (
-            "minotari",
-            config.paths.minotari_binary.as_path(),
-            config.versions.minotari_cli_rev.as_str(),
-        ),
-        (
-            "minotari_console_wallet",
-            config.paths.minotari_console_wallet.as_path(),
-            config.versions.tari_console_wallet_rev.as_str(),
-        ),
-        (
-            "minotari_payment_processor",
-            config.paths.payment_processor_binary.as_path(),
-            config.versions.payment_processor_rev.as_str(),
-        ),
-        (
-            "minotari_node",
-            config.paths.minotari_node.as_path(),
-            config.versions.base_node_rev.as_str(),
-        ),
-    ];
-    for (name, path, revision) in checks {
-        let artifact = manifest
-            .artifacts
-            .get(name)
-            .with_context(|| format!("build manifest is missing {name}"))?;
-        if artifact.source_revision != revision {
-            bail!(
-                "build manifest {name} revision {} does not match configured {revision}",
-                artifact.source_revision
-            );
-        }
-        let actual = sha256_file(path)?;
-        if actual != artifact.sha256 {
-            bail!("{name} SHA-256 does not match the build manifest");
-        }
-    }
-    let patch_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("patches/payment-processor-fee-rate.patch");
-    if sha256_file(&patch_path)? != manifest.payment_processor_patch_sha256 {
-        bail!("payment-processor patch SHA-256 does not match the build manifest");
-    }
-    println!("build manifest PASS: revisions, patch, and runtime binary SHA-256 values match");
-    Ok(())
-}
-
+#[cfg(feature = "live-minotari")]
 fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let bytes =
         fs::read(path).with_context(|| format!("reading {} for SHA-256", path.display()))?;

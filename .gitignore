@@ -21,3 +21,9 @@ baselines/esmeralda_baseline.old_wallet.json
 baselines/esmeralda_baseline.new_wallet.json
 baselines/esmeralda_baseline.fresh_scans.json
 baselines/esmeralda_baseline.payment_processor.json
+
+# Smithers run store (ephemeral — never commit)
+smithers.db
+smithers.db-shm
+smithers.db-wal
+.smithers/
