@@ -24,7 +24,7 @@ pub struct Environment {
 }
 
 pub fn capture() -> Environment {
-    capture_with_network(None, None, None)
+    capture_with_network(None, None, None, None)
 }
 
 pub fn capture_for_network(
@@ -32,10 +32,25 @@ pub fn capture_for_network(
     authority_url: &str,
     mode1_base_node_service_peer: Option<&str>,
 ) -> Environment {
+    capture_for_network_with_data_dir(
+        base_node_url,
+        authority_url,
+        mode1_base_node_service_peer,
+        None,
+    )
+}
+
+pub fn capture_for_network_with_data_dir(
+    base_node_url: &str,
+    authority_url: &str,
+    mode1_base_node_service_peer: Option<&str>,
+    data_dir: Option<&std::path::Path>,
+) -> Environment {
     capture_with_network(
         Some(base_node_url),
         Some(authority_url),
         mode1_base_node_service_peer,
+        data_dir,
     )
 }
 
@@ -43,6 +58,7 @@ fn capture_with_network(
     base_node_url: Option<&str>,
     authority_url: Option<&str>,
     mode1_base_node_service_peer: Option<&str>,
+    data_dir: Option<&std::path::Path>,
 ) -> Environment {
     let mut system = System::new_all();
     system.refresh_all();
@@ -51,7 +67,7 @@ fn capture_with_network(
         .first()
         .map(|cpu| cpu.brand().to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    let (disk_kind, disk_name) = primary_disk();
+    let (disk_kind, disk_name) = primary_disk(data_dir);
     let (base_node_host, base_node_path) = base_node_network_path(base_node_url);
     let (authority_host, authority_network_path) = base_node_network_path(authority_url);
 
@@ -70,9 +86,18 @@ fn capture_with_network(
     }
 }
 
-fn primary_disk() -> (Option<String>, Option<String>) {
+fn primary_disk(data_dir: Option<&std::path::Path>) -> (Option<String>, Option<String>) {
     let disks = Disks::new_with_refreshed_list();
-    let Some(disk) = disks.list().iter().max_by_key(|disk| disk.total_space()) else {
+    let disk = data_dir
+        .and_then(|path| {
+            disks
+                .list()
+                .iter()
+                .filter(|disk| path.starts_with(disk.mount_point()))
+                .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        })
+        .or_else(|| disks.list().iter().max_by_key(|disk| disk.total_space()));
+    let Some(disk) = disk else {
         return (None, None);
     };
     (

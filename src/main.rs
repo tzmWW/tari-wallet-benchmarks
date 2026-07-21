@@ -230,12 +230,25 @@ async fn execute(cli: Cli) -> anyhow::Result<()> {
         Command::ValidateProfile {
             profile,
             submission,
+            legacy_v5,
         } => {
-            profile_validation::validate_path(&profile, submission)?;
+            if legacy_v5 {
+                profile_validation::validate_legacy_v5_path(&profile)?;
+            } else {
+                profile_validation::validate_path(&profile, submission)?;
+            }
             println!("profile PASS: {}", profile.display());
         }
-        Command::SummarizeProfile { profile, out } => {
-            profile_validation::write_summary(&profile, &out)?;
+        Command::SummarizeProfile {
+            profile,
+            out,
+            legacy_v5,
+        } => {
+            if legacy_v5 {
+                profile_validation::write_legacy_v5_summary(&profile, &out)?;
+            } else {
+                profile_validation::write_summary(&profile, &out)?;
+            }
             println!("wrote {}", out.display());
         }
     }

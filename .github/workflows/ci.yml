@@ -33,7 +33,7 @@ jobs:
       - name: Generated schema is current
         run: cargo run -- schema --out RESULT_PROFILE_SCHEMA.json && git diff --exit-code -- RESULT_PROFILE_SCHEMA.json
       - name: Validate committed baseline when present
-        run: if test -f baselines/esmeralda_baseline.json; then cargo run -- validate-profile --profile baselines/esmeralda_baseline.json --submission; fi
+        run: if test -f baselines/esmeralda_baseline.json; then cargo run -- validate-profile --profile baselines/esmeralda_baseline.json --legacy-v5; fi
       - name: Reject tracked secret artifacts
         run: test -z "$(git ls-files '*.env' '*.db' '*.sqlite' '.secrets/**')"
       - name: Diff hygiene

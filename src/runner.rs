@@ -152,6 +152,8 @@ async fn preflight_for_live_run_inner(
     run_launch_checks: bool,
 ) -> anyhow::Result<()> {
     ensure_runtime_paths_are_absolute(config)?;
+    #[cfg(feature = "live-minotari")]
+    recover_prepared_transactions(config).await?;
     check_harness_worktree_clean()?;
     if run_launch_checks {
         check_disk_space(config)?;
@@ -165,6 +167,25 @@ async fn preflight_for_live_run_inner(
     check_selected_chain_readiness(config, &paths)
         .await
         .context("selected-chain live-run preflight")
+}
+
+#[cfg(feature = "live-minotari")]
+async fn recover_prepared_transactions(config: &Config) -> anyhow::Result<()> {
+    let paths = live_wallet_paths(config, None, None, None);
+    for path in [
+        &paths.old_wallet,
+        &paths.new_wallet,
+        &paths.payment_processor,
+    ] {
+        crate::live_minotari::recover_prepared_transaction_checkpoint(
+            path,
+            &config.network.base_node_http_url,
+            config.timeout(config.timeouts.startup_secs),
+            config.benchmark.c_min,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "live-minotari")]
@@ -225,10 +246,11 @@ async fn run_profile_inner(
 
     let mut profile = ResultProfile::new(
         config,
-        env_capture::capture_for_network(
+        env_capture::capture_for_network_with_data_dir(
             &config.network.base_node_http_url,
             &config.network.authority_http_url,
             config.network.mode1_base_node_service_peer.as_deref(),
+            Some(&config.paths.data_dir),
         ),
     );
     #[cfg(feature = "live-minotari")]
@@ -339,10 +361,11 @@ async fn prepare_b0_profile_inner(
     check_endpoint_authority(config).await?;
     let mut profile = ResultProfile::new(
         config,
-        env_capture::capture_for_network(
+        env_capture::capture_for_network_with_data_dir(
             &config.network.base_node_http_url,
             &config.network.authority_http_url,
             config.network.mode1_base_node_service_peer.as_deref(),
+            Some(&config.paths.data_dir),
         ),
     );
     let client = reqwest::Client::builder()
@@ -405,20 +428,29 @@ async fn fund_s0_from_checkpoint_inner(
 ) -> anyhow::Result<()> {
     config.validate_prefunding_b0()?;
     let _namespace_lock = RunNamespaceLock::acquire(&config.paths.data_dir)?;
+    crate::live_minotari::recover_prepared_transaction_checkpoint(
+        source_db,
+        &config.network.base_node_http_url,
+        config.timeout(config.timeouts.startup_secs),
+        config.benchmark.c_min,
+    )
+    .await
+    .context("recovering prepared source-wallet transaction before S0 funding")?;
     check_harness_worktree_clean()?;
     let checkpoint = profile_validation::validate_path(b0_profile_path, false)?;
     validate_prefunding_b0_metrics(&checkpoint)?;
     let book = AddressBook::load_required(config)?;
     let mut current = ResultProfile::new(
         config,
-        env_capture::capture_for_network(
+        env_capture::capture_for_network_with_data_dir(
             &config.network.base_node_http_url,
             &config.network.authority_http_url,
             config.network.mode1_base_node_service_peer.as_deref(),
+            Some(&config.paths.data_dir),
         ),
     );
     record_seed_fingerprints(&mut current, &book);
-    if checkpoint.harness_git_commit != current.harness_git_commit {
+    if checkpoint.provenance.export_commit != current.provenance.export_commit {
         bail!("fund-s0 B0 checkpoint harness commit does not match this binary");
     }
     if checkpoint.config.get("protocol_fingerprint") != current.config.get("protocol_fingerprint")
@@ -627,7 +659,7 @@ fn import_prefunding_b0(
     {
         bail!("B0 checkpoint is missing prefunding_b0 provenance");
     }
-    if checkpoint.harness_git_commit != profile.harness_git_commit {
+    if checkpoint.provenance.export_commit != profile.provenance.export_commit {
         bail!("B0 checkpoint harness commit does not match the funded continuation");
     }
     if checkpoint.config.get("protocol_fingerprint") != profile.config.get("protocol_fingerprint") {

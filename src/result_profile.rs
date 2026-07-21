@@ -20,8 +20,96 @@ use crate::{
 #[path = "profile_validation/mod.rs"]
 pub mod profile_validation;
 
-pub const RESULT_SCHEMA_VERSION: u32 = 5;
+pub const RESULT_SCHEMA_VERSION: u32 = 6;
 pub const REFERENCE_BASE_NODE_REVISION: &str = "v5.4.0";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileProvenance {
+    pub measurement_commit: String,
+    pub export_commit: String,
+    pub measurement_build_manifest: serde_json::Value,
+    pub export_build_manifest: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction: Option<ProfileCorrection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileCorrection {
+    pub manifest_schema_version: u32,
+    pub manifest_path: String,
+    pub tool: String,
+    pub tool_version: String,
+    pub corrected_at: chrono::DateTime<chrono::Utc>,
+    pub raw_profile_sha256: String,
+    pub raw_profile_size: u64,
+    pub transformations: Vec<ProfileCorrectionTransformation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileCorrectionTransformation {
+    pub pointer: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalOutcome {
+    Confirmed,
+    Rejected,
+    Stalled,
+    TimedOut,
+    Unavailable,
+}
+
+impl TerminalOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Rejected => "rejected",
+            Self::Stalled => "stalled",
+            Self::TimedOut => "timed_out",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+impl std::str::FromStr for TerminalOutcome {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "confirmed" => Ok(Self::Confirmed),
+            "rejected" => Ok(Self::Rejected),
+            "stalled" => Ok(Self::Stalled),
+            "timed_out" => Ok(Self::TimedOut),
+            "unavailable" => Ok(Self::Unavailable),
+            _ => anyhow::bail!("unknown terminal outcome {value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationFailureClass {
+    HttpResponse,
+    RequestTimeout,
+    ArmDeadline,
+    Transport,
+    ResponseDecode,
+    ResponseShape,
+    Database,
+    Process,
+    ChainTarget,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeeDisposition {
+    ConfirmedPaid,
+    ProposedUnresolved,
+    Rejected,
+    Unavailable,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -54,7 +142,7 @@ pub struct ResultProfile {
     pub run_id: String,
     pub profile_kind: ProfileKind,
     pub run_complete: bool,
-    pub harness_git_commit: String,
+    pub provenance: ProfileProvenance,
     pub completed_stages: Vec<String>,
     pub generated_at: chrono::DateTime<chrono::Utc>,
     pub network: String,
@@ -104,6 +192,7 @@ pub struct ScenarioCell {
     pub repetitions: Vec<Repetition>,
     pub median_wall_ms: Option<u128>,
     pub spread_wall_ms: Option<u128>,
+    pub all_runs_median_wall_ms: Option<u128>,
     pub notes: Vec<String>,
 }
 
@@ -164,6 +253,7 @@ struct ScenarioCellRef<'a> {
     repetitions: &'a [Repetition],
     median_wall_ms: Option<u128>,
     spread_wall_ms: Option<u128>,
+    all_runs_median_wall_ms: Option<u128>,
     notes: &'a [String],
 }
 
@@ -176,6 +266,8 @@ struct ScenarioCellOwned {
     repetitions: Vec<Repetition>,
     median_wall_ms: Option<u128>,
     spread_wall_ms: Option<u128>,
+    #[serde(default)]
+    all_runs_median_wall_ms: Option<u128>,
     notes: Vec<String>,
 }
 
@@ -205,6 +297,7 @@ impl Serialize for ScenarioCell {
             repetitions: &self.repetitions,
             median_wall_ms: self.median_wall_ms,
             spread_wall_ms: self.spread_wall_ms,
+            all_runs_median_wall_ms: self.all_runs_median_wall_ms,
             notes: &self.notes,
         }
         .serialize(serializer)
@@ -224,6 +317,7 @@ impl<'de> Deserialize<'de> for ScenarioCell {
             repetitions: wire.repetitions,
             median_wall_ms: wire.median_wall_ms,
             spread_wall_ms: wire.spread_wall_ms,
+            all_runs_median_wall_ms: wire.all_runs_median_wall_ms,
             notes: wire.notes,
         })
     }
@@ -398,11 +492,17 @@ pub struct TransactionObservation {
     pub confirmation_timing_reason: Option<String>,
     pub fee_microtari: Option<u64>,
     pub fee_unavailable_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_disposition: Option<FeeDisposition>,
     pub recipient: Option<String>,
     pub recipients: Vec<String>,
     pub api_accepted: Option<bool>,
     pub api_error: Option<String>,
-    pub terminal_outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<ObservationFailureClass>,
+    pub terminal_outcome: TerminalOutcome,
     pub error: Option<String>,
     pub mined_height: Option<u64>,
     pub tip_start_height: Option<u64>,
@@ -458,13 +558,11 @@ impl ResultProfile {
             ),
         ]);
         let mut scenario_config = config.scenario_defaults();
-        scenario_config.insert(
-            "build_manifest".to_string(),
-            fs::read(&config.paths.build_manifest)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                .unwrap_or(serde_json::Value::Null),
-        );
+        let build_manifest = fs::read(&config.paths.build_manifest)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(serde_json::Value::Null);
+        scenario_config.insert("build_manifest".to_string(), build_manifest.clone());
         scenario_config.insert(
             "harness_executable_sha256".to_string(),
             std::env::current_exe()
@@ -484,7 +582,13 @@ impl ResultProfile {
             run_id: new_run_id(),
             profile_kind: ProfileKind::Checkpoint,
             run_complete: false,
-            harness_git_commit: harness_git_commit(),
+            provenance: ProfileProvenance {
+                measurement_commit: harness_git_commit(),
+                export_commit: harness_git_commit(),
+                measurement_build_manifest: build_manifest.clone(),
+                export_build_manifest: build_manifest,
+                correction: None,
+            },
             completed_stages: Vec::new(),
             generated_at: chrono::Utc::now(),
             network: config.network.name.clone(),
@@ -651,16 +755,28 @@ fn computed_s5_throughput(profile: &ResultProfile) -> serde_json::Value {
 
     let new_pp_comparison = option_ratio_u128(new_individual_ms, pp_batch_ms);
     let old_pp_comparison = option_ratio_u128(old_individual_ms, pp_batch_ms);
+    let new_fee_comparison = option_ratio_f64(
+        complete_arm_fee_per_recipient(&arms, "new_wallet", "individual"),
+        complete_arm_fee_per_recipient(&arms, "payment_processor", "batch"),
+    );
+    let old_fee_comparison = option_ratio_f64(
+        complete_arm_fee_per_recipient(&arms, "old_wallet", "individual"),
+        complete_arm_fee_per_recipient(&arms, "payment_processor", "batch"),
+    );
 
     serde_json::json!({
         "arms": arms,
         "comparisons": {
             "new_wallet_individual_over_payment_processor_batch": new_pp_comparison,
-            "old_wallet_individual_over_payment_processor_batch": old_pp_comparison
+            "old_wallet_individual_over_payment_processor_batch": old_pp_comparison,
+            "new_wallet_individual_fee_per_recipient_over_payment_processor_batch": new_fee_comparison,
+            "old_wallet_individual_fee_per_recipient_over_payment_processor_batch": old_fee_comparison
         },
         "comparison_unavailable_reasons": {
             "new_wallet_individual_over_payment_processor_batch": new_pp_comparison.is_none().then_some("one_or_both_source_arms_incomplete"),
-            "old_wallet_individual_over_payment_processor_batch": old_pp_comparison.is_none().then_some("one_or_both_source_arms_incomplete")
+            "old_wallet_individual_over_payment_processor_batch": old_pp_comparison.is_none().then_some("one_or_both_source_arms_incomplete"),
+            "new_wallet_individual_fee_per_recipient_over_payment_processor_batch": new_fee_comparison.is_none().then_some("one_or_both_source_arms_incomplete_or_fee_unavailable"),
+            "old_wallet_individual_fee_per_recipient_over_payment_processor_batch": old_fee_comparison.is_none().then_some("one_or_both_source_arms_incomplete_or_fee_unavailable")
         },
         "source": "S5 repetition metrics.s5_arms"
     })
@@ -713,6 +829,18 @@ fn complete_arm_wall_ms(
     arm.get("wall_ms")?.as_u64().map(u128::from)
 }
 
+fn complete_arm_fee_per_recipient(
+    arms: &BTreeMap<String, serde_json::Value>,
+    mode: &str,
+    arm: &str,
+) -> Option<f64> {
+    let arm = arms.get(mode)?.get(arm)?;
+    if arm.get("recipient_count")?.as_u64()? == 0 || arm.get("complete")?.as_bool() != Some(true) {
+        return None;
+    }
+    arm.get("fee_per_recipient_microtari")?.as_f64()
+}
+
 fn option_sub_u128(left: Option<u128>, right: Option<u128>) -> Option<i128> {
     Some(left? as i128 - right? as i128)
 }
@@ -725,6 +853,14 @@ fn option_ratio_u128(numerator: Option<u128>, denominator: Option<u128>) -> Opti
     Some(numerator? as f64 / denominator as f64)
 }
 
+fn option_ratio_f64(numerator: Option<f64>, denominator: Option<f64>) -> Option<f64> {
+    let denominator = denominator?;
+    if denominator == 0.0 {
+        return None;
+    }
+    Some(numerator? / denominator)
+}
+
 impl ScenarioCell {
     pub fn record_repetition(&mut self, repetition: Repetition) {
         self.repetitions.push(repetition);
@@ -732,6 +868,14 @@ impl ScenarioCell {
     }
 
     pub fn refresh_summary(&mut self) {
+        let mut all_walls = self
+            .repetitions
+            .iter()
+            .filter_map(|run| run.wall_ms)
+            .collect::<Vec<_>>();
+        all_walls.sort_unstable();
+        self.all_runs_median_wall_ms = median(&all_walls);
+
         let mut walls = self
             .repetitions
             .iter()
@@ -787,6 +931,7 @@ pub fn empty_mode_profile(mode: ModeName, address: Option<String>) -> ModeProfil
                     repetitions: Vec::new(),
                     median_wall_ms: None,
                     spread_wall_ms: None,
+                    all_runs_median_wall_ms: None,
                     notes: Vec::new(),
                 },
             )
@@ -857,6 +1002,7 @@ mod tests {
             repetitions: Vec::new(),
             median_wall_ms: None,
             spread_wall_ms: None,
+            all_runs_median_wall_ms: None,
             notes: Vec::new(),
         };
         cell.record_repetition(Repetition {
@@ -893,6 +1039,7 @@ mod tests {
         assert_eq!(cell.status, CellStatus::Ok);
         assert_eq!(cell.median_wall_ms, Some(20));
         assert_eq!(cell.spread_wall_ms, Some(20));
+        assert_eq!(cell.all_runs_median_wall_ms, Some(20));
     }
 
     #[test]
@@ -961,9 +1108,9 @@ mod tests {
                 fee_microtari: None,
                 error: None,
                 metrics: Some(serde_json::json!({
-                    "s5_arms": {
-                        "individual": {"wall_ms": 300, "recipient_count": 100, "success_count": 100, "failure_count": 0, "complete": true},
-                        "batch": {"wall_ms": 150, "recipient_count": 100, "success_count": 10, "failure_count": 0, "complete": true}
+                        "s5_arms": {
+                            "individual": {"wall_ms": 300, "recipient_count": 100, "success_count": 100, "failure_count": 0, "complete": true, "fee_per_recipient_microtari": 10.0},
+                            "batch": {"wall_ms": 150, "recipient_count": 100, "success_count": 10, "failure_count": 0, "complete": true, "fee_per_recipient_microtari": 2.0}
                     }
                 })),
             });
@@ -1000,7 +1147,7 @@ mod tests {
                 fee_microtari: None,
                 error: None,
                 metrics: Some(serde_json::json!({
-                    "s5_arms": {"batch": {"wall_ms": 120, "recipient_count": 100, "success_count": 10, "failure_count": 0, "complete": true}}
+                    "s5_arms": {"batch": {"wall_ms": 120, "recipient_count": 100, "success_count": 10, "failure_count": 0, "complete": true, "fee_per_recipient_microtari": 2.0}}
                 })),
             });
 
@@ -1016,6 +1163,10 @@ mod tests {
         assert_eq!(
             profile.computed_deltas["s5_throughput"]["comparisons"]["old_wallet_individual_over_payment_processor_batch"],
             serde_json::json!(2.5)
+        );
+        assert_eq!(
+            profile.computed_deltas["s5_throughput"]["comparisons"]["old_wallet_individual_fee_per_recipient_over_payment_processor_batch"],
+            serde_json::json!(5.0)
         );
     }
 }

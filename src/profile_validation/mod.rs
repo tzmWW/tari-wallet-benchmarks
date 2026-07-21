@@ -32,7 +32,7 @@ pub fn schema_document() -> Value {
         "additionalProperties": false,
         "required": [
             "schema_version", "run_id", "profile_kind", "run_complete",
-            "harness_git_commit", "completed_stages", "generated_at", "network",
+            "provenance", "completed_stages", "generated_at", "network",
             "base_node", "environment", "versions", "config", "funding", "modes",
             "computed_deltas", "findings", "chain_verification"
         ],
@@ -41,7 +41,7 @@ pub fn schema_document() -> Value {
             "run_id": {"type": "string", "minLength": 1},
             "profile_kind": {"enum": ["checkpoint", "final"]},
             "run_complete": {"type": "boolean"},
-            "harness_git_commit": {"type": "string", "minLength": 1},
+            "provenance": {"$ref": "#/$defs/provenance"},
             "completed_stages": {
                 "type": "array", "items": {"type": "string", "minLength": 1},
                 "uniqueItems": true
@@ -63,6 +63,56 @@ pub fn schema_document() -> Value {
         "$defs": {
             "nullable_string": {"type": ["string", "null"]},
             "nullable_integer": {"type": ["integer", "null"], "minimum": 0},
+            "provenance": {
+                "type": "object", "additionalProperties": false,
+                "required": ["measurement_commit", "export_commit", "measurement_build_manifest", "export_build_manifest"],
+                "properties": {
+                    "measurement_commit": {"type": "string", "minLength": 1},
+                    "export_commit": {"type": "string", "minLength": 1},
+                    "measurement_build_manifest": {"$ref": "#/$defs/build_manifest"},
+                    "export_build_manifest": {"$ref": "#/$defs/build_manifest"},
+                    "correction": {"$ref": "#/$defs/profile_correction"}
+                }
+            },
+            "profile_correction": {
+                "type": "object", "additionalProperties": false,
+                "required": ["manifest_schema_version", "manifest_path", "tool", "tool_version", "corrected_at", "raw_profile_sha256", "raw_profile_size", "transformations"],
+                "properties": {
+                    "manifest_schema_version": {"type": "integer", "minimum": 1},
+                    "manifest_path": {"type": "string", "minLength": 1},
+                    "tool": {"type": "string", "minLength": 1},
+                    "tool_version": {"type": "string", "minLength": 1},
+                    "corrected_at": {"type": "string", "format": "date-time"},
+                    "raw_profile_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+                    "raw_profile_size": {"type": "integer", "minimum": 1},
+                    "transformations": {"type": "array", "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["pointer", "value"],
+                        "properties": {
+                            "pointer": {"type": "string", "minLength": 1, "pattern": "^/"},
+                            "value": {}
+                        }
+                    }}
+                }
+            },
+            "build_manifest": {
+                "type": "object", "additionalProperties": false,
+                "required": ["schema_version", "artifacts"],
+                "properties": {
+                    "schema_version": {"type": "integer", "minimum": 1},
+                    "sources": {"type": "object"},
+                    "artifacts": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/build_artifact"}},
+                    "payment_processor_patch_sha256": {"type": "string", "minLength": 1}
+                }
+            },
+            "build_artifact": {
+                "type": "object", "additionalProperties": true,
+                "required": ["source_revision", "sha256"],
+                "properties": {
+                    "source_revision": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "minLength": 1}
+                }
+            },
             "base_node": {
                 "type": "object", "additionalProperties": false,
                 "required": [
@@ -223,10 +273,13 @@ pub fn schema_document() -> Value {
                     "confirmation_timing_reason": {"$ref": "#/$defs/nullable_string"},
                     "fee_microtari": {"$ref": "#/$defs/nullable_integer"},
                     "fee_unavailable_reason": {"$ref": "#/$defs/nullable_string"},
+                    "fee_disposition": {"enum": ["confirmed_paid", "proposed_unresolved", "rejected", "unavailable"]},
                     "recipient": {"$ref": "#/$defs/nullable_string"},
                     "recipients": {"type": "array", "items": {"type": "string"}},
                     "api_accepted": {"type": ["boolean", "null"]},
                     "api_error": {"$ref": "#/$defs/nullable_string"},
+                    "http_status": {"type": ["integer", "null"], "minimum": 100, "maximum": 599},
+                    "failure_class": {"enum": ["http_response", "request_timeout", "arm_deadline", "transport", "response_decode", "response_shape", "database", "process", "chain_target"]},
                     "terminal_outcome": {"enum": ["confirmed", "rejected", "stalled", "timed_out", "unavailable"]},
                     "error": {"$ref": "#/$defs/nullable_string"},
                     "mined_height": {"$ref": "#/$defs/nullable_integer"},
@@ -265,7 +318,7 @@ pub fn schema_document() -> Value {
                 "type": "object", "additionalProperties": false,
                 "required": [
                     "scenario", "surface", "execution_status", "outcome_status", "repetitions",
-                    "median_wall_ms", "spread_wall_ms", "notes"
+                    "median_wall_ms", "spread_wall_ms", "all_runs_median_wall_ms", "notes"
                 ],
                 "properties": {
                     "scenario": {"enum": ["b0", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"]},
@@ -275,6 +328,7 @@ pub fn schema_document() -> Value {
                     "repetitions": {"type": "array", "items": {"$ref": "#/$defs/repetition"}},
                     "median_wall_ms": {"$ref": "#/$defs/nullable_integer"},
                     "spread_wall_ms": {"$ref": "#/$defs/nullable_integer"},
+                    "all_runs_median_wall_ms": {"$ref": "#/$defs/nullable_integer"},
                     "notes": {"type": "array", "items": {"type": "string"}}
                 }
             },
@@ -371,10 +425,64 @@ pub fn validate_path(path: &Path, submission: bool) -> anyhow::Result<ResultProf
     validate_document(&document, submission)
 }
 
+pub fn validate_legacy_v5_path(path: &Path) -> anyhow::Result<()> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let document: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {} as JSON", path.display()))?;
+    validate_legacy_v5_document(&document)
+}
+
+fn validate_legacy_v5_document(document: &Value) -> anyhow::Result<()> {
+    if document["schema_version"] != json!(5) {
+        bail!("legacy validation requires schema_version 5");
+    }
+    if document["profile_kind"] != json!("final") || document["run_complete"] != json!(true) {
+        bail!("legacy schema-v5 profile must be a complete final profile");
+    }
+    for key in [
+        "run_id",
+        "harness_git_commit",
+        "generated_at",
+        "network",
+        "base_node",
+        "environment",
+        "versions",
+        "config",
+        "funding",
+        "modes",
+        "computed_deltas",
+        "findings",
+        "chain_verification",
+    ] {
+        if document.get(key).is_none() {
+            bail!("legacy schema-v5 profile is missing {key}");
+        }
+    }
+    let modes = document["modes"]
+        .as_object()
+        .context("legacy schema-v5 modes must be an object")?;
+    for mode in ModeName::ALL {
+        let scenarios = modes
+            .get(mode.as_str())
+            .and_then(|value| value["scenarios"].as_object())
+            .with_context(|| format!("legacy schema-v5 missing {}/scenarios", mode.as_str()))?;
+        for scenario in ScenarioName::ALL {
+            if !scenarios.contains_key(scenario.as_str()) {
+                bail!(
+                    "legacy schema-v5 missing {}/{}",
+                    mode.as_str(),
+                    scenario.as_str()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_document(document: &Value, submission: bool) -> anyhow::Result<ResultProfile> {
     validate_schema(document)?;
     let profile: ResultProfile = serde_json::from_value(document.clone())
-        .context("deserializing schema-v5 result profile")?;
+        .context("deserializing schema-v6 result profile")?;
     validate_profile(&profile, submission)?;
     if profile.profile_kind == ProfileKind::Final || submission {
         validate_final_document(&profile, document, submission)?;
@@ -413,7 +521,7 @@ fn validate_schema(document: &Value) -> anyhow::Result<()> {
         .map(|error| format!("{}: {error}", error.instance_path()))
         .collect::<Vec<_>>();
     if !errors.is_empty() {
-        bail!("profile does not match schema v5:\n{}", errors.join("\n"));
+        bail!("profile does not match schema v6:\n{}", errors.join("\n"));
     }
     Ok(())
 }
@@ -643,10 +751,14 @@ fn validate_reference_configuration(
     {
         bail!("submission profile is missing one or more completed stages");
     }
-    if profile.harness_git_commit == "unknown" {
-        bail!("submission profile must identify the harness git commit");
+    if profile.provenance.measurement_commit == "unknown"
+        || profile.provenance.export_commit == "unknown"
+    {
+        bail!("submission profile must identify measurement and export commits");
     }
-    if !profile.config["build_manifest"].is_object()
+    if !is_complete_build_manifest(&profile.provenance.measurement_build_manifest)
+        || !is_complete_build_manifest(&profile.provenance.export_build_manifest)
+        || !is_complete_build_manifest(&profile.config["build_manifest"])
         || !profile.config["seed_fingerprints"].is_object()
     {
         bail!("submission profile must record build-manifest and seed fingerprints");
@@ -705,6 +817,7 @@ fn validate_reference_configuration(
     {
         bail!("submission top-level transactions must include observed fees");
     }
+    validate_confirmed_observation_bindings(document, profile)?;
     for mode in ModeName::ALL {
         if profile.modes[mode.as_str()].address.is_none() {
             bail!(
@@ -741,6 +854,66 @@ fn validate_reference_configuration(
                 mode.as_str()
             );
         }
+        let s0 = &profile.modes[mode.as_str()].scenarios["S0"];
+        if s0.status == CellStatus::Ok {
+            for (repetition, run) in
+                document["modes"][mode.as_str()]["scenarios"]["S0"]["repetitions"]
+                    .as_array()
+                    .expect("schema checked")
+                    .iter()
+                    .enumerate()
+            {
+                if run["execution_status"] != "completed" {
+                    continue;
+                }
+                let metrics = run["metrics"].as_object().with_context(|| {
+                    format!(
+                        "submission S0 repetition {} metrics missing for {}",
+                        repetition + 1,
+                        mode.as_str()
+                    )
+                })?;
+                if metrics["verification_source"] != json!("wallet_state_observed")
+                    || metrics["expected_spendable_count"] != json!(1)
+                    || metrics["observed_spendable_count"] != json!(1)
+                    || metrics["expected_available_microtari"]
+                        != json!(crate::config::parse_amount("10000 T")?.0)
+                    || metrics["available_microtari"]
+                        != json!(crate::config::parse_amount("10000 T")?.0)
+                    || metrics["spendable_count_matches_expected"] != json!(true)
+                    || metrics["balance_matches_expected"] != json!(true)
+                    || metrics["wallet_state_complete"] != json!(true)
+                    || metrics["pending_outputs"] != json!(0)
+                    || metrics["locked_outputs"] != json!(0)
+                    || metrics["invalid_outputs"] != json!(0)
+                    || metrics["unknown_outputs"] != json!(0)
+                {
+                    bail!(
+                        "submission S0 repetition {} for {} does not prove exact one-UTXO A_fund state",
+                        repetition + 1,
+                        mode.as_str()
+                    );
+                }
+                let funding_observation =
+                    metrics.get("funding_observation").with_context(|| {
+                        format!(
+                            "successful submission S0 repetition {} is missing funding observation",
+                            repetition + 1
+                        )
+                    })?;
+                if funding_observation["tx_id"] != json!(funding.tx_id)
+                    || funding_observation["mined_height"] != json!(funding.height)
+                    || funding_observation["shared_funding_fee_microtari"]
+                        != json!(funding.shared_funding_fee_microtari)
+                {
+                    bail!(
+                        "submission S0 repetition {} funding observation does not match funding record for {}",
+                        repetition + 1,
+                        mode.as_str()
+                    );
+                }
+            }
+        }
         if profile.modes[mode.as_str()].scenarios["S1"].status == CellStatus::Ok
             && !profile
                 .chain_verification
@@ -754,7 +927,118 @@ fn validate_reference_configuration(
             );
         }
     }
+    let funding_records = ModeName::ALL
+        .into_iter()
+        .map(|mode| {
+            profile
+                .funding
+                .get(mode.as_str())
+                .with_context(|| format!("submission funding is missing {}", mode.as_str()))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let first = funding_records.first().expect("three benchmark modes");
+    let expected_amount = crate::config::parse_amount("10000 T")?.0;
+    if funding_records.iter().any(|funding| {
+        funding.tx_id != first.tx_id
+            || funding.height != first.height
+            || funding.amount != "10000 T"
+            || crate::config::parse_amount(&funding.amount)
+                .map(|amount| amount.0 != expected_amount)
+                .unwrap_or(true)
+            || funding.shared_funding_fee_microtari != first.shared_funding_fee_microtari
+            || funding.tip_height_at_broadcast != first.tip_height_at_broadcast
+            || funding.construction_ms != first.construction_ms
+            || funding.broadcast_to_mempool_ms != first.broadcast_to_mempool_ms
+            || funding.broadcast_to_confirmed_at_c_min_ms
+                != first.broadcast_to_confirmed_at_c_min_ms
+            || funding.tip_height_at_confirmation != first.tip_height_at_confirmation
+    }) {
+        bail!("submission funding records must describe one shared exact A_fund transaction");
+    }
     Ok(())
+}
+
+fn validate_confirmed_observation_bindings(
+    document: &Value,
+    profile: &ResultProfile,
+) -> anyhow::Result<()> {
+    let mut observed = BTreeMap::<(String, String, String), usize>::new();
+    for mode in ModeName::ALL {
+        for scenario in ScenarioName::ALL {
+            for (repetition, run) in document["modes"][mode.as_str()]["scenarios"]
+                [scenario.as_str()]["repetitions"]
+                .as_array()
+                .expect("schema checked")
+                .iter()
+                .enumerate()
+            {
+                let Some(observations) = run["metrics"]
+                    .get("transaction_observations")
+                    .and_then(Value::as_array)
+                else {
+                    continue;
+                };
+                for observation in observations
+                    .iter()
+                    .filter(|value| value["terminal_outcome"] == "confirmed")
+                {
+                    let tx_id = observation["transaction_id"].as_str().with_context(|| {
+                        format!(
+                            "confirmed {}/{} repetition {} observation lacks tx id",
+                            mode.as_str(),
+                            scenario.as_str(),
+                            repetition + 1
+                        )
+                    })?;
+                    let key = (
+                        mode.as_str().to_string(),
+                        scenario.as_str().to_string(),
+                        tx_id.to_string(),
+                    );
+                    *observed.entry(key).or_default() += 1;
+                }
+            }
+        }
+    }
+    let mut chain = BTreeMap::<(String, String, String), usize>::new();
+    for transaction in &profile.chain_verification.verified_transactions {
+        if !transaction.confirmed {
+            bail!("top-level chain verification contains an unconfirmed transaction");
+        }
+        let key = (
+            transaction.mode.clone(),
+            transaction.scenario.clone(),
+            transaction.tx_id.clone(),
+        );
+        *chain.entry(key).or_default() += 1;
+    }
+    if observed != chain {
+        bail!("confirmed transaction observations and top-level chain rows are not one-to-one");
+    }
+    Ok(())
+}
+
+fn is_complete_build_manifest(value: &Value) -> bool {
+    value
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .is_some_and(|version| version >= 1)
+        && value
+            .get("artifacts")
+            .and_then(Value::as_object)
+            .is_some_and(|artifacts| {
+                !artifacts.is_empty()
+                    && artifacts.values().all(|artifact| {
+                        artifact
+                            .get("source_revision")
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| !value.is_empty())
+                            && artifact
+                                .get("sha256")
+                                .and_then(Value::as_str)
+                                .is_some_and(|value| !value.is_empty())
+                    })
+            })
 }
 
 fn validate_cross_cutting_scenario_metrics(document: &Value) -> anyhow::Result<()> {
@@ -779,6 +1063,27 @@ fn validate_cross_cutting_scenario_metrics(document: &Value) -> anyhow::Result<(
                 let Some(metrics) = run["metrics"].as_object() else {
                     bail!("submission {label} must record scenario metrics");
                 };
+                let confirmed_fee_total = metrics
+                    .get("transaction_observations")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|observation| observation["terminal_outcome"] == "confirmed")
+                    .map(|observation| {
+                        observation["fee_microtari"].as_u64().with_context(|| {
+                            format!("submission {label} confirmed observation lacks fee")
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?
+                    .into_iter()
+                    .try_fold(0u64, |total, fee| total.checked_add(fee))
+                    .with_context(|| format!("submission {label} confirmed fee total overflows"))?;
+                if run["fee_microtari"] != json!(confirmed_fee_total) {
+                    bail!(
+                        "submission {label} fee_microtari does not equal confirmed observation fees"
+                    );
+                }
+                validate_balance_reconciliation(metrics, &label, run["fee_microtari"].as_u64())?;
                 let has_balance = metrics.contains_key("balance_reconciliation")
                     || metrics
                         .get("balance_delta_microtari")
@@ -798,6 +1103,59 @@ fn validate_cross_cutting_scenario_metrics(document: &Value) -> anyhow::Result<(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_balance_reconciliation(
+    metrics: &serde_json::Map<String, Value>,
+    label: &str,
+    fee_microtari: Option<u64>,
+) -> anyhow::Result<()> {
+    let Some(reconciliation) = metrics.get("balance_reconciliation") else {
+        return Ok(());
+    };
+    let fee = fee_microtari.context("balance reconciliation requires a recorded fee")?;
+    let outgoing = metrics
+        .get("outgoing_microtari")
+        .and_then(Value::as_u64)
+        .context("balance reconciliation requires outgoing_microtari")?;
+    let (before, after, domain) = if let (Some(before), Some(after)) = (
+        metrics
+            .get("balance_before_microtari")
+            .and_then(Value::as_u64),
+        metrics
+            .get("balance_after_microtari")
+            .and_then(Value::as_u64),
+    ) {
+        (before, after, "available")
+    } else {
+        let before = metrics
+            .get("balance_before")
+            .and_then(|value| value.get("total"))
+            .and_then(Value::as_u64)
+            .context("balance reconciliation requires balance_before.total")?;
+        let after = metrics
+            .get("balance_after")
+            .and_then(|value| value.get("total"))
+            .and_then(Value::as_u64)
+            .context("balance reconciliation requires balance_after.total")?;
+        (before, after, "total")
+    };
+    let deduction = outgoing
+        .checked_add(fee)
+        .context("balance reconciliation outgoing amount and fee overflow")?;
+    let expected = before
+        .checked_sub(deduction)
+        .with_context(|| format!("{label} balance reconciliation underflows {domain} balance"))?;
+    let delta = i128::from(expected) - i128::from(after);
+    if reconciliation["expected_balance_microtari"] != json!(expected)
+        || reconciliation["observed_balance_microtari"] != json!(after)
+        || reconciliation["delta_microtari"] != json!(delta)
+        || reconciliation["flagged"] != json!(delta != 0)
+        || reconciliation["balance_domain"].as_str() != Some(domain)
+    {
+        bail!("{label} balance reconciliation arithmetic is inconsistent");
     }
     Ok(())
 }
@@ -1096,6 +1454,13 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
             {
                 bail!("submission S5 recipient set is not the same 100 addresses for every mode");
             }
+            let unique = set
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<BTreeSet<_>>();
+            if unique.len() != 100 {
+                bail!("submission S5 recipient set must contain 100 unique addresses");
+            }
             recipient_set = Some(set.clone());
             if s5
                 .get("unspent_before")
@@ -1109,6 +1474,49 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
                 bail!("submission {mode}/S5 missing disclosed post-S4 starting state");
             }
             validate_transaction_observations(mode, "S5", s5)?;
+            for (repetition, run) in scenarios["S5"]["repetitions"]
+                .as_array()
+                .expect("schema checked")
+                .iter()
+                .enumerate()
+            {
+                let metrics = &run["metrics"];
+                let Some(observations) = metrics["transaction_observations"].as_array() else {
+                    continue;
+                };
+                let expected = set
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<BTreeSet<_>>();
+                let mut observed = BTreeSet::new();
+                for observation in observations
+                    .iter()
+                    .filter(|observation| observation["terminal_outcome"] == "confirmed")
+                {
+                    let recipients = observation["recipients"]
+                        .as_array()
+                        .with_context(|| format!("submission {mode}/S5 repetition {} confirmed observation lacks recipients", repetition + 1))?;
+                    if recipients.is_empty()
+                        || recipients.iter().any(|recipient| {
+                            recipient
+                                .as_str()
+                                .is_none_or(|recipient| !expected.contains(recipient))
+                        })
+                    {
+                        bail!(
+                            "submission {mode}/S5 repetition {} contains an unbound recipient",
+                            repetition + 1
+                        );
+                    }
+                    observed.extend(recipients.iter().filter_map(Value::as_str));
+                }
+                if scenarios["S5"]["outcome_status"] == "success" && observed != expected {
+                    bail!(
+                        "submission {mode}/S5 repetition {} does not cover exactly the declared recipient set",
+                        repetition + 1
+                    );
+                }
+            }
             let expected_s5_transactions = if mode == "payment_processor" { 10 } else { 100 };
             if s5["transaction_observations"]
                 .as_array()
@@ -1364,6 +1772,17 @@ fn validate_transaction_observations(
     }
     for observation in observations {
         let outcome = observation["terminal_outcome"].as_str().unwrap_or_default();
+        let api_accepted = observation["api_accepted"].as_bool();
+        let has_identity =
+            observation["transaction_id"].is_string() || observation["batch_index"].is_number();
+        if api_accepted == Some(false) && outcome != "rejected" {
+            bail!("submission {mode}/{scenario} immediate API failure must be rejected");
+        }
+        if outcome == "stalled" && (api_accepted != Some(true) || !has_identity) {
+            bail!(
+                "submission {mode}/{scenario} stalled observation lacks accepted operation identity"
+            );
+        }
         if mode == "new_wallet" && observation["transaction_id"].is_string() {
             if observation["construction_ms"].as_u64().is_none()
                 || observation["construction_timing_origin"] != "library_build_and_sign"
@@ -1406,10 +1825,20 @@ fn validate_transaction_observations(
                     "submission {mode}/{scenario} confirmed transaction has invalid timing origins"
                 );
             }
-        } else if mode != "new_wallet" && !observation["confirmation_ms"].is_null() {
-            bail!(
-                "submission {mode}/{scenario} must not label dispatch latency as broadcast-to-confirmation"
-            );
+        } else if mode != "new_wallet" && outcome == "confirmed" {
+            let origin = observation["confirmation_timing_origin"]
+                .as_str()
+                .unwrap_or_default();
+            if observation["confirmation_ms"].as_u64().is_none()
+                || !matches!(
+                    origin,
+                    "grpc_dispatch_to_independent_c_min" | "pp_api_acceptance_to_independent_c_min"
+                )
+            {
+                bail!(
+                    "submission {mode}/{scenario} confirmed transaction lacks honest dispatch/API-to-C-min timing"
+                );
+            }
         }
         if outcome == "confirmed"
             && (observation["fee_microtari"].as_u64().is_none()
@@ -1433,6 +1862,19 @@ fn validate_transaction_observations(
                 .is_empty()
         {
             bail!("submission {mode}/{scenario} transaction with unknown fee lacks a reason");
+        }
+        let fee_disposition = observation["fee_disposition"].as_str().unwrap_or_default();
+        if observation.get("fee_disposition").is_some()
+            && outcome == "confirmed"
+            && fee_disposition != "confirmed_paid"
+        {
+            bail!("submission {mode}/{scenario} confirmed transaction fee is not marked paid");
+        }
+        if observation.get("fee_disposition").is_some()
+            && outcome == "rejected"
+            && fee_disposition != "rejected"
+        {
+            bail!("submission {mode}/{scenario} rejected transaction has invalid fee disposition");
         }
     }
     Ok(())
@@ -1476,12 +1918,64 @@ fn validate_s5_comparisons(document: &Value) -> anyhow::Result<()> {
             ("old_wallet", "individual"),
             ("payment_processor", "batch"),
         ),
+        (
+            "new_wallet_individual_fee_per_recipient_over_payment_processor_batch",
+            ("new_wallet", "individual"),
+            ("payment_processor", "batch"),
+        ),
+        (
+            "old_wallet_individual_fee_per_recipient_over_payment_processor_batch",
+            ("old_wallet", "individual"),
+            ("payment_processor", "batch"),
+        ),
     ];
     for (name, left, right) in cases {
         if (!arm_complete(arms, left.0, left.1) || !arm_complete(arms, right.0, right.1))
             && !comparisons[name].is_null()
         {
             bail!("S5 comparison {name} must be null when a source arm is incomplete");
+        }
+    }
+    let fee_cases = [
+        (
+            "new_wallet_individual_fee_per_recipient_over_payment_processor_batch",
+            ("new_wallet", "individual"),
+            ("payment_processor", "batch"),
+        ),
+        (
+            "old_wallet_individual_fee_per_recipient_over_payment_processor_batch",
+            ("old_wallet", "individual"),
+            ("payment_processor", "batch"),
+        ),
+    ];
+    for (name, left, right) in fee_cases {
+        let available = arm_complete(arms, left.0, left.1)
+            && arm_complete(arms, right.0, right.1)
+            && arms[left.0][left.1]["fee_per_recipient_microtari"]
+                .as_f64()
+                .is_some()
+            && arms[right.0][right.1]["fee_per_recipient_microtari"]
+                .as_f64()
+                .is_some();
+        if available == comparisons[name].is_null() {
+            bail!("S5 fee comparison {name} does not match source fee availability");
+        }
+    }
+    for mode in ["old_wallet", "new_wallet", "payment_processor"] {
+        if let Some(mode_arms) = arms[mode].as_object() {
+            if mode_arms.is_empty() {
+                continue;
+            }
+            let self_send = mode_arms
+                .get("self_send")
+                .with_context(|| format!("submission {mode}/S5 missing self_send scope arm"))?;
+            if self_send["complete"] != false
+                || self_send["unavailable_reason"]
+                    .as_str()
+                    .is_none_or(str::is_empty)
+            {
+                bail!("submission {mode}/S5 self_send must be disclosed as unavailable");
+            }
         }
     }
     Ok(())
@@ -1511,6 +2005,33 @@ fn mode_scenarios(
         .collect()
 }
 
+fn summary_outcome_counts(cell: &Value) -> (usize, usize, usize, usize, usize) {
+    let mut api_accepted = 0;
+    let mut confirmed = 0;
+    let mut rejected = 0;
+    let mut stalled = 0;
+    let mut timed_out = 0;
+    for observation in cell["repetitions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|run| run["metrics"]["transaction_observations"].as_array())
+        .flatten()
+    {
+        if observation["api_accepted"] == true {
+            api_accepted += 1;
+        }
+        match observation["terminal_outcome"].as_str() {
+            Some("confirmed") => confirmed += 1,
+            Some("rejected") => rejected += 1,
+            Some("stalled") => stalled += 1,
+            Some("timed_out") => timed_out += 1,
+            _ => {}
+        }
+    }
+    (api_accepted, confirmed, rejected, stalled, timed_out)
+}
+
 pub fn write_summary(profile_path: &Path, output_path: &Path) -> anyhow::Result<()> {
     let bytes =
         fs::read(profile_path).with_context(|| format!("reading {}", profile_path.display()))?;
@@ -1525,8 +2046,12 @@ pub fn write_summary(profile_path: &Path, output_path: &Path) -> anyhow::Result<
     Ok(())
 }
 
-pub fn render_summary(document: &Value) -> anyhow::Result<String> {
-    validate_document(document, false)?;
+pub fn write_legacy_v5_summary(profile_path: &Path, output_path: &Path) -> anyhow::Result<()> {
+    let bytes =
+        fs::read(profile_path).with_context(|| format!("reading {}", profile_path.display()))?;
+    let document: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {} as JSON", profile_path.display()))?;
+    validate_legacy_v5_document(&document)?;
     let mut output = String::new();
     output.push_str("# Tari Wallet Benchmark Result\n\n");
     output.push_str(&format!(
@@ -1587,6 +2112,86 @@ pub fn render_summary(document: &Value) -> anyhow::Result<String> {
             .map(Vec::len)
             .unwrap_or_default()
     ));
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output_path, output).with_context(|| format!("writing {}", output_path.display()))?;
+    Ok(())
+}
+
+pub fn render_summary(document: &Value) -> anyhow::Result<String> {
+    validate_document(document, false)?;
+    let mut output = String::new();
+    output.push_str("# Tari Wallet Benchmark Result\n\n");
+    output.push_str(&format!(
+        "- Run ID: `{}`\n",
+        markdown_text(&document["run_id"])
+    ));
+    output.push_str(&format!(
+        "- Profile: `{}`\n",
+        markdown_text(&document["profile_kind"])
+    ));
+    output.push_str(&format!("- Complete: `{}`\n", document["run_complete"]));
+    output.push_str(&format!(
+        "- Network: `{}`\n",
+        markdown_text(&document["network"])
+    ));
+    output.push_str(&format!(
+        "- Measurement commit: `{}`\n",
+        markdown_text(&document["provenance"]["measurement_commit"])
+    ));
+    output.push_str(&format!(
+        "- Export commit: `{}`\n",
+        markdown_text(&document["provenance"]["export_commit"])
+    ));
+    output.push_str(&format!(
+        "- Selected scan node: `{}` (`{}`; `{}`)\n",
+        markdown_text(&document["base_node"]["endpoint"]),
+        markdown_text(&document["base_node"]["configured_revision"]),
+        markdown_text(&document["environment"]["base_node_network_path"])
+    ));
+    output.push_str(&format!(
+        "- Independent authority: `{}` (`{}`)\n\n",
+        markdown_text(&document["base_node"]["authority_endpoint"]),
+        markdown_text(&document["environment"]["authority_network_path"])
+    ));
+    output.push_str("| Mode | Scenario | Execution | Outcome | Median ms (ok) | Median ms (all) | API accepted | Chain confirmed | Rejected | Stalled | Timed out | Successes | Failures |\n");
+    output.push_str("|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    for mode in ModeName::ALL {
+        for scenario in ScenarioName::ALL {
+            let cell = &document["modes"][mode.as_str()]["scenarios"][scenario.as_str()];
+            let (successes, failures) = cell["repetitions"]
+                .as_array()
+                .and_then(|runs| runs.last())
+                .map(|run| (&run["success_count"], &run["failure_count"]))
+                .unwrap_or((&Value::Null, &Value::Null));
+            let (api_accepted, confirmed, rejected, stalled, timed_out) =
+                summary_outcome_counts(cell);
+            output.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                mode.as_str(),
+                scenario.as_str(),
+                markdown_text(&cell["execution_status"]),
+                markdown_text(&cell["outcome_status"]),
+                display_value(&cell["median_wall_ms"]),
+                display_value(&cell["all_runs_median_wall_ms"]),
+                api_accepted,
+                confirmed,
+                rejected,
+                stalled,
+                timed_out,
+                display_value(successes),
+                display_value(failures)
+            ));
+        }
+    }
+    output.push_str(&format!(
+        "\nConfirmed top-level transactions: **{}**\n",
+        document["chain_verification"]["verified_transactions"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or_default()
+    ));
     Ok(output)
 }
 
@@ -1609,7 +2214,11 @@ fn display_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, env_capture, result_profile::empty_mode_profile};
+    use crate::{
+        config::Config,
+        env_capture,
+        result_profile::{VerifiedTransaction, empty_mode_profile},
+    };
 
     fn profile_document() -> Value {
         let config = Config::default();
@@ -1621,7 +2230,22 @@ mod tests {
             );
         }
         profile.refresh_computed_deltas();
-        serde_json::to_value(profile).unwrap()
+        let mut document = serde_json::to_value(profile).unwrap();
+        let manifest = json!({
+            "schema_version": 2,
+            "sources": {"harness": {
+                "repository": "test",
+                "upstream": {"revision": "test", "commit": "test", "tree": "test"},
+                "patches": [], "complete_diff_sha256": "test", "result_tree": "test"
+            }},
+            "artifacts": {"harness": {
+                "source": "harness", "source_revision": "test", "source_tree": "test", "sha256": "test"
+            }}
+        });
+        document["provenance"]["measurement_build_manifest"] = manifest.clone();
+        document["provenance"]["export_build_manifest"] = manifest.clone();
+        document["config"]["build_manifest"] = manifest;
+        document
     }
 
     #[test]
@@ -1629,6 +2253,20 @@ mod tests {
         let document = profile_document();
         let profile = validate_document(&document, false).unwrap();
         assert_eq!(profile.schema_version, RESULT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_v5_validation_is_explicit_and_does_not_accept_v6() {
+        let mut legacy = profile_document();
+        legacy["schema_version"] = json!(5);
+        legacy["profile_kind"] = json!("final");
+        legacy["run_complete"] = json!(true);
+        legacy["harness_git_commit"] = json!("historical");
+        legacy.as_object_mut().unwrap().remove("provenance");
+        validate_legacy_v5_document(&legacy).unwrap();
+
+        legacy["schema_version"] = json!(6);
+        assert!(validate_legacy_v5_document(&legacy).is_err());
     }
 
     #[test]
@@ -1675,6 +2313,41 @@ mod tests {
     }
 
     #[test]
+    fn balance_reconciliation_rejects_arithmetic_mutation() {
+        let metrics = json!({
+            "balance_before_microtari": 1000,
+            "balance_after_microtari": 300,
+            "outgoing_microtari": 600,
+            "balance_reconciliation": {
+                "expected_balance_microtari": 300,
+                "observed_balance_microtari": 300,
+                "delta_microtari": 0,
+                "flagged": false,
+                "balance_domain": "available"
+            }
+        });
+        validate_balance_reconciliation(metrics.as_object().unwrap(), "test", Some(100)).unwrap();
+        let mut mutated = metrics.clone();
+        mutated["balance_reconciliation"]["delta_microtari"] = json!(1);
+        assert!(
+            validate_balance_reconciliation(mutated.as_object().unwrap(), "test", Some(100))
+                .is_err()
+        );
+        let mut underflow = metrics.clone();
+        underflow["balance_before_microtari"] = json!(50);
+        assert!(
+            validate_balance_reconciliation(underflow.as_object().unwrap(), "test", Some(100))
+                .is_err()
+        );
+        let mut missing_domain = metrics;
+        missing_domain["balance_reconciliation"]["balance_domain"] = Value::Null;
+        assert!(
+            validate_balance_reconciliation(missing_domain.as_object().unwrap(), "test", Some(100))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn malformed_profile_missing_key_fails_schema() {
         let mut document = profile_document();
         document.as_object_mut().unwrap().remove("run_id");
@@ -1693,6 +2366,34 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_binding_covers_later_repetitions() {
+        let observation = json!({"transaction_id": "42", "terminal_outcome": "confirmed"});
+        let mut document = profile_document();
+        document["modes"]["old_wallet"]["scenarios"]["S1"]["repetitions"] = json!([
+            {"metrics": {"transaction_observations": [observation.clone()]}},
+            {"metrics": {"transaction_observations": [observation]}}
+        ]);
+        let mut profile = ResultProfile::new(&Config::default(), env_capture::capture());
+        profile
+            .chain_verification
+            .verified_transactions
+            .push(VerifiedTransaction {
+                tx_id: "42".to_string(),
+                status_value: TX_MINED_CONFIRMED_STATUS,
+                mode: "old_wallet".to_string(),
+                scenario: "S1".to_string(),
+                amount_microtari: None,
+                fee_microtari: None,
+                mined_height: Some(1),
+                confirmations: Some(3),
+                min_confirmations: Some(3),
+                tip_height: Some(4),
+                confirmed: true,
+            });
+        assert!(validate_confirmed_observation_bindings(&document, &profile).is_err());
+    }
+
+    #[test]
     fn incomplete_final_is_rejected() {
         let mut document = profile_document();
         document["profile_kind"] = json!("final");
@@ -1703,10 +2404,46 @@ mod tests {
     #[test]
     fn summary_is_deterministic() {
         let document = profile_document();
-        assert_eq!(
-            render_summary(&document).unwrap(),
-            render_summary(&document).unwrap()
-        );
+        let first = render_summary(&document).unwrap();
+        assert_eq!(first, render_summary(&document).unwrap());
+        assert!(first.contains("Measurement commit: `"));
+        assert!(first.contains("Export commit: `"));
+        assert!(first.contains("Median ms (all)"));
+        for column in [
+            "API accepted",
+            "Chain confirmed",
+            "Rejected",
+            "Stalled",
+            "Timed out",
+        ] {
+            assert!(first.contains(column), "missing summary column {column}");
+        }
+    }
+
+    #[test]
+    fn summary_outcome_counts_come_from_structured_observations() {
+        let cell = json!({
+            "repetitions": [{"metrics": {"transaction_observations": [
+                {"api_accepted": true, "terminal_outcome": "confirmed"},
+                {"api_accepted": true, "terminal_outcome": "stalled"},
+                {"api_accepted": false, "terminal_outcome": "rejected"},
+                {"api_accepted": true, "terminal_outcome": "timed_out"}
+            ]}}]
+        });
+        assert_eq!(summary_outcome_counts(&cell), (3, 1, 1, 1, 1));
+    }
+
+    #[test]
+    fn incomplete_provenance_manifests_are_rejected() {
+        let mut document = profile_document();
+        document["provenance"]["measurement_build_manifest"] = Value::Null;
+        assert!(validate_document(&document, false).is_err());
+
+        document["provenance"]["measurement_build_manifest"] = json!({
+            "schema_version": 2,
+            "artifacts": {"harness": {"source_revision": "", "sha256": "test"}}
+        });
+        assert!(validate_document(&document, false).is_err());
     }
 
     #[test]
@@ -1756,6 +2493,29 @@ mod tests {
                 .values()
                 .all(Value::is_null)
         );
+    }
+
+    #[test]
+    fn s5_self_send_arms_are_explicitly_unavailable() {
+        let arms = json!({
+            "old_wallet": {"self_send": {"complete": false, "unavailable_reason": "unsupported"}},
+            "new_wallet": {"self_send": {"complete": false, "unavailable_reason": "unsupported"}},
+            "payment_processor": {"self_send": {"complete": false, "unavailable_reason": "unsupported"}}
+        });
+        let document = json!({
+            "computed_deltas": {
+                "s5_throughput": {
+                    "arms": arms,
+                    "comparisons": {
+                        "new_wallet_individual_over_payment_processor_batch": null,
+                        "old_wallet_individual_over_payment_processor_batch": null,
+                        "new_wallet_individual_fee_per_recipient_over_payment_processor_batch": null,
+                        "old_wallet_individual_fee_per_recipient_over_payment_processor_batch": null
+                    }
+                }
+            }
+        });
+        validate_s5_comparisons(&document).unwrap();
     }
 
     #[test]
@@ -1859,9 +2619,22 @@ mod tests {
                 config.network.mode1_base_node_service_peer.as_deref(),
             ),
         );
+        let manifest = json!({
+            "schema_version": 2,
+            "sources": {"harness": {
+                "repository": "test",
+                "upstream": {"revision": "test", "commit": "test", "tree": "test"},
+                "patches": [], "complete_diff_sha256": "test", "result_tree": "test"
+            }},
+            "artifacts": {"harness": {
+                "source": "harness", "source_revision": "test", "source_tree": "test", "sha256": "test"
+            }}
+        });
         profile
             .config
-            .insert("build_manifest".to_string(), json!({"schema_version": 1}));
+            .insert("build_manifest".to_string(), manifest.clone());
+        profile.provenance.measurement_build_manifest = manifest.clone();
+        profile.provenance.export_build_manifest = manifest;
         profile.config.insert(
             "seed_fingerprints".to_string(),
             json!({"old_wallet": "a", "new_wallet": "b", "payment_processor": "c"}),
@@ -1919,7 +2692,26 @@ mod tests {
                     failure_count: 0,
                     fee_microtari: Some(0),
                     error: None,
-                    metrics: Some(json!({"balance_delta_microtari": 0})),
+                    metrics: Some(json!({
+                        "verification_source": "wallet_state_observed",
+                        "balance_delta_microtari": 0,
+                        "expected_spendable_count": 1,
+                        "observed_spendable_count": 1,
+                        "expected_available_microtari": 10000000000u64,
+                        "available_microtari": 10000000000u64,
+                        "pending_outputs": 0,
+                        "locked_outputs": 0,
+                        "invalid_outputs": 0,
+                        "unknown_outputs": 0,
+                        "wallet_state_complete": true,
+                        "spendable_count_matches_expected": true,
+                        "balance_matches_expected": true,
+                        "funding_observation": {
+                            "tx_id": "funding-tx",
+                            "mined_height": 101,
+                            "shared_funding_fee_microtari": 700
+                        }
+                    })),
                 });
             mode_profile
                 .scenarios
@@ -1987,6 +2779,34 @@ mod tests {
         profile.mark_final();
         profile.refresh_computed_deltas();
         profile.validate_submission().unwrap();
+
+        let mut repeated = serde_json::to_value(&profile).unwrap();
+        let second_s0 =
+            repeated["modes"]["old_wallet"]["scenarios"]["S0"]["repetitions"][0].clone();
+        repeated["modes"]["old_wallet"]["scenarios"]["S0"]["repetitions"]
+            .as_array_mut()
+            .unwrap()
+            .push(second_s0);
+        repeated["modes"]["old_wallet"]["scenarios"]["S0"]["repetitions"][1]["metrics"]["available_microtari"] =
+            json!(999);
+        assert!(validate_document(&repeated, true).is_err());
+
+        for field in [
+            "pending_outputs",
+            "locked_outputs",
+            "invalid_outputs",
+            "unknown_outputs",
+        ] {
+            let mut mutated = serde_json::to_value(&profile).unwrap();
+            mutated["modes"]["old_wallet"]["scenarios"]["S0"]["repetitions"][0]["metrics"][field] =
+                json!(1);
+            assert!(validate_document(&mutated, true).is_err(), "{field}");
+        }
+
+        let mut tampered_fee = serde_json::to_value(&profile).unwrap();
+        tampered_fee["modes"]["old_wallet"]["scenarios"]["S1"]["repetitions"][0]["fee_microtari"] =
+            json!(1);
+        assert!(validate_document(&tampered_fee, true).is_err());
 
         let mut mismatched = serde_json::to_value(&profile).unwrap();
         mismatched["modes"]["new_wallet"]["scenarios"]["B0"]["repetitions"][0]["metrics"]["H_tip_target_hash"] =

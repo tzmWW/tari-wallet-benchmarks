@@ -74,6 +74,52 @@
       ],
       "type": "object"
     },
+    "build_artifact": {
+      "additionalProperties": true,
+      "properties": {
+        "sha256": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_revision": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_revision",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "build_manifest": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/build_artifact"
+          },
+          "minProperties": 1,
+          "type": "object"
+        },
+        "payment_processor_patch_sha256": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "schema_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sources": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema_version",
+        "artifacts"
+      ],
+      "type": "object"
+    },
     "chain_verification": {
       "additionalProperties": false,
       "properties": {
@@ -432,6 +478,98 @@
         "unavailable"
       ]
     },
+    "profile_correction": {
+      "additionalProperties": false,
+      "properties": {
+        "corrected_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "manifest_path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "manifest_schema_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "raw_profile_sha256": {
+          "pattern": "^[0-9a-fA-F]{64}$",
+          "type": "string"
+        },
+        "raw_profile_size": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "tool": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "tool_version": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "transformations": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "pointer": {
+                "minLength": 1,
+                "pattern": "^/",
+                "type": "string"
+              },
+              "value": {}
+            },
+            "required": [
+              "pointer",
+              "value"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "manifest_schema_version",
+        "manifest_path",
+        "tool",
+        "tool_version",
+        "corrected_at",
+        "raw_profile_sha256",
+        "raw_profile_size",
+        "transformations"
+      ],
+      "type": "object"
+    },
+    "provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "correction": {
+          "$ref": "#/$defs/profile_correction"
+        },
+        "export_build_manifest": {
+          "$ref": "#/$defs/build_manifest"
+        },
+        "export_commit": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "measurement_build_manifest": {
+          "$ref": "#/$defs/build_manifest"
+        },
+        "measurement_commit": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "measurement_commit",
+        "export_commit",
+        "measurement_build_manifest",
+        "export_build_manifest"
+      ],
+      "type": "object"
+    },
     "repetition": {
       "additionalProperties": false,
       "properties": {
@@ -603,6 +741,9 @@
     "scenario": {
       "additionalProperties": false,
       "properties": {
+        "all_runs_median_wall_ms": {
+          "$ref": "#/$defs/nullable_integer"
+        },
         "execution_status": {
           "$ref": "#/$defs/execution_status"
         },
@@ -653,6 +794,7 @@
         "repetitions",
         "median_wall_ms",
         "spread_wall_ms",
+        "all_runs_median_wall_ms",
         "notes"
       ],
       "type": "object"
@@ -752,11 +894,40 @@
         "error": {
           "$ref": "#/$defs/nullable_string"
         },
+        "failure_class": {
+          "enum": [
+            "http_response",
+            "request_timeout",
+            "arm_deadline",
+            "transport",
+            "response_decode",
+            "response_shape",
+            "database",
+            "process",
+            "chain_target"
+          ]
+        },
+        "fee_disposition": {
+          "enum": [
+            "confirmed_paid",
+            "proposed_unresolved",
+            "rejected",
+            "unavailable"
+          ]
+        },
         "fee_microtari": {
           "$ref": "#/$defs/nullable_integer"
         },
         "fee_unavailable_reason": {
           "$ref": "#/$defs/nullable_string"
+        },
+        "http_status": {
+          "maximum": 599,
+          "minimum": 100,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "input_count": {
           "$ref": "#/$defs/nullable_integer"
@@ -955,10 +1126,6 @@
       "format": "date-time",
       "type": "string"
     },
-    "harness_git_commit": {
-      "minLength": 1,
-      "type": "string"
-    },
     "modes": {
       "$ref": "#/$defs/modes"
     },
@@ -972,6 +1139,9 @@
         "final"
       ]
     },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
     "run_complete": {
       "type": "boolean"
     },
@@ -980,7 +1150,7 @@
       "type": "string"
     },
     "schema_version": {
-      "const": 5
+      "const": 6
     },
     "versions": {
       "additionalProperties": {
@@ -994,7 +1164,7 @@
     "run_id",
     "profile_kind",
     "run_complete",
-    "harness_git_commit",
+    "provenance",
     "completed_stages",
     "generated_at",
     "network",

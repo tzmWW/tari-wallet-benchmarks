@@ -44,6 +44,8 @@ pub(super) async fn annotate_mode2_live_scenarios(
         &mut s1.extra_metrics,
         s1_components_before,
         s1_components_after,
+        0,
+        s1.fee_microtari,
     );
     record_mode2_send_summary(
         profile,
@@ -113,6 +115,8 @@ pub(super) async fn annotate_mode2_live_scenarios(
         &mut s4.extra_metrics,
         s4_components_before,
         s4_components_after,
+        u64::from(s4.success_count).saturating_mul(request.amount.0),
+        s4.fee_microtari,
     );
     s4.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -207,6 +211,8 @@ pub(super) async fn annotate_mode2_live_scenarios(
         &mut s5.extra_metrics,
         s5_components_before,
         s5_components_after,
+        u64::from(s5.success_count).saturating_mul(s5_amount_microtari),
+        s5.fee_microtari,
     );
     s5.extra_metrics.insert(
         "unspent_before".to_string(),
@@ -282,33 +288,100 @@ async fn verify_mode2_transactions_until_confirmed_with_timeout(
     let mut attempts = 0u32;
     let client = base_node_http_client()?;
     let mut confirmation_observed_offsets_ms = BTreeMap::new();
+    let mut accumulated = Mode2VerificationResult::default();
 
     loop {
         attempts = attempts.saturating_add(1);
-        let mut verification =
-            verify_mode2_transactions_with_client(config, db_path, tx_ids, scenario, &client)
-                .await?;
-        let observed_at = start.elapsed().as_millis();
-        for tx in verification
-            .observed_transactions
-            .iter()
-            .filter(|tx| tx.confirmed)
-        {
-            confirmation_observed_offsets_ms
-                .entry(tx.tx_id.clone())
-                .or_insert(observed_at);
+        let remaining = timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return Ok((accumulated, attempts, start.elapsed().as_millis()));
         }
-        verification.confirmation_observed_offsets_ms = confirmation_observed_offsets_ms.clone();
-        if mode2_verification_confirmed(&verification, tx_ids) || start.elapsed() >= timeout {
-            return Ok((verification, attempts, start.elapsed().as_millis()));
+        let unresolved = unresolved_mode2_transaction_ids(&accumulated, tx_ids);
+        if unresolved.is_empty() {
+            accumulated.confirmation_observed_offsets_ms = confirmation_observed_offsets_ms;
+            return Ok((accumulated, attempts, start.elapsed().as_millis()));
+        }
+        let verification = match time::timeout(
+            remaining,
+            verify_mode2_transactions_with_client(config, db_path, &unresolved, scenario, &client),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Ok((accumulated, attempts, start.elapsed().as_millis()));
+            }
+        };
+        let observed_at = start.elapsed().as_millis();
+        merge_mode2_verification(
+            &mut accumulated,
+            verification,
+            &mut confirmation_observed_offsets_ms,
+            observed_at,
+        );
+        accumulated.confirmation_observed_offsets_ms = confirmation_observed_offsets_ms.clone();
+        if mode2_verification_confirmed(&accumulated, tx_ids) || start.elapsed() >= timeout {
+            return Ok((accumulated, attempts, start.elapsed().as_millis()));
         }
 
         let remaining = timeout.saturating_sub(start.elapsed());
         let sleep_for = Duration::from_secs(10).min(remaining);
         if sleep_for.is_zero() {
-            return Ok((verification, attempts, start.elapsed().as_millis()));
+            return Ok((accumulated, attempts, start.elapsed().as_millis()));
         }
         observation_poll_pause(sleep_for).await;
+    }
+}
+
+fn unresolved_mode2_transaction_ids(
+    accumulated: &Mode2VerificationResult,
+    tx_ids: &[String],
+) -> Vec<String> {
+    tx_ids
+        .iter()
+        .filter(|tx_id| {
+            !accumulated
+                .observed_transactions
+                .iter()
+                .any(|tx| tx.tx_id == **tx_id && tx.confirmed)
+        })
+        .cloned()
+        .collect()
+}
+
+fn merge_mode2_verification(
+    accumulated: &mut Mode2VerificationResult,
+    verification: Mode2VerificationResult,
+    confirmation_observed_offsets_ms: &mut BTreeMap<String, u128>,
+    observed_at: u128,
+) {
+    for observed in verification.observed_transactions {
+        if let Some(existing) = accumulated
+            .observed_transactions
+            .iter_mut()
+            .find(|existing| existing.tx_id == observed.tx_id)
+        {
+            *existing = observed;
+        } else {
+            accumulated.observed_transactions.push(observed);
+        }
+    }
+    accumulated
+        .observed_transactions
+        .sort_by(|left, right| left.tx_id.cmp(&right.tx_id));
+    accumulated.observations.extend(verification.observations);
+    accumulated.used_base_node_query |= verification.used_base_node_query;
+    accumulated
+        .transaction_shapes
+        .extend(verification.transaction_shapes);
+    for tx in accumulated
+        .observed_transactions
+        .iter()
+        .filter(|tx| tx.confirmed)
+    {
+        confirmation_observed_offsets_ms
+            .entry(tx.tx_id.clone())
+            .or_insert(observed_at);
     }
 }
 
@@ -356,7 +429,7 @@ pub(super) fn mode2_verification_confirmed(
             .all(|tx| tx.confirmed)
 }
 
-async fn observation_poll_pause(duration: Duration) {
+pub(super) async fn observation_poll_pause(duration: Duration) {
     wait_one_interval(duration).await;
 }
 
@@ -866,7 +939,13 @@ fn mode2_send_repetition(summary: &ScenarioSendSummary, scenario: ScenarioName) 
         wall_ms: Some(summary.wall_ms),
         success_count: confirmed,
         failure_count: terminal_failures,
-        fee_microtari: Some(summary.fee_microtari),
+        fee_microtari: Some(
+            verified
+                .iter()
+                .filter(|tx| tx.confirmed)
+                .filter_map(|tx| tx.fee_microtari)
+                .sum(),
+        ),
         error: summary.error_note().or_else(|| {
             (!all_verified_ok)
                 .then_some("one or more tx_ids did not verify as terminal-ok".to_string())
@@ -893,5 +972,52 @@ pub(super) fn mode2_completed_transaction_status(status: &str) -> (u32, bool) {
         "rejected" => (7, false),
         "canceled" => (14, false),
         _ => (0, false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observed(tx_id: &str, confirmed: bool, fee: u64) -> VerifiedTransaction {
+        VerifiedTransaction {
+            tx_id: tx_id.to_string(),
+            status_value: 1,
+            mode: "new_wallet".to_string(),
+            scenario: "S1".to_string(),
+            amount_microtari: None,
+            fee_microtari: Some(fee),
+            mined_height: None,
+            confirmations: None,
+            min_confirmations: Some(3),
+            tip_height: None,
+            confirmed,
+        }
+    }
+
+    #[test]
+    fn partial_timeout_keeps_prior_confirmation_and_queries_only_unresolved_ids() {
+        let mut accumulated = Mode2VerificationResult {
+            observed_transactions: vec![observed("1", true, 7)],
+            observations: vec![serde_json::json!({"tx_id": "1", "confirmed": true})],
+            ..Mode2VerificationResult::default()
+        };
+        assert_eq!(
+            unresolved_mode2_transaction_ids(&accumulated, &["1".to_string(), "2".to_string()]),
+            vec!["2".to_string()]
+        );
+        merge_mode2_verification(
+            &mut accumulated,
+            Mode2VerificationResult {
+                observed_transactions: vec![observed("2", false, 9)],
+                observations: vec![serde_json::json!({"tx_id": "2", "confirmed": false})],
+                ..Mode2VerificationResult::default()
+            },
+            &mut BTreeMap::new(),
+            10,
+        );
+        assert_eq!(accumulated.observed_transactions.len(), 2);
+        assert_eq!(accumulated.observed_transactions[0].fee_microtari, Some(7));
+        assert_eq!(accumulated.observations.len(), 2);
     }
 }

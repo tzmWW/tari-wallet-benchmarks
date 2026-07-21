@@ -143,8 +143,10 @@ fn record_mode3_s0(
     let expected = config.a_fund().map(|amount| amount.0).unwrap_or_default();
     let spendable_count =
         spendable_output_count(&payment_processor::payment_receiver_db_path(config)).ok();
+    let state_counts =
+        wallet_output_state_counts(&payment_processor::payment_receiver_db_path(config)).ok();
     let (status, success_count, failure_count, error, mut metrics) =
-        strict_s0_status(expected, available, spendable_count);
+        strict_s0_status(expected, available, spendable_count, state_counts);
     let ok = status == CellStatus::Ok;
     add_s0_funding_observation(
         &mut metrics,
@@ -268,6 +270,11 @@ async fn run_mode3_send_cells(
         &mut s1.extra_metrics,
         s1_components_before,
         s1_components_after,
+        0,
+        s1.chain_proofs
+            .values()
+            .map(|proof| proof.fee_microtari)
+            .fold(0, u64::saturating_add),
     );
     if let Ok(unspent_after) = spendable_output_count(&pp_db_path) {
         s1.extra_metrics.insert(
@@ -353,6 +360,8 @@ async fn run_mode3_send_cells(
         &mut s4.extra_metrics,
         s4_components_before,
         s4_components_after,
+        u64::from(s4_confirmed_payments).saturating_mul(amount.0),
+        s4_fee_microtari,
     );
     s4.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -432,6 +441,8 @@ async fn run_mode3_send_cells(
         &mut s5.extra_metrics,
         s5_components_before,
         s5_components_after,
+        u64::from(s5_confirmed_payments).saturating_mul(amount.0),
+        s5_fee_microtari,
     );
     s5.extra_metrics.insert(
         "s5_complete".to_string(),

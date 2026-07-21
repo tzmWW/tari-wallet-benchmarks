@@ -438,8 +438,18 @@ fn record_mode1_s0(
     let balance = context.balance.as_ref();
     let available = balance.map(|b| b.available_balance).unwrap_or_default();
     let expected = config.a_fund().map(|amount| amount.0).unwrap_or_default();
-    let (status, success_count, failure_count, error, mut metrics) =
-        strict_s0_status(expected, available, spendable_count);
+    let (status, success_count, failure_count, error, mut metrics) = strict_s0_status(
+        expected,
+        available,
+        spendable_count,
+        wallet_output_state_counts(
+            &config
+                .paths
+                .data_dir
+                .join("old-wallet-console/esmeralda/data/wallet/db/console_wallet.db"),
+        )
+        .ok(),
+    );
     let ok = status == CellStatus::Ok;
     add_s0_funding_observation(
         &mut metrics,
@@ -528,6 +538,8 @@ async fn run_mode1_send_cells(
         &mut s1.extra_metrics,
         s1_components_before,
         s1_components_after,
+        0,
+        s1.fee_microtari,
     );
     record_mode1_transfer_summary(
         profile,
@@ -595,6 +607,8 @@ async fn run_mode1_send_cells(
         &mut s4.extra_metrics,
         s4_components_before,
         s4_components_after,
+        u64::from(s4_success_payments).saturating_mul(amount.0),
+        s4.fee_microtari,
     );
     s4.extra_metrics.insert(
         "unspent_after".to_string(),
@@ -643,6 +657,8 @@ async fn run_mode1_send_cells(
         &mut s5.extra_metrics,
         s5_components_before,
         s5_components_after,
+        u64::from(s5_success_payments).saturating_mul(amount.0),
+        s5.fee_microtari,
     );
     s5.extra_metrics.insert(
         "unspent_before".to_string(),

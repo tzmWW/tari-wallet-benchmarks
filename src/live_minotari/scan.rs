@@ -495,7 +495,6 @@ async fn run_library_fresh_scan(
     };
     let tip_start = Some(target.height);
     let tip_tolerance = 0;
-    let scan_started = Instant::now();
     let mut progress = ScanProgress::default();
     let (scan_result, resource_peaks) = with_resource_sampling(
         Some(std::process::id()),
@@ -511,7 +510,7 @@ async fn run_library_fresh_scan(
         ),
     )
     .await;
-    let (wall_ms, completion, scan_invocations, no_progress, stopped, more_blocks, mut scan_error) =
+    let (wall_ms, completion, scan_invocations, no_progress, stopped, more_blocks) =
         match scan_result {
             Ok(report) => (
                 report.wall_ms,
@@ -523,55 +522,20 @@ async fn run_library_fresh_scan(
                 report.no_progress_attempts,
                 report.stopped_without_progress,
                 report.last_more_blocks,
-                None,
             ),
-            Err(error) => (
-                scan_started.elapsed().as_millis(),
-                base_node_tip_snapshot(&config.network.base_node_http_url)
-                    .await
-                    .unwrap_or_else(|_| target.clone()),
-                progress.invocations,
-                progress.no_progress_attempts,
-                true,
-                None,
-                Some(format!("{error:#}")),
-            ),
+            Err(error) => return Err(error).context("fresh wallet scan infrastructure failure"),
         };
-    let account = match account_snapshot(&db_path) {
-        Ok(account) => account,
-        Err(error) => {
-            scan_error.get_or_insert_with(|| format!("reading final wallet state: {error:#}"));
-            AccountSnapshot::default()
-        }
-    };
-    let detected_outputs = detected_output_count(&db_path)
-        .map_err(|error| {
-            scan_error.get_or_insert_with(|| format!("reading recovered output count: {error:#}"));
-        })
-        .unwrap_or_default();
-    let history_transactions = history_transaction_count(&db_path)
-        .map_err(|error| {
-            scan_error.get_or_insert_with(|| format!("reading recovered history count: {error:#}"));
-        })
-        .unwrap_or_default();
-    let history_tx_ids = history_transaction_ids(&db_path)
-        .map_err(|error| {
-            scan_error
-                .get_or_insert_with(|| format!("reading recovered history identities: {error:#}"));
-        })
-        .unwrap_or_default();
-    let recovered_output_commitments = recovered_output_commitments(&db_path)
-        .map_err(|error| {
-            scan_error
-                .get_or_insert_with(|| format!("reading recovered output identities: {error:#}"));
-        })
-        .unwrap_or_default();
-    let spendable_outputs = spendable_output_count(&db_path)
-        .map_err(|error| {
-            scan_error
-                .get_or_insert_with(|| format!("reading final spendable output count: {error:#}"));
-        })
-        .unwrap_or_default();
+    let account = account_snapshot(&db_path).context("reading final wallet state")?;
+    let detected_outputs =
+        detected_output_count(&db_path).context("reading recovered output count")?;
+    let history_transactions =
+        history_transaction_count(&db_path).context("reading recovered history count")?;
+    let history_tx_ids =
+        history_transaction_ids(&db_path).context("reading recovered history identities")?;
+    let recovered_output_commitments =
+        recovered_output_commitments(&db_path).context("reading recovered output identities")?;
+    let spendable_outputs =
+        spendable_output_count(&db_path).context("reading final spendable output count")?;
 
     Ok(ScanMeasurement {
         wall_ms,
@@ -597,7 +561,7 @@ async fn run_library_fresh_scan(
         scan_no_progress_attempts: no_progress,
         scan_stopped_without_progress: stopped,
         scan_last_more_blocks: more_blocks,
-        scan_error,
+        scan_error: None,
     })
 }
 
@@ -668,77 +632,43 @@ async fn run_mode1_fresh_scan(
             config.timeout(config.timeouts.scan_batch_secs),
         )
         .await;
-        let mut scan_error = scan_result.as_ref().err().map(|error| format!("{error:#}"));
-        let grpc_height = match scan_result {
-            Ok(height) => height,
-            Err(_) => client
-                .get_state(grpc::GetStateRequest {})
-                .await
-                .ok()
-                .map(|response| response.into_inner().scanned_height)
-                .unwrap_or_default(),
-        };
-        let available_microtari = match client
+        let grpc_height = scan_result.context("console-wallet scan infrastructure failure")?;
+        let available_microtari = client
             .get_balance(grpc::GetBalanceRequest { payment_id: None })
             .await
-        {
-            Ok(response) => response.into_inner().available_balance,
-            Err(error) => {
-                scan_error.get_or_insert_with(|| {
-                    format!("reading final console-wallet balance: {error}")
-                });
-                0
-            }
-        };
+            .context("reading final console-wallet balance")?
+            .into_inner()
+            .available_balance;
         let cursor = mode1_scan_cursor(&wallet_db).unwrap_or(AccountSnapshot {
             max_height: grpc_height,
             hash: None,
             available_microtari,
         });
-        let spendable_outputs = match mode1_unspent_count(&mut client).await {
-            Ok(count) => count,
-            Err(error) => {
-                scan_error.get_or_insert_with(|| {
-                    format!("reading final console-wallet outputs: {error:#}")
-                });
-                0
-            }
-        };
+        let spendable_outputs = mode1_unspent_count(&mut client)
+            .await
+            .context("reading final console-wallet outputs")?;
         process.shutdown().await?;
-        Ok::<_, anyhow::Error>((cursor, spendable_outputs, available_microtari, scan_error))
+        Ok::<_, anyhow::Error>((cursor, spendable_outputs, available_microtari))
     })
     .await;
 
-    let (cursor, spendable_outputs, available_microtari, mut scan_error) = match attempt {
+    let (cursor, spendable_outputs, available_microtari) = match attempt {
         Ok(result) => result,
         Err(error) => {
             let _ = process.shutdown().await;
-            let (count, available) = mode1_unspent_db_snapshot(&wallet_db).unwrap_or_default();
-            (
-                mode1_scan_cursor(&wallet_db).unwrap_or(AccountSnapshot {
-                    max_height: 0,
-                    hash: None,
-                    available_microtari: available,
-                }),
-                count,
-                available,
-                Some(format!("{error:#}")),
-            )
+            return Err(error).context("console-wallet scan infrastructure failure");
         }
     };
-    let completion = match base_node_tip_snapshot(&config.network.base_node_http_url).await {
-        Ok(completion) => completion,
-        Err(error) => {
-            scan_error.get_or_insert_with(|| format!("reading scan completion tip: {error:#}"));
-            launch_tip.clone()
-        }
-    };
+    let completion = base_node_tip_snapshot(&config.network.base_node_http_url)
+        .await
+        .context("reading scan completion tip")?;
     let target = requested_target.unwrap_or_else(|| ChainTipSnapshot {
         height: cursor.max_height,
         hash: cursor.hash.clone().unwrap_or_default(),
     });
+    let mut validation_error = None;
     if cursor.hash.as_deref() != Some(target.hash.as_str()) && cursor.max_height >= target.height {
-        scan_error.get_or_insert_with(|| {
+        validation_error.get_or_insert_with(|| {
             format!(
                 "console-wallet cursor hash mismatch at target {}: expected {}, observed {}",
                 target.height,
@@ -747,43 +677,21 @@ async fn run_mode1_fresh_scan(
             )
         });
     }
-    match base_node_header_hash(&config.network.base_node_http_url, target.height).await {
-        Ok(hash) if hash == target.hash => {}
-        Ok(hash) => {
-            scan_error.get_or_insert_with(|| {
-                format!(
-                    "console-wallet target {} was invalidated: expected hash {}, selected chain has {hash}",
-                    target.height, target.hash
-                )
-            });
-        }
-        Err(error) => {
-            scan_error.get_or_insert_with(|| format!("verifying console-wallet target: {error:#}"));
-        }
+    if let Some(mismatch) = validate_authoritative_target_header(
+        &target.hash,
+        base_node_header_hash(&config.network.base_node_http_url, target.height).await,
+    )? {
+        validation_error.get_or_insert(mismatch);
     }
     let max_height = cursor.max_height;
-    let detected_outputs = detected_output_count(&wallet_db)
-        .map_err(|error| {
-            scan_error.get_or_insert_with(|| format!("reading recovered output count: {error:#}"));
-        })
-        .unwrap_or_default();
-    let history_transactions = history_transaction_count(&wallet_db)
-        .map_err(|error| {
-            scan_error.get_or_insert_with(|| format!("reading recovered history count: {error:#}"));
-        })
-        .unwrap_or_default();
-    let history_tx_ids = history_transaction_ids(&wallet_db)
-        .map_err(|error| {
-            scan_error
-                .get_or_insert_with(|| format!("reading recovered history identities: {error:#}"));
-        })
-        .unwrap_or_default();
-    let output_commitments = recovered_output_commitments(&wallet_db)
-        .map_err(|error| {
-            scan_error
-                .get_or_insert_with(|| format!("reading recovered output identities: {error:#}"));
-        })
-        .unwrap_or_default();
+    let detected_outputs =
+        detected_output_count(&wallet_db).context("reading recovered output count")?;
+    let history_transactions =
+        history_transaction_count(&wallet_db).context("reading recovered history count")?;
+    let history_tx_ids =
+        history_transaction_ids(&wallet_db).context("reading recovered history identities")?;
+    let output_commitments =
+        recovered_output_commitments(&wallet_db).context("reading recovered output identities")?;
     Ok(ScanMeasurement {
         wall_ms: start.elapsed().as_millis(),
         birthday: spec.birthday(),
@@ -806,24 +714,10 @@ async fn run_mode1_fresh_scan(
         tip_lag_tolerance_blocks: 0,
         scan_invocations: 1,
         scan_no_progress_attempts: 0,
-        scan_stopped_without_progress: scan_error.is_some() || max_height < target.height,
+        scan_stopped_without_progress: validation_error.is_some() || max_height < target.height,
         scan_last_more_blocks: None,
-        scan_error,
+        scan_error: validation_error,
     })
-}
-
-fn mode1_unspent_db_snapshot(db_path: &Path) -> anyhow::Result<(u64, u64)> {
-    let conn = Connection::open(db_path)?;
-    let (count, value): (i64, Option<i64>) = conn.query_row(
-        "SELECT COUNT(*), SUM(value) FROM outputs WHERE CAST(status AS TEXT) IN ('0', 'UNSPENT')",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    Ok((
-        u64::try_from(count).context("console-wallet unspent count is negative")?,
-        u64::try_from(value.unwrap_or_default())
-            .context("console-wallet unspent value is negative")?,
-    ))
 }
 
 fn fresh_scan_db_path(config: &Config, mode: &str, spec: FreshScanSpec, run: u32) -> PathBuf {
@@ -834,6 +728,18 @@ fn fresh_scan_db_path(config: &Config, mode: &str, spec: FreshScanSpec, run: u32
         run,
         spec.birthday()
     ))
+}
+
+fn validate_authoritative_target_header(
+    expected_hash: &str,
+    observed: anyhow::Result<String>,
+) -> anyhow::Result<Option<String>> {
+    match observed? {
+        hash if hash == expected_hash => Ok(None),
+        hash => Ok(Some(format!(
+            "authoritative target header hash mismatch: expected {expected_hash}, observed {hash}"
+        ))),
+    }
 }
 
 fn fresh_console_base_path(config: &Config, spec: FreshScanSpec, run: u32) -> PathBuf {
@@ -1046,6 +952,33 @@ pub(super) fn spendable_output_count(db_path: &Path) -> anyhow::Result<u64> {
     Ok(u64::try_from(count).unwrap_or_default())
 }
 
+pub(super) fn wallet_output_state_counts(db_path: &Path) -> anyhow::Result<serde_json::Value> {
+    let conn = Connection::open(db_path)?;
+    let active = active_output_predicate(&conn)?;
+    let mut statement = conn.prepare(&format!(
+        "SELECT CAST(status AS TEXT) FROM outputs WHERE {active} confirmed_height IS NOT NULL"
+    ))?;
+    let mut counts = serde_json::Map::from_iter([
+        ("pending_outputs".to_string(), serde_json::json!(0u64)),
+        ("locked_outputs".to_string(), serde_json::json!(0u64)),
+        ("invalid_outputs".to_string(), serde_json::json!(0u64)),
+        ("unknown_outputs".to_string(), serde_json::json!(0u64)),
+    ]);
+    for status in statement.query_map([], |row| row.get::<_, String>(0))? {
+        let status = status?;
+        let key = match status.to_ascii_uppercase().as_str() {
+            "LOCKED" | "1" | "2" | "3" | "6" | "7" | "8" => "pending_outputs",
+            "4" | "5" | "10" | "INVALID" | "CANCELLED" | "NOTSTORED" => "invalid_outputs",
+            "UNSPENT" | "0" | "SPENT" => continue,
+            _ => "unknown_outputs",
+        };
+        if let Some(value) = counts.get_mut(key) {
+            *value = serde_json::json!(value.as_u64().unwrap_or_default().saturating_add(1));
+        }
+    }
+    Ok(serde_json::Value::Object(counts))
+}
+
 pub(super) fn spendable_output_amounts(db_path: &Path) -> anyhow::Result<Vec<u64>> {
     let conn = Connection::open(db_path)?;
     let active = active_output_predicate(&conn)?;
@@ -1158,6 +1091,28 @@ mod tests {
         assert_eq!(
             recovered_output_commitments(&db_path).unwrap(),
             BTreeSet::from(["deadbeef".to_string()])
+        );
+    }
+
+    #[test]
+    fn authoritative_target_failures_propagate_but_hash_mismatch_is_measurement() {
+        assert!(
+            validate_authoritative_target_header(
+                "expected",
+                Err(anyhow::anyhow!("transport failed"))
+            )
+            .is_err()
+        );
+        assert_eq!(
+            validate_authoritative_target_header("expected", Ok("observed".to_string()))
+                .unwrap()
+                .expect("mismatch"),
+            "authoritative target header hash mismatch: expected expected, observed observed"
+        );
+        assert!(
+            validate_authoritative_target_header("same", Ok("same".to_string()))
+                .unwrap()
+                .is_none()
         );
     }
 }

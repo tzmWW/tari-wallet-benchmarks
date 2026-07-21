@@ -79,7 +79,8 @@ cargo run --release -- addresses \
 set -a
 . .secrets/candidate.env
 set +a
-export HARNESS_WALLET_PW='choose-a-local-password'
+read -r -s HARNESS_WALLET_PW
+export HARNESS_WALLET_PW
 
 cargo run --release --features live-minotari -- baseline-workflow \
   --config harness.toml \

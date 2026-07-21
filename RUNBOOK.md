@@ -139,7 +139,8 @@ use the same `HARNESS_WALLET_PW` exported for the workflow and hold at least
 `3 * A_fund` plus the shared transaction fee. Create one if needed:
 
 ```sh
-export HARNESS_WALLET_PW='local-password'
+read -r -s HARNESS_WALLET_PW
+export HARNESS_WALLET_PW
 export SOURCE_DB=/absolute/path/to/source-wallet.db
 tools/minotari --network esmeralda create \
   --password "$HARNESS_WALLET_PW" \
@@ -183,7 +184,8 @@ cp harness-prefunding.toml harness.toml
 mkdir -p .secrets candidates
 cargo run --release -- addresses --config harness.toml --out .secrets/candidate.env
 set -a; . .secrets/candidate.env; set +a
-export HARNESS_WALLET_PW='local-password'
+read -r -s HARNESS_WALLET_PW
+export HARNESS_WALLET_PW
 
 caffeinate -dimsu -- cargo run --release --features live-minotari -- baseline-workflow \
   --config harness.toml \
