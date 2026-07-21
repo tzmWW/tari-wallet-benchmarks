@@ -548,14 +548,28 @@
           "$ref": "#/$defs/profile_correction"
         },
         "export_build_manifest": {
-          "$ref": "#/$defs/build_manifest"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/build_manifest"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "export_commit": {
           "minLength": 1,
           "type": "string"
         },
         "measurement_build_manifest": {
-          "$ref": "#/$defs/build_manifest"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/build_manifest"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "measurement_commit": {
           "minLength": 1,

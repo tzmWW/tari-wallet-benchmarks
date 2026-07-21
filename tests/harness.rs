@@ -148,6 +148,11 @@ fn validate_and_summarize_profile_commands_use_current_schema() {
     let profile_path = tempdir.path().join("checkpoint.json");
     let summary_path = tempdir.path().join("summary.md");
     let mut profile = ResultProfile::new(&Config::default(), env_capture::capture());
+    profile.provenance.measurement_build_manifest = serde_json::Value::Null;
+    profile.provenance.export_build_manifest = serde_json::Value::Null;
+    profile
+        .config
+        .insert("build_manifest".to_string(), serde_json::Value::Null);
     for mode in ModeName::ALL {
         profile.modes.insert(
             mode.as_str().to_string(),

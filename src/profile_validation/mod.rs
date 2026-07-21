@@ -69,8 +69,8 @@ pub fn schema_document() -> Value {
                 "properties": {
                     "measurement_commit": {"type": "string", "minLength": 1},
                     "export_commit": {"type": "string", "minLength": 1},
-                    "measurement_build_manifest": {"$ref": "#/$defs/build_manifest"},
-                    "export_build_manifest": {"$ref": "#/$defs/build_manifest"},
+                    "measurement_build_manifest": {"anyOf": [{"$ref": "#/$defs/build_manifest"}, {"type": "null"}]},
+                    "export_build_manifest": {"anyOf": [{"$ref": "#/$defs/build_manifest"}, {"type": "null"}]},
                     "correction": {"$ref": "#/$defs/profile_correction"}
                 }
             },
@@ -2434,10 +2434,11 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_provenance_manifests_are_rejected() {
+    fn null_checkpoint_manifests_are_allowed_but_submission_manifests_are_required() {
         let mut document = profile_document();
         document["provenance"]["measurement_build_manifest"] = Value::Null;
-        assert!(validate_document(&document, false).is_err());
+        assert!(validate_document(&document, false).is_ok());
+        assert!(validate_document(&document, true).is_err());
 
         document["provenance"]["measurement_build_manifest"] = json!({
             "schema_version": 2,
