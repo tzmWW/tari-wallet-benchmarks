@@ -347,11 +347,11 @@ async fn run_library_fresh_scan_cell(
                 );
                 cell.record_repetition(Repetition {
                     run,
-                    status: if verification_ok {
-                        CellStatus::Ok
+                    status: classify_scan_outcome(if verification_ok {
+                        ScanOutcomeClass::Verified
                     } else {
-                        CellStatus::Failed
-                    },
+                        ScanOutcomeClass::VerificationMismatch
+                    }),
                     wall_ms: Some(measurement.wall_ms),
                     success_count: if verification_ok { 1 } else { 0 },
                     failure_count: if verification_ok { 0 } else { 1 },
@@ -368,7 +368,7 @@ async fn run_library_fresh_scan_cell(
                 );
                 cell.record_repetition(Repetition {
                     run,
-                    status: CellStatus::HarnessError,
+                    status: classify_scan_outcome(ScanOutcomeClass::InfrastructureFailure),
                     wall_ms: Some(run_start.elapsed().as_millis()),
                     success_count: 0,
                     failure_count: 1,
@@ -433,11 +433,11 @@ async fn run_mode1_fresh_scan_cell(
                 );
                 cell.record_repetition(Repetition {
                     run,
-                    status: if verification_ok {
-                        CellStatus::Ok
+                    status: classify_scan_outcome(if verification_ok {
+                        ScanOutcomeClass::Verified
                     } else {
-                        CellStatus::Failed
-                    },
+                        ScanOutcomeClass::VerificationMismatch
+                    }),
                     wall_ms: Some(measurement.wall_ms),
                     success_count: if verification_ok { 1 } else { 0 },
                     failure_count: if verification_ok { 0 } else { 1 },
@@ -454,7 +454,7 @@ async fn run_mode1_fresh_scan_cell(
                 );
                 cell.record_repetition(Repetition {
                     run,
-                    status: CellStatus::HarnessError,
+                    status: classify_scan_outcome(ScanOutcomeClass::InfrastructureFailure),
                     wall_ms: Some(run_start.elapsed().as_millis()),
                     success_count: 0,
                     failure_count: 1,
@@ -1037,9 +1037,38 @@ fn active_output_predicate(conn: &Connection) -> anyhow::Result<&'static str> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanOutcomeClass {
+    Verified,
+    VerificationMismatch,
+    InfrastructureFailure,
+}
+
+fn classify_scan_outcome(outcome: ScanOutcomeClass) -> CellStatus {
+    match outcome {
+        ScanOutcomeClass::Verified => CellStatus::Ok,
+        ScanOutcomeClass::VerificationMismatch => CellStatus::Failed,
+        ScanOutcomeClass::InfrastructureFailure => CellStatus::HarnessError,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_classification_matrix_separates_measurements_from_infrastructure() {
+        for (outcome, expected) in [
+            (ScanOutcomeClass::Verified, CellStatus::Ok),
+            (ScanOutcomeClass::VerificationMismatch, CellStatus::Failed),
+            (
+                ScanOutcomeClass::InfrastructureFailure,
+                CellStatus::HarnessError,
+            ),
+        ] {
+            assert_eq!(classify_scan_outcome(outcome), expected, "{outcome:?}");
+        }
+    }
 
     #[test]
     fn spendable_queries_exclude_unconfirmed_outputs() {

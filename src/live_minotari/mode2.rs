@@ -974,6 +974,7 @@ pub(super) fn mode2_completed_transaction_status(status: &str) -> (u32, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{modes::ModeName, result_profile::empty_mode_profile};
 
     fn observed(tx_id: &str, confirmed: bool, fee: u64) -> VerifiedTransaction {
         VerifiedTransaction {
@@ -1015,5 +1016,100 @@ mod tests {
         assert_eq!(accumulated.observed_transactions.len(), 2);
         assert_eq!(accumulated.observed_transactions[0].fee_microtari, Some(7));
         assert_eq!(accumulated.observations.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn verifier_hard_deadline_preserves_all_128_unresolved_ids_without_queries() {
+        let tx_ids = (0..128).map(|id| id.to_string()).collect::<Vec<_>>();
+        let directory = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let (result, attempts, _) = verify_mode2_transactions_until_confirmed_with_timeout(
+            &Config::default(),
+            &directory.path().join("wallet.db"),
+            &tx_ids,
+            ScenarioName::S4,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(attempts, 1);
+        assert!(result.observed_transactions.is_empty());
+        assert_eq!(unresolved_mode2_transaction_ids(&result, &tx_ids), tx_ids);
+    }
+
+    #[test]
+    fn partial_mode2_outcome_flows_through_recording_helper() {
+        let config = Config::default();
+        let mut profile = ResultProfile::new(&config, crate::env_capture::capture());
+        profile.modes.insert(
+            ModeName::NewWallet.as_str().to_string(),
+            empty_mode_profile(ModeName::NewWallet, None),
+        );
+        let mut summary = ScenarioSendSummary {
+            attempted: 2,
+            wall_ms: 25,
+            ..ScenarioSendSummary::default()
+        };
+        summary.record_attempt(
+            1,
+            0,
+            5,
+            "recipient-1".to_string(),
+            Ok(OneSidedSendOutcome {
+                tx_id: "confirmed".to_string(),
+                fee_microtari: 7,
+                accepted: true,
+                is_synced: true,
+                rejection_reason: None,
+                construction_ms: 3,
+                broadcast_to_mempool_ms: Some(2),
+                broadcast_start_offset_ms: Some(3),
+                broadcasted_at: None,
+                recipient: "recipient-1".to_string(),
+            }),
+        );
+        summary.record_attempt(
+            2,
+            6,
+            25,
+            "recipient-2".to_string(),
+            Ok(OneSidedSendOutcome {
+                tx_id: "unresolved".to_string(),
+                fee_microtari: 9,
+                accepted: true,
+                is_synced: true,
+                rejection_reason: None,
+                construction_ms: 4,
+                broadcast_to_mempool_ms: Some(3),
+                broadcast_start_offset_ms: Some(10),
+                broadcasted_at: None,
+                recipient: "recipient-2".to_string(),
+            }),
+        );
+        summary.tx_infos.push(observed("confirmed", true, 7));
+
+        record_mode2_send_summary(&mut profile, ScenarioName::S4, &summary, Vec::new());
+
+        let repetition = &profile.modes["new_wallet"].scenarios["S4"].repetitions[0];
+        assert_eq!(repetition.status, CellStatus::Failed);
+        assert_eq!((repetition.success_count, repetition.failure_count), (1, 1));
+        assert_eq!(repetition.fee_microtari, Some(7));
+        assert_eq!(profile.chain_verification.verified_transactions.len(), 1);
+        let observations = repetition.metrics.as_ref().unwrap()["transaction_observations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(observations.len(), 2);
+        assert!(
+            observations
+                .iter()
+                .any(|row| row["terminal_outcome"] == "confirmed")
+        );
+        assert!(
+            observations
+                .iter()
+                .any(|row| row["terminal_outcome"] == "timed_out")
+        );
     }
 }

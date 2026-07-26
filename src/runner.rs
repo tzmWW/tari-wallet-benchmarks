@@ -594,7 +594,6 @@ async fn fund_s0_from_checkpoint_inner(
         .transaction
         .as_ref()
         .context("confirmed S0 evidence has no transaction")?;
-    crate::live_minotari::remove_prepared_transaction_checkpoint(source_db)?;
     let funded_config = config_with_s0_evidence(config, evidence_path)?;
     crate::live_minotari::synchronize_s0_recipients(
         &funded_config,
@@ -606,8 +605,18 @@ async fn fund_s0_from_checkpoint_inner(
     preflight_for_live_run_inner(&funded_config, &book, false)
         .await
         .context("post-funding recipient readiness")?;
+    remove_s0_checkpoint_after_recipient_reconciliation(source_db, Ok(()))?;
     println!("S0 recipient readiness PASS");
     Ok(())
+}
+
+#[cfg(feature = "live-minotari")]
+fn remove_s0_checkpoint_after_recipient_reconciliation(
+    source_db: &Path,
+    reconciliation: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    reconciliation?;
+    crate::live_minotari::remove_prepared_transaction_checkpoint(source_db)
 }
 
 #[cfg(feature = "live-minotari")]
@@ -1925,6 +1934,30 @@ mod tests {
                 .to_string()
                 .contains("operator replacement approval")
         );
+    }
+
+    #[cfg(feature = "live-minotari")]
+    #[test]
+    fn s0_checkpoint_is_retained_until_recipient_reconciliation_succeeds() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("wallet.db");
+        let checkpoint = db_path.with_extension("prepared-transaction.json");
+        fs::write(&checkpoint, b"durable submission").unwrap();
+
+        let error = remove_s0_checkpoint_after_recipient_reconciliation(
+            &db_path,
+            Err(anyhow::anyhow!("recipient reconciliation failed")),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("recipient reconciliation failed")
+        );
+        assert!(checkpoint.exists());
+
+        remove_s0_checkpoint_after_recipient_reconciliation(&db_path, Ok(())).unwrap();
+        assert!(!checkpoint.exists());
     }
 
     #[test]
