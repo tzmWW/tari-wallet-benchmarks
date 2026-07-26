@@ -1,0 +1,19 @@
+id: no-s0-resubmit-after-recovery
+language: Rust
+severity: error
+message: A recovered S0 transaction must resume its durable identity and must not call fresh submission.
+rule:
+  all:
+    - pattern: crate::live_minotari::submit_s0_outputs($$$ARGS)
+    - inside:
+        any:
+          - pattern: |
+              if let crate::live_minotari::PreparedTransactionRecovery::RecoveredConfirmedTransaction($EVIDENCE) = $RECOVERY {
+                $$$BODY
+              }
+          - pattern: |
+              if let crate::live_minotari::PreparedTransactionRecovery::RecoveredAcceptedPendingConfirmation($EVIDENCE) = $RECOVERY {
+                $$$BODY
+              }
+files:
+  - src/**/*.rs

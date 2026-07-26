@@ -20,6 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_DIR="${SCRIPT_DIR}/../patches"
 
 MINOTARI_REPO="https://github.com/tari-project/minotari-cli.git"
+MINOTARI_FEATURE_REPO="https://github.com/tzmWW/minotari-cli.git"
 MINOTARI_BASE_REV="360c4848a54d65fd710266233cc9277b0f785e74"
 MINOTARI_BASE_TREE="e9bbd1fb7b538e213e17c2986b85940435adce26"
 MINOTARI_FEATURE_REV="1391dbd2155c96e885379d72b76e33582f0aad87"
@@ -129,6 +130,19 @@ apply_minotari_patch \
   "minotari-exact-output-locking.patch" \
   "56f65ce897c1f428aeb8858faefeaf691d66e4cfa4e3027bd27b2ac856461b63" \
   "818201e82cc3ab35cccba2fd1ffa4b95bdc08fd2"
+
+# Cargo consumes this public feature commit. Its tree must be exactly the
+# upstream base plus the two library patches above.
+git -C "${MINOTARI_DIR}" fetch --no-tags "${MINOTARI_FEATURE_REPO}" "${MINOTARI_FEATURE_REV}"
+if [ "$(git -C "${MINOTARI_DIR}" rev-parse FETCH_HEAD)" != "${MINOTARI_FEATURE_REV}" ]; then
+  printf 'Cargo Minotari revision did not resolve to %s\n' "${MINOTARI_FEATURE_REV}" >&2
+  exit 1
+fi
+if [ "$(git -C "${MINOTARI_DIR}" rev-parse FETCH_HEAD^{tree})" != "818201e82cc3ab35cccba2fd1ffa4b95bdc08fd2" ]; then
+  printf 'Cargo Minotari tree does not match upstream plus tracked library patches\n' >&2
+  exit 1
+fi
+
 apply_minotari_patch \
   "minotari-wallet-password-env.patch" \
   "c8f203f78cf5a2549be49e1e52e27474e13955a89c79a54658a0e2c06ae039c9" \

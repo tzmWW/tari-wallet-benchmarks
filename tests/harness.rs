@@ -140,6 +140,14 @@ fn schema_command_writes_json() {
         fs::read(&schema_path).unwrap(),
         fs::read("RESULT_PROFILE_SCHEMA.json").unwrap()
     );
+
+    Command::cargo_bin("wallet-bench")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["schema", "--out", "relative-schema.json"])
+        .assert()
+        .success();
+    assert!(tempdir.path().join("relative-schema.json").is_file());
 }
 
 #[test]

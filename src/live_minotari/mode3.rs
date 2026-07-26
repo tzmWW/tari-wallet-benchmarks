@@ -21,6 +21,48 @@ pub(super) fn pp_observation_complete(
         })
 }
 
+pub(super) fn unresolved_pp_ids(
+    batch_ids: &[String],
+    payment_ids: &[String],
+    snapshot: Option<&PaymentProcessorDbSnapshot>,
+    proofs: &BTreeMap<String, PpChainProof>,
+) -> (Vec<String>, Vec<String>) {
+    let Some(snapshot) = snapshot else {
+        return (batch_ids.to_vec(), payment_ids.to_vec());
+    };
+    let batches = batch_ids
+        .iter()
+        .filter(|id| {
+            snapshot
+                .batches
+                .iter()
+                .find(|batch| &batch.id == *id)
+                .is_none_or(|batch| {
+                    !(matches!(batch.status.as_str(), "FAILED" | "CANCELLED")
+                        || batch.status == "CONFIRMED" && proofs.contains_key(*id))
+                })
+        })
+        .cloned()
+        .collect();
+    let payments = payment_ids
+        .iter()
+        .filter(|id| {
+            snapshot
+                .payments
+                .iter()
+                .find(|payment| &payment.id == *id)
+                .is_none_or(|payment| {
+                    !matches!(
+                        payment.status.to_ascii_uppercase().as_str(),
+                        "FAILED" | "CANCELLED" | "COMPLETED" | "CONFIRMED" | "REJECTED"
+                    )
+                })
+        })
+        .cloned()
+        .collect();
+    (batches, payments)
+}
+
 pub(super) async fn annotate_mode3_payment_processor(
     config: &Config,
     book: &AddressBook,
@@ -264,7 +306,7 @@ async fn run_mode3_send_cells(
         s1.chain_proofs
             .values()
             .map(|proof| proof.fee_microtari)
-            .fold(0, u64::saturating_add),
+            .try_fold(0, u64::checked_add),
     );
     add_balance_component_metrics(
         &mut s1.extra_metrics,
@@ -274,7 +316,7 @@ async fn run_mode3_send_cells(
         s1.chain_proofs
             .values()
             .map(|proof| proof.fee_microtari)
-            .fold(0, u64::saturating_add),
+            .try_fold(0, u64::checked_add),
     );
     if let Ok(unspent_after) = spendable_output_count(&pp_db_path) {
         s1.extra_metrics.insert(
@@ -331,12 +373,12 @@ async fn run_mode3_send_cells(
         .ok();
     let s4_fee_microtari = s4.verified_fee_total();
     let s4_confirmed_payments = s4.independently_confirmed_payments();
+    let s4_outgoing = u64::from(s4_confirmed_payments).checked_mul(amount.0);
     let s4_expected_balance = s4_balance_before.and_then(|before| {
-        before.checked_sub(
-            u64::from(s4_confirmed_payments)
-                .saturating_mul(amount.0)
-                .saturating_add(s4_fee_microtari),
-        )
+        s4_outgoing
+            .zip(s4_fee_microtari)
+            .and_then(|(outgoing, fee)| outgoing.checked_add(fee))
+            .and_then(|debit| before.checked_sub(debit))
     });
     if let Some(expected) = s4_expected_balance
         && let Err(error) = wait_for_pp_receiver_balance(config, &pp_db_path, expected).await
@@ -353,14 +395,14 @@ async fn run_mode3_send_cells(
         &mut s4.extra_metrics,
         s4_balance_before,
         s4_balance_after,
-        u64::from(s4_confirmed_payments).saturating_mul(amount.0),
+        s4_outgoing,
         s4_fee_microtari,
     );
     add_balance_component_metrics(
         &mut s4.extra_metrics,
         s4_components_before,
         s4_components_after,
-        u64::from(s4_confirmed_payments).saturating_mul(amount.0),
+        s4_outgoing,
         s4_fee_microtari,
     );
     s4.extra_metrics.insert(
@@ -412,12 +454,12 @@ async fn run_mode3_send_cells(
     );
     let s5_fee_microtari = s5.verified_fee_total();
     let s5_confirmed_payments = s5.independently_confirmed_payments();
+    let s5_outgoing = u64::from(s5_confirmed_payments).checked_mul(amount.0);
     let s5_expected_balance = s5_balance_before.and_then(|before| {
-        before.checked_sub(
-            u64::from(s5_confirmed_payments)
-                .saturating_mul(amount.0)
-                .saturating_add(s5_fee_microtari),
-        )
+        s5_outgoing
+            .zip(s5_fee_microtari)
+            .and_then(|(outgoing, fee)| outgoing.checked_add(fee))
+            .and_then(|debit| before.checked_sub(debit))
     });
     if let Some(expected) = s5_expected_balance
         && let Err(error) = wait_for_pp_receiver_balance(config, &pp_db_path, expected).await
@@ -434,14 +476,14 @@ async fn run_mode3_send_cells(
         &mut s5.extra_metrics,
         s5_balance_before,
         s5_balance_after,
-        u64::from(s5_confirmed_payments).saturating_mul(amount.0),
+        s5_outgoing,
         s5_fee_microtari,
     );
     add_balance_component_metrics(
         &mut s5.extra_metrics,
         s5_components_before,
         s5_components_after,
-        u64::from(s5_confirmed_payments).saturating_mul(amount.0),
+        s5_outgoing,
         s5_fee_microtari,
     );
     s5.extra_metrics.insert(
@@ -591,10 +633,11 @@ async fn run_pp_s1_rounds(
             .chain_proofs
             .values()
             .map(|proof| proof.fee_microtari)
-            .fold(0, u64::saturating_add);
+            .try_fold(0, u64::checked_add);
         if pp_summary_complete(&round_summary) {
-            let expected_balance =
-                round_balance_before.map(|before| before.saturating_sub(observed_fees));
+            let expected_balance = round_balance_before
+                .zip(observed_fees)
+                .and_then(|(before, fees)| before.checked_sub(fees));
             if let Err(error) = wait_for_pp_receiver_round_state(
                 config,
                 &db_path,
@@ -617,7 +660,8 @@ async fn run_pp_s1_rounds(
             .map(|snapshot| snapshot.available_microtari);
         let fee_only_balance_delta_ok = round_balance_before
             .zip(round_balance_after)
-            .is_some_and(|(before, after)| before.saturating_sub(after) == observed_fees);
+            .zip(observed_fees)
+            .is_some_and(|((before, after), fees)| before.checked_sub(after) == Some(fees));
         round_summary.extra_metrics.insert(
             format!("round_{}", round.round_index),
             serde_json::json!({
@@ -1061,7 +1105,7 @@ pub(super) fn record_pp_summary(
         wall_ms: Some(summary.wall_ms),
         success_count: confirmed_batches,
         failure_count: terminal_failures,
-        fee_microtari: Some(summary.verified_fee_total()),
+        fee_microtari: summary.verified_fee_total(),
         error: summary.error_note().or_else(|| {
             (!all_verified_ok)
                 .then_some("one or more PP batches did not verify as terminal-ok".to_string())
@@ -1080,4 +1124,84 @@ pub(super) fn record_pp_summary(
     );
     notes.push(summary.note(scenario));
     cell.notes.extend(notes);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::payment_processor::{PaymentBatchSnapshot, PaymentSnapshot};
+
+    #[test]
+    fn pp_observation_queries_only_unresolved_ids_after_a_snapshot() {
+        let snapshot = PaymentProcessorDbSnapshot {
+            batches: vec![
+                PaymentBatchSnapshot {
+                    id: "confirmed".to_string(),
+                    status: "CONFIRMED".to_string(),
+                    retry_count: 0,
+                    error_message: None,
+                    has_unsigned_tx: true,
+                    has_signed_tx: true,
+                    mined_height: Some(10),
+                    chain_tx_id: None,
+                    fee_microtari: None,
+                    kernel_excess_sig_nonce: None,
+                    kernel_excess_sig: None,
+                    input_count: None,
+                    total_output_count: None,
+                    output_commitments: None,
+                },
+                PaymentBatchSnapshot {
+                    id: "failed".to_string(),
+                    status: "FAILED".to_string(),
+                    retry_count: 0,
+                    error_message: Some("rejected".to_string()),
+                    has_unsigned_tx: false,
+                    has_signed_tx: false,
+                    mined_height: None,
+                    chain_tx_id: None,
+                    fee_microtari: None,
+                    kernel_excess_sig_nonce: None,
+                    kernel_excess_sig: None,
+                    input_count: None,
+                    total_output_count: None,
+                    output_commitments: None,
+                },
+            ],
+            payments: vec![PaymentSnapshot {
+                id: "done-payment".to_string(),
+                status: "COMPLETED".to_string(),
+                payment_batch_id: Some("failed".to_string()),
+                failure_reason: None,
+            }],
+        };
+        let (batches, payments) = unresolved_pp_ids(
+            &[
+                "confirmed".to_string(),
+                "failed".to_string(),
+                "missing".to_string(),
+            ],
+            &["done-payment".to_string(), "missing-payment".to_string()],
+            Some(&snapshot),
+            &BTreeMap::from([(
+                "confirmed".to_string(),
+                PpChainProof {
+                    chain_tx_id: "chain".to_string(),
+                    amount_microtari: 100,
+                    fee_microtari: 1,
+                    mined_height: 10,
+                    tip_height: 13,
+                    confirmations: 3,
+                    min_confirmations: 3,
+                    shape: TransactionShape {
+                        input_count: 1,
+                        total_output_count: 1,
+                        output_commitments: Vec::new(),
+                    },
+                },
+            )]),
+        );
+        assert_eq!(batches, vec!["missing"]);
+        assert_eq!(payments, vec!["missing-payment"]);
+    }
 }

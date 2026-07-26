@@ -1,0 +1,9 @@
+id: no-ambiguous-success-notes
+language: Rust
+severity: error
+message: Generated notes must use typed terminal-outcome labels, never successes= wording.
+rule:
+  kind: string_literal
+  regex: successes=
+files:
+  - src/**/*.rs

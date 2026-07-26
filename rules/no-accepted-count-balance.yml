@@ -1,0 +1,10 @@
+id: no-accepted-count-balance
+language: Rust
+severity: error
+message: Balance reconciliation must derive outgoing value from confirmed observations, not success or acceptance counters.
+rule:
+  any:
+    - pattern: add_balance_reconciliation_metrics($METRICS, $BEFORE, $AFTER, u64::from($SUMMARY.success_count).checked_mul($AMOUNT), $FEE)
+    - pattern: add_balance_component_metrics($METRICS, $BEFORE, $AFTER, u64::from($SUMMARY.success_count).checked_mul($AMOUNT), $FEE)
+files:
+  - src/**/*.rs

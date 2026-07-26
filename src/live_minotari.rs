@@ -3,7 +3,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    fs::File,
     path::{Path, PathBuf},
     str::FromStr,
     time::{Duration, Instant},
@@ -139,6 +138,7 @@ pub async fn scan_wallet_db(
                     hash: hash.to_lowercase(),
                 },
                 &mut progress,
+                true,
             )
             .await?
         }
@@ -573,6 +573,7 @@ pub async fn scan_to_tip(
         scan_timeout,
         target,
         &mut progress,
+        true,
     )
     .await
 }
@@ -587,6 +588,7 @@ async fn scan_to_fixed_tip(
     scan_timeout: Duration,
     target: ChainTipSnapshot,
     progress: &mut ScanProgress,
+    require_matching_cursor_hash: bool,
 ) -> anyhow::Result<ScanToTipReport> {
     let start = std::time::Instant::now();
     let target_tip = target.height;
@@ -598,7 +600,9 @@ async fn scan_to_fixed_tip(
         );
     }
     if cursor.max_height == target_tip {
-        require_cursor_hash(&cursor, &target)?;
+        if require_matching_cursor_hash {
+            require_cursor_hash(&cursor, &target)?;
+        }
         return Ok(ScanToTipReport {
             wall_ms: start.elapsed().as_millis(),
             target_tip,
@@ -659,7 +663,9 @@ async fn scan_to_fixed_tip(
             consecutive_no_progress = 0;
         }
     }
-    require_cursor_hash(&cursor, &target)?;
+    if require_matching_cursor_hash {
+        require_cursor_hash(&cursor, &target)?;
+    }
     let canonical_hash = base_node_header_hash(base_url, target_tip).await?;
     if canonical_hash != target.hash {
         bail!(
@@ -911,14 +917,12 @@ fn record_mode1_transfer_summary(
         wall_ms: Some(summary.wall_ms),
         success_count: confirmed,
         failure_count: terminal_failures,
-        fee_microtari: Some(
-            summary
-                .tx_infos
-                .iter()
-                .filter(|tx| tx.confirmed)
-                .filter_map(|tx| tx.fee_microtari)
-                .sum(),
-        ),
+        fee_microtari: summary
+            .tx_infos
+            .iter()
+            .filter(|tx| tx.confirmed)
+            .filter_map(|tx| tx.fee_microtari)
+            .try_fold(0u64, u64::checked_add),
         error: (terminal_failures > 0)
             .then(|| summary.error_note())
             .flatten()
@@ -946,20 +950,30 @@ fn strict_s0_status(
 ) -> (CellStatus, u32, u32, Option<String>, serde_json::Value) {
     let balance_ok = available == expected;
     let count_ok = spendable_count == Some(1);
-    let ok = balance_ok && count_ok;
+    let state_ok = state_counts.as_ref().is_some_and(|counts| {
+        [
+            "pending_outputs",
+            "locked_outputs",
+            "invalid_outputs",
+            "unknown_outputs",
+        ]
+        .into_iter()
+        .all(|key| counts.get(key).and_then(serde_json::Value::as_u64) == Some(0))
+    });
+    let ok = balance_ok && count_ok && state_ok;
     let error = (!ok).then(|| {
         format!(
-            "S0 verification failed: expected exactly 1 spendable UTXO and available balance {expected} µT; observed_spendable_count={spendable_count:?} observed_available={available} µT"
+            "S0 verification failed: expected exactly 1 spendable UTXO, available balance {expected} µT, and zero pending/locked/invalid/unknown outputs; observed_spendable_count={spendable_count:?} observed_available={available} µT wallet_state_complete={state_ok}"
         )
     });
     let mut metrics = serde_json::json!({
         "verification_source": "wallet_state_observed",
         "expected_spendable_count": 1,
         "observed_spendable_count": spendable_count,
-        "pending_outputs": 0,
-        "locked_outputs": 0,
-        "invalid_outputs": 0,
-        "unknown_outputs": 0,
+        "pending_outputs": state_counts.as_ref().and_then(|v| v.get("pending_outputs")).cloned(),
+        "locked_outputs": state_counts.as_ref().and_then(|v| v.get("locked_outputs")).cloned(),
+        "invalid_outputs": state_counts.as_ref().and_then(|v| v.get("invalid_outputs")).cloned(),
+        "unknown_outputs": state_counts.as_ref().and_then(|v| v.get("unknown_outputs")).cloned(),
         "wallet_state_complete": state_counts.is_some(),
         "expected_available_microtari": expected,
         "available_microtari": available,
@@ -1009,6 +1023,7 @@ fn add_s0_funding_observation(
             "birthday_start_height": funding.and_then(|record| record.birthday_start_height),
             "construction_ms": funding.and_then(|record| record.construction_ms),
             "broadcast_to_mempool_ms": funding.and_then(|record| record.broadcast_to_mempool_ms),
+            "broadcast_to_mempool_unavailable_reason": funding.and_then(|record| record.broadcast_to_mempool_unavailable_reason.as_deref()),
             "broadcast_to_confirmed_at_c_min_ms": funding.and_then(|record| record.broadcast_to_confirmed_at_c_min_ms),
             "scenario_tip_start_height": funding.and_then(|record| record.tip_height_at_broadcast),
             "scenario_tip_end_height": funding.and_then(|record| record.tip_height_at_confirmation),
@@ -1033,9 +1048,11 @@ fn add_balance_reconciliation_metrics(
     metrics: &mut serde_json::Map<String, serde_json::Value>,
     balance_before: Option<u64>,
     balance_after: Option<u64>,
-    outgoing_microtari: u64,
-    fee_microtari: u64,
+    outgoing_microtari: impl Into<Option<u64>>,
+    fee_microtari: impl Into<Option<u64>>,
 ) {
+    let outgoing_microtari = outgoing_microtari.into();
+    let fee_microtari = fee_microtari.into();
     metrics.insert(
         "balance_before_microtari".to_string(),
         serde_json::json!(balance_before),
@@ -1048,19 +1065,37 @@ fn add_balance_reconciliation_metrics(
         "outgoing_microtari".to_string(),
         serde_json::json!(outgoing_microtari),
     );
-    if let (Some(before), Some(after)) = (balance_before, balance_after) {
-        let debit = outgoing_microtari.saturating_add(fee_microtari);
-        let expected = before.saturating_sub(debit);
-        let delta = expected as i128 - after as i128;
+    if let (Some(before), Some(after), Some(outgoing)) =
+        (balance_before, balance_after, outgoing_microtari)
+    {
+        if let Some(expected) = fee_microtari
+            .and_then(|fee| outgoing.checked_add(fee))
+            .and_then(|debit| before.checked_sub(debit))
+        {
+            let delta = i128::from(expected) - i128::from(after);
+            metrics.insert(
+                "balance_reconciliation".to_string(),
+                serde_json::json!({
+                    "expected_balance_microtari": expected,
+                    "observed_balance_microtari": after,
+                    "delta_microtari": delta,
+                    "flagged": delta != 0,
+                    "balance_domain": "available",
+                    "assumption": "expected = balance_before - confirmed outgoing - confirmed paid fees"
+                }),
+            );
+        } else {
+            metrics.insert(
+                "balance_reconciliation_unavailable_reason".to_string(),
+                serde_json::json!(
+                    "confirmed outgoing and fee exceed the observed available balance or overflow"
+                ),
+            );
+        }
+    } else {
         metrics.insert(
-            "balance_reconciliation".to_string(),
-            serde_json::json!({
-                "expected_balance_microtari": expected,
-                "observed_balance_microtari": after,
-                "delta_microtari": delta,
-                "flagged": delta != 0,
-                "assumption": "expected = balance_before - outgoing_microtari - fee_microtari"
-            }),
+            "balance_reconciliation_unavailable_reason".to_string(),
+            serde_json::json!("available balance was not observed before and after the scenario"),
         );
     }
 }
@@ -1069,14 +1104,21 @@ fn add_balance_component_metrics(
     metrics: &mut serde_json::Map<String, serde_json::Value>,
     before: Option<serde_json::Value>,
     after: Option<serde_json::Value>,
-    outgoing_microtari: u64,
-    fee_microtari: u64,
+    outgoing_microtari: impl Into<Option<u64>>,
+    fee_microtari: impl Into<Option<u64>>,
 ) {
+    let outgoing_microtari = outgoing_microtari.into();
+    let fee_microtari = fee_microtari.into();
     metrics.insert("balance_before".to_string(), serde_json::json!(before));
     metrics.insert("balance_after".to_string(), serde_json::json!(after));
     if metrics["balance_before"].is_null() || metrics["balance_after"].is_null() {
+        metrics.remove("balance_reconciliation");
         metrics.insert(
             "balance_components_unavailable_reason".to_string(),
+            serde_json::json!("wallet balance-component query failed"),
+        );
+        metrics.insert(
+            "balance_reconciliation_unavailable_reason".to_string(),
             serde_json::json!("wallet balance-component query failed"),
         );
     } else if let (Some(before), Some(after)) = (before, after)
@@ -1085,19 +1127,35 @@ fn add_balance_component_metrics(
             after.get("total").and_then(serde_json::Value::as_u64),
         )
     {
-        let expected =
-            before_total.saturating_sub(outgoing_microtari.saturating_add(fee_microtari));
-        let delta = i128::from(expected) - i128::from(after_total);
+        if let Some(expected) = outgoing_microtari
+            .and_then(|outgoing| fee_microtari.and_then(|fee| outgoing.checked_add(fee)))
+            .and_then(|debit| before_total.checked_sub(debit))
+        {
+            let delta = i128::from(expected) - i128::from(after_total);
+            metrics.insert(
+                "balance_reconciliation".to_string(),
+                serde_json::json!({
+                    "expected_balance_microtari": expected,
+                    "observed_balance_microtari": after_total,
+                    "delta_microtari": delta,
+                    "flagged": delta != 0,
+                    "balance_domain": "total",
+                    "assumption": "expected total = before total - confirmed outgoing - confirmed paid fees"
+                }),
+            );
+        } else {
+            metrics.insert(
+                "balance_reconciliation_unavailable_reason".to_string(),
+                serde_json::json!(
+                    "confirmed outgoing and fee exceed the observed total balance or overflow"
+                ),
+            );
+        }
+    } else {
+        metrics.remove("balance_reconciliation");
         metrics.insert(
-            "balance_reconciliation".to_string(),
-            serde_json::json!({
-                "expected_balance_microtari": expected,
-                "observed_balance_microtari": after_total,
-                "delta_microtari": delta,
-                "flagged": delta != 0,
-                "balance_domain": "total",
-                "assumption": "expected total = before total - confirmed outgoing - confirmed paid fees"
-            }),
+            "balance_reconciliation_unavailable_reason".to_string(),
+            serde_json::json!("total balance components were not completely observed before and after the scenario"),
         );
     }
 }
@@ -1112,6 +1170,7 @@ pub struct OneSidedSendRequest<'a> {
     pub seconds_to_lock: u64,
     pub confirmation_window: u64,
     pub request_timeout: Duration,
+    pub tip_height_at_broadcast: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -1125,6 +1184,7 @@ struct OwnedOneSidedSendRequest {
     seconds_to_lock: u64,
     confirmation_window: u64,
     request_timeout: Duration,
+    tip_height_at_broadcast: Option<u64>,
 }
 
 impl OwnedOneSidedSendRequest {
@@ -1139,6 +1199,7 @@ impl OwnedOneSidedSendRequest {
             seconds_to_lock: self.seconds_to_lock,
             confirmation_window: self.confirmation_window,
             request_timeout: self.request_timeout,
+            tip_height_at_broadcast: self.tip_height_at_broadcast,
         }
     }
 }
@@ -1319,6 +1380,7 @@ struct PpScenarioSummary {
 #[derive(Debug, Clone)]
 struct PpChainProof {
     chain_tx_id: String,
+    amount_microtari: u64,
     fee_microtari: u64,
     mined_height: u64,
     tip_height: u64,
@@ -1612,11 +1674,11 @@ impl PpScenarioSummary {
         })
     }
 
-    fn verified_fee_total(&self) -> u64 {
+    fn verified_fee_total(&self) -> Option<u64> {
         self.chain_proofs
             .values()
             .map(|proof| proof.fee_microtari)
-            .fold(0, u64::saturating_add)
+            .try_fold(0, u64::checked_add)
     }
 
     fn independently_confirmed_payments(&self) -> u32 {
@@ -1677,9 +1739,10 @@ impl PpScenarioSummary {
             }
             Err(error) => {
                 println!("mode3 PP batch {batch_index} failed: {error:#}");
+                let typed_error = error.downcast_ref::<payment_processor::PaymentProcessorError>();
                 self.tx_timings.push(serde_json::json!({
                     "batch_index": batch_index,
-                    "batch_id": null,
+                    "batch_id": typed_error.and_then(payment_processor::PaymentProcessorError::batch_id),
                     "submit_offset_ms": submit_offset_ms,
                     "construction_complete_offset_ms": construction_complete_offset_ms,
                     "api_accept_ms": construction_complete_offset_ms.saturating_sub(submit_offset_ms),
@@ -1687,7 +1750,12 @@ impl PpScenarioSummary {
                     "submission_timing_origin": "payment_processor_api_acceptance",
                     "api_accepted": false,
                     "recipients": recipients,
-                    "error": format!("{error:#}")
+                    "error": format!("{error:#}"),
+                    "http_status": typed_error.and_then(payment_processor::PaymentProcessorError::http_status),
+                    "sqlite_code": typed_error.and_then(payment_processor::PaymentProcessorError::sqlite_code),
+                    "request_id": typed_error.and_then(payment_processor::PaymentProcessorError::request_id),
+                    "failure_class": typed_error.map(payment_processor::PaymentProcessorError::failure_class),
+                    "error_body": typed_error.and_then(payment_processor::PaymentProcessorError::response_body)
                 }));
                 self.failed_batches += 1;
                 self.errors.push(format!("{error:#}"));
@@ -1774,8 +1842,15 @@ impl PpScenarioSummary {
             }
             attempts = attempts.saturating_add(1);
             let inspect_config = config.clone();
-            let batch_ids = self.batch_ids.clone();
-            let payment_ids = self.payment_ids.clone();
+            let (batch_ids, payment_ids) = mode3::unresolved_pp_ids(
+                &self.batch_ids,
+                &self.payment_ids,
+                self.db_snapshot.as_ref(),
+                &self.chain_proofs,
+            );
+            if batch_ids.is_empty() && payment_ids.is_empty() {
+                break;
+            }
             let inspected = time::timeout(
                 timeout.checked_sub(start.elapsed()).unwrap_or_default(),
                 tokio::task::spawn_blocking(move || {
@@ -1801,10 +1876,14 @@ impl PpScenarioSummary {
                         timed_out = true;
                         break;
                     };
-                    match time::timeout(remaining, verify_pp_snapshot_chain(config, &snapshot))
-                        .await
-                    {
-                        Ok(Ok(proofs)) => {
+                    let deadline = time::Instant::now() + remaining;
+                    match verify_pp_snapshot_chain(config, &snapshot, deadline).await {
+                        Ok(verification) => {
+                            self.errors
+                                .extend(verification.errors.into_iter().map(|error| {
+                                    format!("PP independent chain verification failed: {error}")
+                                }));
+                            let proofs = verification.proofs;
                             let observed_at = observation_start_offset_ms
                                 .saturating_add(start.elapsed().as_millis());
                             for batch_id in proofs.keys() {
@@ -1819,13 +1898,9 @@ impl PpScenarioSummary {
                             );
                             self.chain_proofs.extend(proofs);
                         }
-                        Ok(Err(error)) => self.errors.push(format!(
+                        Err(error) => self.errors.push(format!(
                             "PP independent chain verification failed: {error:#}"
                         )),
-                        Err(_) => {
-                            timed_out = true;
-                            break;
-                        }
                     }
                     let done =
                         pp_observation_complete(&self.batch_ids, &snapshot, &self.chain_proofs);
@@ -1902,15 +1977,17 @@ impl PpScenarioSummary {
     }
 
     fn note(&self, scenario: ScenarioName) -> String {
+        let observations = self.transaction_observations();
+        let counts = outcome_counts(&observations, self.accepted_batches);
         let mut parts = vec![
             format!(
-                "{} PP summary: attempted_batches={} attempted_payments={} accepted_batches={} accepted_payments={} failed_batches={} wall_ms={}",
+                "{} PP summary: observed_operations={} confirmed_operations={} rejected_operations={} stalled_operations={} timed_out_operations={} wall_ms={}",
                 scenario.as_str(),
-                self.attempted_batches,
-                self.attempted_payments,
-                self.accepted_batches,
-                self.accepted_payments,
-                self.failed_batches,
+                counts.attempted,
+                counts.confirmed,
+                counts.rejected,
+                counts.stalled,
+                counts.timed_out,
                 self.wall_ms
             ),
             format!("batch_ids={}", limited_list(&self.batch_ids)),
@@ -1927,24 +2004,6 @@ impl PpScenarioSummary {
         }
         if !self.errors.is_empty() {
             parts.push(format!("errors={}", limited_list(&self.errors)));
-        }
-        if !self.batch_summaries.is_empty() {
-            let batches = self
-                .batch_summaries
-                .iter()
-                .map(|batch| {
-                    format!(
-                        "configured_batch:{} attempted:{} accepted:{} accepted_payments:{} failed:{} wall_ms:{}",
-                        batch.configured_batch,
-                        batch.attempted_batches,
-                        batch.accepted_batches,
-                        batch.accepted_payments,
-                        batch.failed_batches,
-                        batch.wall_ms
-                    )
-                })
-                .collect::<Vec<_>>();
-            parts.push(format!("batches={}", batches.join("; ")));
         }
         parts.join("; ")
     }
@@ -1969,6 +2028,7 @@ impl PpScenarioSummary {
 
     fn metrics(&self, scenario: ScenarioName) -> serde_json::Value {
         let observations = self.transaction_observations();
+        let accounting = checked_observation_accounting(&observations);
         let batch_chain_identities = self
             .batch_ids
             .iter()
@@ -1993,6 +2053,9 @@ impl PpScenarioSummary {
             "payment_ids": self.payment_ids,
             "tx_timings": self.tx_timings,
             "transaction_observations": observations,
+            "proposed_fee_microtari": accounting.as_ref().map(|value| value.proposed_fee_microtari),
+            "confirmed_fee_paid_microtari": accounting.as_ref().map(|value| value.confirmed_fee_paid_microtari),
+            "unresolved_fee_exposure_microtari": accounting.as_ref().map(|value| value.unresolved_fee_exposure_microtari),
             "batch_chain_identities": batch_chain_identities,
             "outcome_counts": outcome_counts(&observations, self.accepted_batches),
             "double_selection_rejections": double_selection_rejections(&self.errors),
@@ -2042,6 +2105,15 @@ impl PpScenarioSummary {
             .map(|timing| {
                 let batch_id = timing.get("batch_id").and_then(serde_json::Value::as_str);
                 let proof = batch_id.and_then(|id| self.chain_proofs.get(id));
+                let proposed_fee = batch_id.and_then(|id| {
+                    self.db_snapshot.as_ref().and_then(|snapshot| {
+                        snapshot
+                            .batches
+                            .iter()
+                            .find(|batch| batch.id == id)
+                            .and_then(|batch| batch.fee_microtari)
+                    })
+                });
                 let mut enriched_timing = timing.clone();
                 if let Some(shape) = batch_id.and_then(|id| self.transaction_shapes.get(id))
                     && let Some(map) = enriched_timing.as_object_mut()
@@ -2073,6 +2145,11 @@ impl PpScenarioSummary {
                 let api_accepted = timing
                     .get("api_accepted")
                     .and_then(serde_json::Value::as_bool);
+                let deadline_expired = self
+                    .extra_metrics
+                    .get("db_observation_timed_out")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
                 let terminal_outcome = if proof.is_some() {
                     "confirmed"
                 } else if api_accepted == Some(false)
@@ -2088,6 +2165,8 @@ impl PpScenarioSummary {
                     .is_some_and(|status| matches!(status, "FAILED" | "CANCELLED"))
                 {
                     "rejected"
+                } else if deadline_expired {
+                    "timed_out"
                 } else {
                     "stalled"
                 };
@@ -2101,7 +2180,8 @@ impl PpScenarioSummary {
                         "payment-processor acceptance precedes worker broadcast and exposes no per-batch mempool timestamp",
                     ),
                     timing_u128(timing, "api_dispatch_to_confirmed_at_c_min_ms"),
-                    proof.map(|proof| proof.fee_microtari),
+                    proof.map(|proof| proof.fee_microtari).or(proposed_fee),
+                    proof.map(|proof| proof.amount_microtari),
                     terminal_outcome,
                     (terminal_outcome != "confirmed").then(|| {
                         timing
@@ -2118,6 +2198,8 @@ impl PpScenarioSummary {
                             })
                     }),
                     proof.map(|proof| proof.mined_height),
+                    proof.map(|proof| proof.confirmations),
+                    proof.map(|proof| proof.min_confirmations),
                     self.tip_start_height,
                     proof.map(|proof| proof.tip_height),
                 )
@@ -2143,7 +2225,7 @@ impl PpScenarioSummary {
             .chain_proofs
             .values()
             .map(|proof| proof.fee_microtari)
-            .fold(0u64, u64::saturating_add);
+            .try_fold(0u64, u64::checked_add);
         let complete = self.attempted_batches > 0
             && self.failed_batches == 0
             && self.accepted_batches == self.attempted_batches
@@ -2163,7 +2245,7 @@ impl PpScenarioSummary {
                 "complete": complete,
                 "unavailable_reason": (!complete).then_some("one or more PP batches lack independent C_min-deep proof"),
                 "fee_microtari": complete.then_some(fee_microtari),
-                "fee_per_recipient_microtari": complete.then(|| fee_per_recipient(Some(fee_microtari), self.attempted_payments)).flatten(),
+                "fee_per_recipient_microtari": complete.then(|| fee_per_recipient(fee_microtari, self.attempted_payments)).flatten(),
                 "blocks_consumed": blocks_consumed,
                 "mempool_timing_surface": "unavailable_through_payment_processor_api"
             },
@@ -2192,7 +2274,7 @@ impl PpScenarioSummary {
                             status_value: TX_MINED_CONFIRMED_STATUS,
                             mode: "payment_processor".to_string(),
                             scenario: scenario.as_str().to_string(),
-                            amount_microtari: None,
+                            amount_microtari: Some(proof.amount_microtari),
                             fee_microtari: Some(proof.fee_microtari),
                             mined_height: Some(proof.mined_height),
                             confirmations: Some(proof.confirmations),
@@ -2215,12 +2297,18 @@ impl PpScenarioSummary {
 async fn verify_pp_snapshot_chain(
     config: &Config,
     snapshot: &PaymentProcessorDbSnapshot,
-) -> anyhow::Result<BTreeMap<String, PpChainProof>> {
+    deadline: time::Instant,
+) -> anyhow::Result<PpChainVerificationResult> {
     let client = base_node_http_client()?;
-    let tip_height = base_node_tip_height_with_client(&client, &config.network.base_node_http_url)
-        .await
-        .context("reading tip for PP independent transaction verification")?;
+    let tip_height = time::timeout(
+        deadline.saturating_duration_since(time::Instant::now()),
+        base_node_tip_height_with_client(&client, &config.network.base_node_http_url),
+    )
+    .await
+    .context("PP tip request exceeded the remaining arm duration")??;
     let mut proofs = BTreeMap::new();
+    let mut errors = Vec::new();
+    let mut query_tasks = tokio::task::JoinSet::new();
     for batch in snapshot
         .batches
         .iter()
@@ -2246,37 +2334,92 @@ async fn verify_pp_snapshot_chain(
         else {
             continue;
         };
+        let amount_microtari = snapshot
+            .payments
+            .iter()
+            .filter(|payment| payment.payment_batch_id.as_deref() == Some(batch.id.as_str()))
+            .count()
+            .try_into()
+            .ok()
+            .and_then(|count: u64| {
+                parse_amount(&config.benchmark.mode3_payment_amount)
+                    .ok()
+                    .and_then(|amount| amount.0.checked_mul(count))
+            })
+            .context("PP confirmed batch amount overflowed or was unavailable")?;
         let query = Mode2KernelQuery {
             excess_sig_nonce,
             excess_sig,
             fee_microtari: Some(fee_microtari),
         };
-        let response = query_mode2_transaction(&client, &config.network.base_node_http_url, &query)
+        let batch_id = batch.id.clone();
+        let query_client = client.clone();
+        let base_node_url = config.network.base_node_http_url.clone();
+        let min_confirmations = config.benchmark.c_min;
+        query_tasks.spawn(async move {
+            let remaining = deadline.saturating_duration_since(time::Instant::now());
+            let response = time::timeout(
+                remaining,
+                query_mode2_transaction(&query_client, &base_node_url, &query),
+            )
             .await
-            .with_context(|| format!("querying PP batch {} by real kernel", batch.id))?;
-        let (_, confirmed) =
-            mode2_transaction_query_status(&response, Some(tip_height), config.benchmark.c_min);
-        let Some(mined_height) = response.mined_height.filter(|_| confirmed) else {
-            continue;
-        };
-        proofs.insert(
-            batch.id.clone(),
-            PpChainProof {
-                chain_tx_id,
-                fee_microtari,
-                mined_height,
-                tip_height,
-                confirmations: tip_height.saturating_sub(mined_height),
-                min_confirmations: config.benchmark.c_min,
-                shape: TransactionShape {
-                    input_count,
-                    total_output_count,
-                    output_commitments,
-                },
-            },
-        );
+            .with_context(|| {
+                format!("PP batch {batch_id} query exceeded the remaining arm duration")
+            })??;
+            let (_, confirmed) =
+                mode2_transaction_query_status(&response, Some(tip_height), min_confirmations);
+            let proof = response
+                .mined_height
+                .filter(|_| confirmed)
+                .map(|mined_height| PpChainProof {
+                    chain_tx_id,
+                    amount_microtari,
+                    fee_microtari,
+                    mined_height,
+                    tip_height,
+                    confirmations: tip_height.saturating_sub(mined_height),
+                    min_confirmations,
+                    shape: TransactionShape {
+                        input_count,
+                        total_output_count,
+                        output_commitments,
+                    },
+                });
+            Ok::<_, anyhow::Error>((batch_id, proof))
+        });
+        if query_tasks.len() >= 16 {
+            collect_pp_query_result(query_tasks.join_next().await, &mut proofs, &mut errors);
+        }
     }
-    Ok(proofs)
+    while let Some(joined) = query_tasks.join_next().await {
+        collect_pp_query_result(Some(joined), &mut proofs, &mut errors);
+    }
+    Ok(PpChainVerificationResult { proofs, errors })
+}
+
+#[derive(Default)]
+struct PpChainVerificationResult {
+    proofs: BTreeMap<String, PpChainProof>,
+    errors: Vec<String>,
+}
+
+type PpQueryJoinResult =
+    Option<Result<anyhow::Result<(String, Option<PpChainProof>)>, tokio::task::JoinError>>;
+
+fn collect_pp_query_result(
+    joined: PpQueryJoinResult,
+    proofs: &mut BTreeMap<String, PpChainProof>,
+    errors: &mut Vec<String>,
+) {
+    match joined {
+        Some(Ok(Ok((batch_id, Some(proof))))) => {
+            proofs.insert(batch_id, proof);
+        }
+        Some(Ok(Ok((_batch_id, None)))) => {}
+        None => {}
+        Some(Ok(Err(error))) => errors.push(format!("{error:#}")),
+        Some(Err(error)) => errors.push(format!("PP verification query task failed: {error}")),
+    }
 }
 
 fn merge_pp_snapshot(
@@ -2357,7 +2500,13 @@ impl Mode1TransferOutcome {
                 outcome.success_count += 1;
                 outcome.tx_ids.push(result.transaction_id.to_string());
                 if let Some(info) = result.transaction_info {
-                    outcome.fee_microtari = outcome.fee_microtari.saturating_add(info.fee);
+                    if let Some(total) = outcome.fee_microtari.checked_add(info.fee) {
+                        outcome.fee_microtari = total;
+                    } else {
+                        outcome
+                            .errors
+                            .push("Mode 1 proposed fee total overflowed u64".to_string());
+                    }
                 }
             } else {
                 outcome.failure_count += 1;
@@ -2378,10 +2527,18 @@ impl Mode1TransferSummary {
             .iter()
             .filter(|tx| tx.confirmed)
             .filter_map(|tx| tx.fee_microtari)
-            .fold(0u64, u64::saturating_add);
-        if verified_fee_total > self.fee_microtari {
-            self.fee_microtari = verified_fee_total;
+            .try_fold(0u64, u64::checked_add);
+        match verified_fee_total {
+            Some(total) => self.fee_microtari = total,
+            None => {
+                self.fee_microtari = 0;
+                self.errors
+                    .push("confirmed Mode 1 fee total overflowed u64".to_string());
+            }
         }
+        self.success_count = u32::try_from(self.tx_infos.iter().filter(|tx| tx.confirmed).count())
+            .unwrap_or(u32::MAX);
+        self.failure_count = self.attempted_payments.saturating_sub(self.success_count);
     }
 
     fn record_batch(
@@ -2411,14 +2568,19 @@ impl Mode1TransferSummary {
                     }
                 }
                 println!(
-                    "mode1 gRPC batch {batch_index} completed: successes={} failures={} tx_ids={}",
+                    "mode1 gRPC batch {batch_index} completed: api_accepted={} rejected={} tx_ids={}",
                     outcome.success_count,
                     outcome.failure_count,
                     limited_list(&outcome.tx_ids)
                 );
                 self.success_count = self.success_count.saturating_add(outcome.success_count);
                 self.failure_count = self.failure_count.saturating_add(outcome.failure_count);
-                self.fee_microtari = self.fee_microtari.saturating_add(outcome.fee_microtari);
+                if let Some(total) = self.fee_microtari.checked_add(outcome.fee_microtari) {
+                    self.fee_microtari = total;
+                } else {
+                    self.errors
+                        .push("Mode 1 proposed fee total overflowed u64".to_string());
+                }
                 self.tx_timings.extend(outcome.tx_timings);
                 self.tx_ids.extend(outcome.tx_ids);
                 self.errors.extend(outcome.errors);
@@ -2463,7 +2625,12 @@ impl Mode1TransferSummary {
             .saturating_add(batch.attempted_payments);
         self.success_count = self.success_count.saturating_add(batch.success_count);
         self.failure_count = self.failure_count.saturating_add(batch.failure_count);
-        self.fee_microtari = self.fee_microtari.saturating_add(batch.fee_microtari);
+        if let Some(total) = self.fee_microtari.checked_add(batch.fee_microtari) {
+            self.fee_microtari = total;
+        } else {
+            self.errors
+                .push("Mode 1 batch fee total overflowed u64".to_string());
+        }
         let batch_tx_ids = batch.tx_ids.clone();
         self.tx_ids.extend(batch.tx_ids);
         self.errors.extend(batch.errors);
@@ -2488,12 +2655,10 @@ impl Mode1TransferSummary {
     fn note(&self, scenario: ScenarioName) -> String {
         let mut parts = vec![
             format!(
-                "{} console gRPC summary: attempted_batches={} attempted_payments={} successes={} failures={} wall_ms={} fee_microtari={}",
+                "{} console gRPC summary: attempted_batches={} attempted_payments={} wall_ms={} confirmed_fee_paid_microtari={}",
                 scenario.as_str(),
                 self.attempted_batches,
                 self.attempted_payments,
-                self.success_count,
-                self.failure_count,
                 self.wall_ms,
                 self.fee_microtari
             ),
@@ -2509,12 +2674,10 @@ impl Mode1TransferSummary {
                 .iter()
                 .map(|batch| {
                     format!(
-                        "configured_batch:{} attempted_batches:{} attempted_payments:{} successes:{} failures:{} wall_ms:{}",
+                        "configured_batch:{} attempted_batches:{} attempted_payments:{} wall_ms:{}",
                         batch.configured_batch,
                         batch.attempted_batches,
                         batch.attempted_payments,
-                        batch.success_count,
-                        batch.failure_count,
                         batch.wall_ms
                     )
                 })
@@ -2526,12 +2689,12 @@ impl Mode1TransferSummary {
 
     fn metrics(&self, scenario: ScenarioName) -> serde_json::Value {
         let mut metrics = serde_json::Map::new();
-        let confirmed_fee_paid_microtari: u64 = self
+        let confirmed_fee_paid_microtari = self
             .tx_infos
             .iter()
             .filter(|tx| tx.confirmed)
             .filter_map(|tx| tx.fee_microtari)
-            .sum();
+            .try_fold(0u64, u64::checked_add);
         metrics.insert(
             "proposed_fee_microtari".to_string(),
             serde_json::json!(self.fee_microtari),
@@ -2541,6 +2704,15 @@ impl Mode1TransferSummary {
             serde_json::json!(confirmed_fee_paid_microtari),
         );
         let observations = self.transaction_observations(scenario);
+        let unresolved_fee_exposure_microtari = observations
+            .iter()
+            .filter(|observation| observation["fee_disposition"] == "proposed_unresolved")
+            .filter_map(|observation| observation["fee_microtari"].as_u64())
+            .try_fold(0u64, u64::checked_add);
+        metrics.insert(
+            "unresolved_fee_exposure_microtari".to_string(),
+            serde_json::json!(unresolved_fee_exposure_microtari),
+        );
         metrics.insert(
             "attempted_batches".to_string(),
             serde_json::json!(self.attempted_batches),
@@ -2647,7 +2819,12 @@ impl Mode1TransferSummary {
                     None,
                     Some("console-wallet gRPC does not expose a per-transaction mempool timestamp"),
                     timing_u128(timing, "dispatch_to_confirmed_at_c_min_ms"),
-                    verified.and_then(|tx| tx.fee_microtari),
+                    verified.and_then(|tx| tx.fee_microtari).or_else(|| {
+                        timing
+                            .get("fee_microtari")
+                            .and_then(serde_json::Value::as_u64)
+                    }),
+                    verified.and_then(|tx| tx.amount_microtari),
                     if confirmed {
                         "confirmed"
                     } else if timing.get("error").is_some() {
@@ -2666,6 +2843,8 @@ impl Mode1TransferSummary {
                             })
                     }),
                     verified.and_then(|tx| tx.mined_height),
+                    verified.and_then(|tx| tx.confirmations),
+                    verified.and_then(|tx| tx.min_confirmations),
                     self.tip_start_height,
                     verified.and_then(|tx| tx.tip_height),
                 )
@@ -2755,6 +2934,7 @@ impl ScenarioSendSummary {
                     "submit_offset_ms": submit_offset_ms,
                     "construction_complete_offset_ms": construction_complete_offset_ms,
                     "construction_ms": outcome.construction_ms,
+                    "fee_microtari": outcome.fee_microtari,
                     "construction_timing_origin": "library_build_and_sign",
                     "broadcast_to_mempool_ms": outcome.broadcast_to_mempool_ms,
                     "broadcast_start_offset_ms": outcome.broadcast_start_offset_ms.map(|offset| submit_offset_ms.saturating_add(offset)),
@@ -2767,7 +2947,12 @@ impl ScenarioSendSummary {
                 }));
                 if outcome.accepted {
                     self.success_count += 1;
-                    self.fee_microtari = self.fee_microtari.saturating_add(outcome.fee_microtari);
+                    if let Some(total) = self.fee_microtari.checked_add(outcome.fee_microtari) {
+                        self.fee_microtari = total;
+                    } else {
+                        self.errors
+                            .push("Mode 2 proposed fee total overflowed u64".to_string());
+                    }
                     self.tx_ids.push(outcome.tx_id);
                 } else {
                     self.failure_count += 1;
@@ -2816,7 +3001,12 @@ impl ScenarioSendSummary {
         self.attempted = self.attempted.saturating_add(batch.attempted);
         self.success_count = self.success_count.saturating_add(batch.success_count);
         self.failure_count = self.failure_count.saturating_add(batch.failure_count);
-        self.fee_microtari = self.fee_microtari.saturating_add(batch.fee_microtari);
+        if let Some(total) = self.fee_microtari.checked_add(batch.fee_microtari) {
+            self.fee_microtari = total;
+        } else {
+            self.errors
+                .push("Mode 2 batch fee total overflowed u64".to_string());
+        }
         self.tx_ids.extend(batch.tx_ids);
         self.errors.extend(batch.errors);
         self.tx_timings.extend(batch.tx_timings);
@@ -2842,8 +3032,23 @@ impl ScenarioSendSummary {
             .iter()
             .filter(|tx| tx.confirmed)
             .filter_map(|tx| tx.fee_microtari)
-            .sum::<u64>();
-        self.fee_microtari = self.fee_microtari.max(verified_fee_total);
+            .try_fold(0u64, u64::checked_add);
+        match verified_fee_total {
+            Some(total) => self.fee_microtari = total,
+            None => {
+                self.fee_microtari = 0;
+                self.errors
+                    .push("confirmed Mode 2 fee total overflowed u64".to_string());
+            }
+        }
+        self.success_count = u32::try_from(
+            verification
+                .observed_transactions
+                .iter()
+                .filter(|transaction| transaction.confirmed)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
         self.tx_infos = verification.observed_transactions;
         self.confirmation_observed_offsets_ms = verification.confirmation_observed_offsets_ms;
         self.transaction_shapes = verification.transaction_shapes;
@@ -2864,11 +3069,9 @@ impl ScenarioSendSummary {
     fn note(&self, scenario: ScenarioName) -> String {
         let mut parts = vec![
             format!(
-                "{} summary: attempted={} successes={} failures={} wall_ms={} fee_microtari={}",
+                "{} summary: attempted={} wall_ms={} confirmed_fee_paid_microtari={}",
                 scenario.as_str(),
                 self.attempted,
-                self.success_count,
-                self.failure_count,
                 self.wall_ms,
                 self.fee_microtari
             ),
@@ -2884,12 +3087,8 @@ impl ScenarioSendSummary {
                 .iter()
                 .map(|batch| {
                     format!(
-                        "configured_batch:{} attempted:{} successes:{} failures:{} wall_ms:{}",
-                        batch.configured_batch,
-                        batch.attempted,
-                        batch.success_count,
-                        batch.failure_count,
-                        batch.wall_ms
+                        "configured_batch:{} attempted:{} wall_ms:{}",
+                        batch.configured_batch, batch.attempted, batch.wall_ms
                     )
                 })
                 .collect::<Vec<_>>();
@@ -2909,6 +3108,7 @@ impl ScenarioSendSummary {
     fn metrics(&self, scenario: ScenarioName) -> serde_json::Value {
         let mut metrics = serde_json::Map::new();
         let observations = self.transaction_observations(scenario);
+        let accounting = checked_observation_accounting(&observations);
         metrics.insert("scenario".to_string(), serde_json::json!(scenario.as_str()));
         metrics.insert(
             "verification_source".to_string(),
@@ -2924,6 +3124,30 @@ impl ScenarioSendSummary {
         metrics.insert(
             "transaction_observations".to_string(),
             serde_json::Value::Array(observations.clone()),
+        );
+        metrics.insert(
+            "proposed_fee_microtari".to_string(),
+            serde_json::json!(
+                accounting
+                    .as_ref()
+                    .map(|value| value.proposed_fee_microtari)
+            ),
+        );
+        metrics.insert(
+            "confirmed_fee_paid_microtari".to_string(),
+            serde_json::json!(
+                accounting
+                    .as_ref()
+                    .map(|value| value.confirmed_fee_paid_microtari)
+            ),
+        );
+        metrics.insert(
+            "unresolved_fee_exposure_microtari".to_string(),
+            serde_json::json!(
+                accounting
+                    .as_ref()
+                    .map(|value| value.unresolved_fee_exposure_microtari)
+            ),
         );
         metrics.insert(
             "outcome_counts".to_string(),
@@ -3050,6 +3274,7 @@ impl ScenarioSendSummary {
                             .get("fee_microtari")
                             .and_then(serde_json::Value::as_u64)
                     }),
+                    verified.and_then(|tx| tx.amount_microtari),
                     terminal_outcome,
                     rejection.or(timing_error).or_else(|| {
                         (!confirmed).then(|| {
@@ -3058,6 +3283,8 @@ impl ScenarioSendSummary {
                         })
                     }),
                     verified.and_then(|tx| tx.mined_height),
+                    verified.and_then(|tx| tx.confirmations),
+                    verified.and_then(|tx| tx.min_confirmations),
                     self.tip_start_height,
                     verified.and_then(|tx| tx.tip_height),
                 )
@@ -3129,34 +3356,130 @@ fn compact_json(value: &serde_json::Value, limit: usize) -> String {
 
 #[cfg(test)]
 mod compact_json_tests {
-    use super::compact_json;
+    use super::{checked_observation_accounting, compact_json, outcome_note};
 
     #[test]
     fn compact_json_truncates_unicode_on_character_boundary() {
         let rendered = compact_json(&serde_json::json!("ééé"), 3);
         assert_eq!(rendered, "\"é...<truncated>");
     }
+
+    #[test]
+    fn accounting_keeps_confirmed_and_unresolved_fees_separate() {
+        let observations = vec![
+            serde_json::json!({
+                "terminal_outcome": "confirmed", "fee_disposition": "confirmed_paid",
+                "fee_microtari": 83300, "amount_microtari": 100
+            }),
+            serde_json::json!({
+                "terminal_outcome": "timed_out", "fee_disposition": "proposed_unresolved",
+                "fee_microtari": 90300, "amount_microtari": 100
+            }),
+            serde_json::json!({
+                "terminal_outcome": "rejected", "fee_disposition": "rejected",
+                "fee_microtari": 700, "amount_microtari": 100
+            }),
+        ];
+        let totals = checked_observation_accounting(&observations).unwrap();
+        assert_eq!(totals.confirmed_fee_paid_microtari, 83300);
+        assert_eq!(totals.unresolved_fee_exposure_microtari, 90300);
+        assert_eq!(totals.confirmed_outgoing_microtari, 100);
+        let ambiguous_label = ["successes", "="].concat();
+        assert!(!outcome_note(&observations).contains(&ambiguous_label));
+    }
+
+    #[test]
+    fn accounting_rejects_missing_fee_for_unresolved_observation() {
+        let observations = vec![serde_json::json!({
+            "terminal_outcome": "timed_out",
+            "fee_disposition": "proposed_unresolved"
+        })];
+        assert!(checked_observation_accounting(&observations).is_none());
+    }
+
+    #[test]
+    fn mode2_historical_partial_shape_accounts_only_confirmed_debits() {
+        let mut observations = Vec::new();
+        observations.extend((0..119).map(|_| {
+            serde_json::json!({
+                "terminal_outcome": "confirmed",
+                "fee_disposition": "confirmed_paid",
+                "fee_microtari": 700,
+                "amount_microtari": 1_000_000
+            })
+        }));
+        observations.extend((0..129).map(|_| {
+            serde_json::json!({
+                "terminal_outcome": "timed_out",
+                "fee_disposition": "proposed_unresolved",
+                "fee_microtari": 700,
+                "amount_microtari": 1_000_000
+            })
+        }));
+
+        let totals = checked_observation_accounting(&observations).unwrap();
+        assert_eq!(totals.confirmed_fee_paid_microtari, 83_300);
+        assert_eq!(totals.unresolved_fee_exposure_microtari, 90_300);
+        assert_eq!(totals.confirmed_outgoing_microtari, 119_000_000);
+    }
 }
 
-fn outcome_counts(observations: &[serde_json::Value], accepted: u32) -> OutcomeCounts {
-    let mut counts = OutcomeCounts {
-        attempted: u32::try_from(observations.len()).unwrap_or(u32::MAX),
-        accepted,
-        ..OutcomeCounts::default()
-    };
-    for observation in observations {
-        match observation
-            .get("terminal_outcome")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("confirmed") => counts.confirmed = counts.confirmed.saturating_add(1),
-            Some("rejected") => counts.rejected = counts.rejected.saturating_add(1),
-            Some("stalled") => counts.stalled = counts.stalled.saturating_add(1),
-            Some("timed_out") => counts.timed_out = counts.timed_out.saturating_add(1),
-            _ => {}
-        }
-    }
-    counts
+fn outcome_counts(observations: &[serde_json::Value], _accepted: u32) -> OutcomeCounts {
+    OutcomeCounts::from_json_observations(observations)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ObservationAccounting {
+    confirmed_fee_paid_microtari: u64,
+    proposed_fee_microtari: u64,
+    unresolved_fee_exposure_microtari: u64,
+    confirmed_outgoing_microtari: u64,
+}
+
+fn checked_observation_accounting(
+    observations: &[serde_json::Value],
+) -> Option<ObservationAccounting> {
+    observations.iter().try_fold(
+        ObservationAccounting::default(),
+        |mut totals, observation| {
+            let fee = observation
+                .get("fee_microtari")
+                .and_then(serde_json::Value::as_u64);
+            match observation["fee_disposition"].as_str() {
+                Some("confirmed_paid") => {
+                    totals.confirmed_fee_paid_microtari =
+                        totals.confirmed_fee_paid_microtari.checked_add(fee?)?;
+                }
+                Some("proposed_unresolved") => {
+                    let fee = fee?;
+                    totals.proposed_fee_microtari =
+                        totals.proposed_fee_microtari.checked_add(fee)?;
+                    totals.unresolved_fee_exposure_microtari =
+                        totals.unresolved_fee_exposure_microtari.checked_add(fee)?;
+                }
+                Some("rejected" | "unavailable") => {}
+                _ => return None,
+            }
+            if observation["terminal_outcome"] == "confirmed" {
+                totals.confirmed_outgoing_microtari =
+                    totals.confirmed_outgoing_microtari.checked_add(
+                        observation
+                            .get("amount_microtari")
+                            .and_then(serde_json::Value::as_u64)?,
+                    )?;
+            }
+            Some(totals)
+        },
+    )
+}
+
+fn confirmed_outgoing_microtari(transactions: &[VerifiedTransaction]) -> Option<u64> {
+    transactions
+        .iter()
+        .filter(|transaction| transaction.confirmed)
+        .try_fold(0u64, |total, transaction| {
+            total.checked_add(transaction.amount_microtari?)
+        })
 }
 
 fn outcome_note(observations: &[serde_json::Value]) -> String {
@@ -3181,9 +3504,12 @@ fn transaction_observation(
     mempool_reason: Option<&str>,
     confirmation_ms: Option<u128>,
     fee_microtari: Option<u64>,
+    amount_microtari: Option<u64>,
     terminal_outcome: &str,
     error: Option<String>,
     mined_height: Option<u64>,
+    confirmations: Option<u64>,
+    min_confirmations: Option<u64>,
     tip_start_height: Option<u64>,
     tip_end_height: Option<u64>,
 ) -> serde_json::Value {
@@ -3206,6 +3532,8 @@ fn transaction_observation(
         .and_then(|value| u16::try_from(value).ok());
     let failure_class = if terminal_outcome == TerminalOutcome::Confirmed {
         None
+    } else if let Some(value) = timing.and_then(|value| value.get("failure_class")) {
+        serde_json::from_value(value.clone()).ok()
     } else if http_status.is_some() {
         Some(ObservationFailureClass::HttpResponse)
     } else if terminal_outcome == TerminalOutcome::TimedOut {
@@ -3219,6 +3547,7 @@ fn transaction_observation(
         transaction_id: transaction_id.map(ToString::to_string),
         attempt_index: timing.and_then(|value| value.get("attempt")).and_then(serde_json::Value::as_u64).and_then(|value| u32::try_from(value).ok()),
         batch_index: timing.and_then(|value| value.get("batch_index")).and_then(serde_json::Value::as_u64).and_then(|value| u32::try_from(value).ok()),
+        batch_id: timing.and_then(|value| value.get("batch_id")).and_then(serde_json::Value::as_str).map(ToString::to_string),
         submit_offset_ms: timing_u128_opt(timing, "submit_offset_ms"),
         construction_complete_offset_ms: timing_u128_opt(timing, "construction_complete_offset_ms"),
         broadcast_start_offset_ms: timing_u128_opt(timing, "broadcast_start_offset_ms"),
@@ -3249,6 +3578,7 @@ fn transaction_observation(
             "per-transaction C_min timestamp was not observed; scenario wall time is not substituted"
                 .to_string(),
         ),
+        amount_microtari,
         fee_microtari,
         fee_unavailable_reason: fee_microtari.is_none().then_some(
             "transaction did not have an independently verified on-chain fee".to_string(),
@@ -3276,6 +3606,8 @@ fn transaction_observation(
         terminal_outcome,
         error,
         mined_height,
+        confirmations,
+        min_confirmations,
         tip_start_height,
         tip_end_height,
         input_count: timing_u32_opt(timing, "input_count"),
@@ -3403,7 +3735,13 @@ async fn construct_sign_broadcast_one_sided_recipient_amounts(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let amount = recipients.iter().map(|recipient| recipient.amount).sum();
+    let amount = MicroMinotari(
+        recipients
+            .iter()
+            .map(|recipient| recipient.amount.0)
+            .try_fold(0u64, u64::checked_add)
+            .context("multi-recipient amount overflowed u64")?,
+    );
     let idempotency_key = uuid_like_idempotency();
     let locked_funds = FundLocker::new(pool.clone()).lock(
         account.id,
@@ -3500,7 +3838,13 @@ async fn construct_sign_broadcast_exact_split_owned(
             payment_id: None,
         })
         .collect::<Vec<_>>();
-    let amount = recipients.iter().map(|recipient| recipient.amount).sum();
+    let amount = MicroMinotari(
+        recipients
+            .iter()
+            .map(|recipient| recipient.amount.0)
+            .try_fold(0u64, u64::checked_add)
+            .context("exact-split amount overflowed u64")?,
+    );
     let idempotency_key = uuid_like_idempotency();
     let locked_funds = FundLocker::new(pool.clone()).lock_specific_output(
         account.id,
@@ -3588,6 +3932,7 @@ pub async fn fund_one_sided_outputs(
         seconds_to_lock: config.timeouts.transaction_lock_secs,
         confirmation_window: config.benchmark.c_min,
         request_timeout: Duration::from_secs(30),
+        tip_height_at_broadcast: None,
     };
 
     if recipients.len() > 1 {
@@ -3680,10 +4025,13 @@ where
         seconds_to_lock: config.timeouts.transaction_lock_secs,
         confirmation_window: config.benchmark.c_min,
         request_timeout: Duration::from_secs(30),
+        tip_height_at_broadcast: None,
     };
-    let tip_height_at_broadcast = base_node_tip_height(&config.network.base_node_http_url)
-        .await
-        .ok();
+    let tip_height_at_broadcast = base_node_tip_height(&config.network.base_node_http_url).await?;
+    let request = OwnedOneSidedSendRequest {
+        tip_height_at_broadcast: Some(tip_height_at_broadcast),
+        ..request
+    };
     let outcome =
         construct_sign_broadcast_one_sided_multi_recipient_owned(request, recipients.to_vec())
             .await?;
@@ -3700,8 +4048,9 @@ where
             .context("S0 funding did not record the broadcast start instant")?,
         fee_microtari: outcome.fee_microtari,
         construction_ms: outcome.construction_ms,
-        broadcast_to_mempool_ms,
-        tip_height_at_broadcast,
+        broadcast_to_mempool_ms: Some(broadcast_to_mempool_ms),
+        broadcast_to_mempool_unavailable_reason: None,
+        tip_height_at_broadcast: Some(tip_height_at_broadcast),
     };
     on_broadcast(&submission)?;
     Ok(submission)
@@ -3753,6 +4102,9 @@ pub async fn observe_s0_funding(
         fee_microtari,
         construction_ms: submission.construction_ms,
         broadcast_to_mempool_ms: submission.broadcast_to_mempool_ms,
+        broadcast_to_mempool_unavailable_reason: submission
+            .broadcast_to_mempool_unavailable_reason
+            .clone(),
         broadcast_to_confirmed_at_c_min_ms: chrono::Utc::now()
             .signed_duration_since(submission.broadcasted_at)
             .num_milliseconds()
@@ -3850,15 +4202,12 @@ pub async fn refresh_library_wallets_to_tip(config: &Config) -> anyhow::Result<(
     Ok(())
 }
 
-pub async fn initialize_s0_wallets(
-    config: &Config,
-    book: &AddressBook,
-) -> anyhow::Result<(u16, u64)> {
+pub async fn plan_s0_wallet_initialization(config: &Config) -> anyhow::Result<(u16, u64)> {
     let birthday = current_birthday();
     let birthday_timestamp = u64::from(birthday.saturating_sub(2))
         .saturating_mul(24 * 60 * 60)
         .saturating_add(1_640_995_200);
-    let birthday_start_height: u64 = base_node_http_client()?
+    let birthday_start_height = base_node_http_client()?
         .get(format!(
             "{}/get_height_at_time?time={birthday_timestamp}",
             config.network.base_node_http_url.trim_end_matches('/')
@@ -3868,6 +4217,32 @@ pub async fn initialize_s0_wallets(
         .error_for_status()?
         .json()
         .await?;
+    Ok((birthday, birthday_start_height))
+}
+
+pub fn require_fresh_s0_wallet_paths(config: &Config) -> anyhow::Result<()> {
+    let old_db = old_wallet_base_path(config).join("esmeralda/data/wallet/db/console_wallet.db");
+    let pp_db = payment_processor::payment_receiver_db_path(config);
+    for (label, path) in [
+        ("old_wallet", old_db.as_path()),
+        ("new_wallet", config.modes.new_wallet_database.as_path()),
+        ("payment_processor", pp_db.as_path()),
+    ] {
+        if path.exists() {
+            bail!(
+                "S0 requires a fresh wallet data dir; {label} DB already exists at {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+pub async fn initialize_s0_wallets(
+    config: &Config,
+    book: &AddressBook,
+    birthday: u16,
+) -> anyhow::Result<()> {
     let old = book
         .addresses
         .get(WalletRole::OldWallet.label())
@@ -3880,21 +4255,8 @@ pub async fn initialize_s0_wallets(
         .addresses
         .get(WalletRole::PaymentProcessor.label())
         .context("payment processor seed missing")?;
-    let old_db = old_wallet_base_path(config).join("esmeralda/data/wallet/db/console_wallet.db");
     let new_db = config.modes.new_wallet_database.clone();
     let pp_db = payment_processor::payment_receiver_db_path(config);
-    for (label, path) in [
-        ("old_wallet", &old_db),
-        ("new_wallet", &new_db),
-        ("payment_processor", &pp_db),
-    ] {
-        if path.exists() {
-            bail!(
-                "S0 requires a fresh wallet data dir; {label} DB already exists at {}",
-                path.display()
-            );
-        }
-    }
     let password_env = &config.seeds.wallet_password_env;
     ensure_signing_wallet(
         &new_db,
@@ -3920,7 +4282,7 @@ pub async fn initialize_s0_wallets(
     if !mode1_address_matches_seed(&actual, old)? {
         bail!("S0 old-wallet initialization produced the wrong address");
     }
-    Ok((birthday, birthday_start_height))
+    Ok(())
 }
 
 async fn finalize_transaction_and_broadcast_without_retry(
@@ -3958,7 +4320,8 @@ async fn finalize_signed_transaction_and_broadcast_without_retry(
         .kernels()
         .iter()
         .map(|kernel| kernel.fee.0)
-        .sum();
+        .try_fold(0u64, u64::checked_add)
+        .context("signed transaction fee total overflowed u64")?;
     let broadcast_start_offset_ms =
         construction_ms.saturating_add(finalize_start.elapsed().as_millis());
     let broadcasted_at = chrono::Utc::now();
@@ -3969,6 +4332,7 @@ async fn finalize_signed_transaction_and_broadcast_without_retry(
         construction_ms,
         broadcast_start_offset_ms,
         broadcasted_at,
+        request.tip_height_at_broadcast,
         &signed.signed_transaction.transaction,
     )?;
     let broadcast_start = Instant::now();
@@ -3984,6 +4348,11 @@ async fn finalize_signed_transaction_and_broadcast_without_retry(
     match submission {
         Ok(response) if response.accepted => {
             db::mark_completed_transaction_as_broadcasted(&conn, tx_id, 1)?;
+            mark_prepared_transaction_checkpoint_accepted(
+                request.db_path,
+                &tx_id.to_string(),
+                broadcast_to_mempool_ms,
+            )?;
             Ok(OneSidedSendOutcome {
                 tx_id: tx_id.to_string(),
                 fee_microtari,
@@ -4012,12 +4381,13 @@ async fn finalize_signed_transaction_and_broadcast_without_retry(
             })
         }
         Ok(response) => {
-            db::mark_completed_transaction_as_rejected(
-                &conn,
-                tx_id,
-                &response.rejection_reason.to_string(),
+            let rejection_reason = response.rejection_reason.to_string();
+            db::mark_completed_transaction_as_rejected(&conn, tx_id, &rejection_reason)?;
+            mark_prepared_transaction_checkpoint_rejected(
+                request.db_path,
+                &tx_id.to_string(),
+                &rejection_reason,
             )?;
-            remove_prepared_transaction_checkpoint(request.db_path)?;
             anyhow::bail!(
                 "transaction was not accepted by the network: {}",
                 response.rejection_reason
@@ -4027,19 +4397,26 @@ async fn finalize_signed_transaction_and_broadcast_without_retry(
     }
 }
 
-fn remove_prepared_transaction_checkpoint(db_path: &Path) -> anyhow::Result<()> {
-    let path = db_path.with_extension("prepared-transaction.json");
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
+pub fn remove_prepared_transaction_checkpoint(db_path: &Path) -> anyhow::Result<()> {
+    for path in prepared_transaction_checkpoint_paths(db_path)? {
+        crate::result_profile::durable_remove_file(&path)?;
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub enum PreparedTransactionRecovery {
+    NoCheckpoint,
+    RejectedCheckpointReconciled,
+    RecoveredConfirmedTransaction(crate::result_profile::S0FundingSubmissionEvidence),
+    RecoveredAcceptedPendingConfirmation(crate::result_profile::S0FundingSubmissionEvidence),
 }
 
 fn checkpoint_recovery_submission_allowed(status: &str) -> bool {
     status != "rejected"
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_prepared_transaction_checkpoint(
     db_path: &Path,
     tx_id: u64,
@@ -4047,9 +4424,10 @@ fn persist_prepared_transaction_checkpoint(
     construction_ms: u128,
     broadcast_start_offset_ms: u128,
     prepared_at: chrono::DateTime<chrono::Utc>,
+    tip_height_at_broadcast: Option<u64>,
     transaction: &Transaction,
 ) -> anyhow::Result<()> {
-    let path = db_path.with_extension("prepared-transaction.json");
+    let path = prepared_transaction_checkpoint_path(db_path, &tx_id.to_string())?;
     let checkpoint = PreparedTransactionCheckpoint {
         schema_version: 1,
         state: "prepared_before_network_submission".to_string(),
@@ -4057,27 +4435,59 @@ fn persist_prepared_transaction_checkpoint(
         fee_microtari,
         construction_ms,
         broadcast_start_offset_ms,
+        broadcast_to_mempool_ms: None,
+        rejection_reason: None,
         prepared_at,
+        tip_height_at_broadcast,
         serialized_transaction: transaction.clone(),
     };
-    let temporary = path.with_extension("tmp");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let mut bytes = serde_json::to_vec_pretty(&checkpoint)?;
     bytes.push(b'\n');
-    let mut file = File::create(&temporary)?;
-    std::io::Write::write_all(&mut file, &bytes)?;
-    file.sync_all()
-        .context("syncing prepared transaction checkpoint")?;
-    fs::rename(&temporary, &path)?;
-    if let Some(parent) = path.parent() {
-        File::open(parent)
-            .context("opening checkpoint directory")?
-            .sync_all()
-            .context("syncing checkpoint directory")?;
-    }
-    Ok(())
+    crate::result_profile::durable_atomic_write(&path, &bytes)
+}
+
+fn mark_prepared_transaction_checkpoint_accepted(
+    db_path: &Path,
+    tx_id: &str,
+    broadcast_to_mempool_ms: u128,
+) -> anyhow::Result<()> {
+    let path = prepared_transaction_checkpoint_path(db_path, tx_id)?;
+    mark_prepared_transaction_checkpoint_accepted_at(&path, broadcast_to_mempool_ms)
+}
+
+fn mark_prepared_transaction_checkpoint_accepted_at(
+    path: &Path,
+    broadcast_to_mempool_ms: u128,
+) -> anyhow::Result<()> {
+    let mut checkpoint = load_prepared_transaction_checkpoint_at(path)?
+        .context("prepared transaction checkpoint disappeared before acceptance persistence")?;
+    checkpoint.state = "network_accepted".to_string();
+    checkpoint.broadcast_to_mempool_ms = Some(broadcast_to_mempool_ms);
+    let mut bytes = serde_json::to_vec_pretty(&checkpoint)?;
+    bytes.push(b'\n');
+    crate::result_profile::durable_atomic_write(path, &bytes)
+}
+
+fn mark_prepared_transaction_checkpoint_rejected(
+    db_path: &Path,
+    tx_id: &str,
+    rejection_reason: &str,
+) -> anyhow::Result<()> {
+    let path = prepared_transaction_checkpoint_path(db_path, tx_id)?;
+    mark_prepared_transaction_checkpoint_rejected_at(&path, rejection_reason)
+}
+
+fn mark_prepared_transaction_checkpoint_rejected_at(
+    path: &Path,
+    rejection_reason: &str,
+) -> anyhow::Result<()> {
+    let mut checkpoint = load_prepared_transaction_checkpoint_at(path)?
+        .context("prepared transaction checkpoint disappeared before rejection persistence")?;
+    checkpoint.state = "network_rejected".to_string();
+    checkpoint.rejection_reason = Some(rejection_reason.to_string());
+    let mut bytes = serde_json::to_vec_pretty(&checkpoint)?;
+    bytes.push(b'\n');
+    crate::result_profile::durable_atomic_write(path, &bytes)
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -4088,23 +4498,70 @@ struct PreparedTransactionCheckpoint {
     fee_microtari: u64,
     construction_ms: u128,
     broadcast_start_offset_ms: u128,
+    #[serde(default)]
+    broadcast_to_mempool_ms: Option<u128>,
+    #[serde(default)]
+    rejection_reason: Option<String>,
     prepared_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    tip_height_at_broadcast: Option<u64>,
     serialized_transaction: Transaction,
 }
 
-fn load_prepared_transaction_checkpoint(
-    db_path: &Path,
+fn prepared_transaction_checkpoint_path(db_path: &Path, tx_id: &str) -> anyhow::Result<PathBuf> {
+    let file_name = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("wallet DB path has no UTF-8 file name")?;
+    Ok(db_path.with_file_name(format!("{file_name}.{tx_id}.prepared-transaction.json")))
+}
+
+fn prepared_transaction_checkpoint_paths(db_path: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let legacy = db_path.with_extension("prepared-transaction.json");
+    if legacy.exists() {
+        paths.push(legacy);
+    }
+    let parent = db_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        return Ok(paths);
+    }
+    let file_name = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("wallet DB path has no UTF-8 file name")?;
+    let prefix = format!("{file_name}.");
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && name.ends_with(".prepared-transaction.json") {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn load_prepared_transaction_checkpoint_at(
+    path: &Path,
 ) -> anyhow::Result<Option<PreparedTransactionCheckpoint>> {
-    let path = db_path.with_extension("prepared-transaction.json");
     if !path.exists() {
         return Ok(None);
     }
     let checkpoint: PreparedTransactionCheckpoint = serde_json::from_slice(
-        &fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+        &fs::read(path).with_context(|| format!("reading {}", path.display()))?,
     )
     .with_context(|| format!("decoding {}", path.display()))?;
     if checkpoint.schema_version != 1
-        || checkpoint.state != "prepared_before_network_submission"
+        || !matches!(
+            checkpoint.state.as_str(),
+            "prepared_before_network_submission" | "network_accepted" | "network_rejected"
+        )
         || checkpoint.tx_id.is_empty()
         || checkpoint
             .serialized_transaction
@@ -4125,27 +4582,108 @@ pub async fn recover_prepared_transaction_checkpoint(
     base_node_url: &str,
     timeout: Duration,
     required_depth: u64,
-) -> anyhow::Result<bool> {
-    let Some(checkpoint) = load_prepared_transaction_checkpoint(db_path)? else {
-        return Ok(false);
-    };
+) -> anyhow::Result<PreparedTransactionRecovery> {
+    let paths = prepared_transaction_checkpoint_paths(db_path)?;
+    if paths.is_empty() {
+        return Ok(PreparedTransactionRecovery::NoCheckpoint);
+    }
+    if paths.len() != 1 {
+        bail!(
+            "expected one prepared transaction checkpoint for {}, found {}",
+            db_path.display(),
+            paths.len()
+        );
+    }
+    recover_prepared_transaction_checkpoint_at(
+        db_path,
+        &paths[0],
+        base_node_url,
+        timeout,
+        required_depth,
+    )
+    .await
+}
+
+pub async fn recover_prepared_transaction_checkpoints(
+    db_path: &Path,
+    base_node_url: &str,
+    timeout: Duration,
+    required_depth: u64,
+) -> anyhow::Result<Vec<PreparedTransactionRecovery>> {
+    let paths = prepared_transaction_checkpoint_paths(db_path)?;
+    let mut recoveries = Vec::with_capacity(paths.len());
+    for path in paths {
+        let recovery = recover_prepared_transaction_checkpoint_at(
+            db_path,
+            &path,
+            base_node_url,
+            timeout,
+            required_depth,
+        )
+        .await?;
+        if matches!(
+            recovery,
+            PreparedTransactionRecovery::RecoveredConfirmedTransaction(_)
+                | PreparedTransactionRecovery::RejectedCheckpointReconciled
+        ) {
+            crate::result_profile::durable_remove_file(&path)?;
+        }
+        recoveries.push(recovery);
+    }
+    Ok(recoveries)
+}
+
+async fn recover_prepared_transaction_checkpoint_at(
+    db_path: &Path,
+    checkpoint_path: &Path,
+    base_node_url: &str,
+    timeout: Duration,
+    required_depth: u64,
+) -> anyhow::Result<PreparedTransactionRecovery> {
+    let checkpoint = load_prepared_transaction_checkpoint_at(checkpoint_path)?
+        .context("prepared transaction checkpoint disappeared before recovery")?;
+    if checkpoint.state == "network_rejected" {
+        return Ok(PreparedTransactionRecovery::RejectedCheckpointReconciled);
+    }
     let tx_id: u64 = checkpoint.tx_id.parse()?;
     let conn = Connection::open(db_path)?;
     if mode2_completed_transaction_row(&conn, tx_id as i64)?
         .is_some_and(|row| !checkpoint_recovery_submission_allowed(&row.status))
     {
-        remove_prepared_transaction_checkpoint(db_path)?;
-        return Ok(true);
+        return Ok(PreparedTransactionRecovery::RejectedCheckpointReconciled);
     }
     let serialized = serde_json::to_vec(&checkpoint.serialized_transaction)?;
     let kernel = mode2_kernel_query_from_serialized_transaction(&serialized)?;
     let client = base_node_http_client()?;
     let deadline = time::Instant::now() + timeout;
     let mut submitted = false;
+    let recovered_submission = |checkpoint: &PreparedTransactionCheckpoint| {
+        crate::result_profile::S0FundingSubmissionEvidence {
+            tx_id: checkpoint.tx_id.clone(),
+            broadcasted_at: checkpoint.prepared_at,
+            fee_microtari: checkpoint.fee_microtari,
+            construction_ms: checkpoint.construction_ms,
+            broadcast_to_mempool_ms: checkpoint.broadcast_to_mempool_ms,
+            broadcast_to_mempool_unavailable_reason: checkpoint
+                .broadcast_to_mempool_ms
+                .is_none()
+                .then_some(
+                    "network acceptance completed before the durable acceptance checkpoint"
+                        .to_string(),
+                ),
+            tip_height_at_broadcast: checkpoint.tip_height_at_broadcast,
+        }
+    };
     let confirmed = loop {
         let remaining = deadline.saturating_duration_since(time::Instant::now());
         if remaining.is_zero() {
-            bail!("prepared transaction recovery did not reach C-min before its deadline");
+            let checkpoint = load_prepared_transaction_checkpoint_at(checkpoint_path)?
+                .context("prepared transaction checkpoint disappeared during recovery")?;
+            return Ok(
+                PreparedTransactionRecovery::RecoveredAcceptedPendingConfirmation(
+                    recovered_submission(&checkpoint),
+                ),
+            );
         }
         let response = time::timeout(
             remaining,
@@ -4166,6 +4704,7 @@ pub async fn recover_prepared_transaction_checkpoint(
         }
         if matches!(response.location, TxLocation::NotStored | TxLocation::None) && !submitted {
             let remaining = deadline.saturating_duration_since(time::Instant::now());
+            let submission_start = Instant::now();
             let submission = time::timeout(
                 remaining,
                 submit_transaction_without_retry(
@@ -4179,17 +4718,29 @@ pub async fn recover_prepared_transaction_checkpoint(
             if !submission.accepted
                 && submission.rejection_reason != TxSubmissionRejectionReason::AlreadyMined
             {
-                bail!(
-                    "prepared transaction recovery was rejected: {}",
-                    submission.rejection_reason
-                );
+                let reason = submission.rejection_reason.to_string();
+                db::mark_completed_transaction_as_rejected(&conn, tx_id.into(), &reason)?;
+                mark_prepared_transaction_checkpoint_rejected_at(checkpoint_path, &reason)?;
+                return Ok(PreparedTransactionRecovery::RejectedCheckpointReconciled);
+            }
+            if submission.accepted {
+                mark_prepared_transaction_checkpoint_accepted_at(
+                    checkpoint_path,
+                    submission_start.elapsed().as_millis(),
+                )?;
             }
             submitted = true;
         }
         let pause =
             Duration::from_secs(1).min(deadline.saturating_duration_since(time::Instant::now()));
         if pause.is_zero() {
-            bail!("prepared transaction recovery did not reach C-min before its deadline");
+            let checkpoint = load_prepared_transaction_checkpoint_at(checkpoint_path)?
+                .context("prepared transaction checkpoint disappeared during recovery")?;
+            return Ok(
+                PreparedTransactionRecovery::RecoveredAcceptedPendingConfirmation(
+                    recovered_submission(&checkpoint),
+                ),
+            );
         }
         mode2::observation_poll_pause(pause).await;
     };
@@ -4207,8 +4758,11 @@ pub async fn recover_prepared_transaction_checkpoint(
     if !reconciled {
         bail!("prepared transaction wallet/database reconciliation failed");
     }
-    remove_prepared_transaction_checkpoint(db_path)?;
-    Ok(true)
+    let checkpoint = load_prepared_transaction_checkpoint_at(checkpoint_path)?
+        .context("prepared transaction checkpoint disappeared during recovery")?;
+    Ok(PreparedTransactionRecovery::RecoveredConfirmedTransaction(
+        recovered_submission(&checkpoint),
+    ))
 }
 
 fn persist_signed_transaction(
@@ -4926,6 +5480,69 @@ mod tests {
     };
 
     #[test]
+    fn strict_s0_rejects_incomplete_or_dirty_wallet_state() {
+        let incomplete = strict_s0_status(100, 100, Some(1), None);
+        assert_eq!(incomplete.0, CellStatus::Failed);
+        let dirty = strict_s0_status(
+            100,
+            100,
+            Some(1),
+            Some(serde_json::json!({
+                "pending_outputs": 1,
+                "locked_outputs": 0,
+                "invalid_outputs": 0,
+                "unknown_outputs": 0
+            })),
+        );
+        assert_eq!(dirty.0, CellStatus::Failed);
+        let clean = strict_s0_status(
+            100,
+            100,
+            Some(1),
+            Some(serde_json::json!({
+                "pending_outputs": 0,
+                "locked_outputs": 0,
+                "invalid_outputs": 0,
+                "unknown_outputs": 0
+            })),
+        );
+        assert_eq!(clean.0, CellStatus::Ok);
+    }
+
+    #[test]
+    fn balance_reconciliation_marks_underflow_unavailable() {
+        let mut metrics = serde_json::Map::new();
+        add_balance_reconciliation_metrics(&mut metrics, Some(10), Some(0), 11, 0);
+        assert!(metrics.get("balance_reconciliation").is_none());
+        assert!(
+            metrics
+                .get("balance_reconciliation_unavailable_reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn incomplete_total_components_remove_available_fallback() {
+        let mut metrics = serde_json::Map::new();
+        add_balance_reconciliation_metrics(&mut metrics, Some(100), Some(90), 5, 5);
+        add_balance_component_metrics(
+            &mut metrics,
+            Some(serde_json::json!({"total": 100})),
+            Some(serde_json::json!({"available": 90})),
+            5,
+            5,
+        );
+        assert!(metrics.get("balance_reconciliation").is_none());
+        assert!(
+            metrics
+                .get("balance_reconciliation_unavailable_reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        );
+    }
+
+    #[test]
     fn mode1_operator_recovery_resumes_an_existing_database() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("console_wallet.db");
@@ -4998,7 +5615,7 @@ mod tests {
     }
 
     #[test]
-    fn mode1_summary_keeps_larger_response_fee_total() {
+    fn mode1_summary_uses_confirmed_fee_total() {
         let mut summary = Mode1TransferSummary {
             fee_microtari: 1_000,
             tx_infos: vec![VerifiedTransaction {
@@ -5019,7 +5636,7 @@ mod tests {
 
         summary.backfill_verified_fee_total();
 
-        assert_eq!(summary.fee_microtari, 1_000);
+        assert_eq!(summary.fee_microtari, 945);
     }
 
     #[test]
@@ -5807,6 +6424,7 @@ mod tests {
             "batch".to_string(),
             PpChainProof {
                 chain_tx_id: "42".to_string(),
+                amount_microtari: 100,
                 fee_microtari: 660,
                 mined_height: 42,
                 tip_height: 45,
@@ -5848,6 +6466,87 @@ mod tests {
             &snapshot,
             &BTreeMap::new()
         ));
+    }
+
+    #[test]
+    fn pp_pending_outcomes_keep_uuid_fee_and_deadline_taxonomy() {
+        let timing = serde_json::json!({
+            "batch_index": 1,
+            "batch_id": "2f1c928d-9516-48c8-b926-e5cbe33b3168",
+            "api_accepted": true,
+            "payment_count": 1,
+            "recipients": ["recipient"]
+        });
+        let snapshot = PaymentProcessorDbSnapshot {
+            batches: vec![payment_processor::PaymentBatchSnapshot {
+                id: "2f1c928d-9516-48c8-b926-e5cbe33b3168".to_string(),
+                status: "AWAITING_CONFIRMATION".to_string(),
+                retry_count: 0,
+                error_message: None,
+                has_unsigned_tx: true,
+                has_signed_tx: true,
+                mined_height: None,
+                chain_tx_id: None,
+                fee_microtari: Some(700),
+                kernel_excess_sig_nonce: None,
+                kernel_excess_sig: None,
+                input_count: None,
+                total_output_count: None,
+                output_commitments: None,
+            }],
+            payments: Vec::new(),
+        };
+        let mut summary = PpScenarioSummary {
+            tx_timings: vec![timing],
+            db_snapshot: Some(snapshot),
+            ..PpScenarioSummary::default()
+        };
+
+        let stalled = summary.transaction_observations();
+        assert_eq!(stalled[0]["terminal_outcome"], "stalled");
+        assert_eq!(stalled[0]["fee_disposition"], "proposed_unresolved");
+        assert_eq!(stalled[0]["fee_microtari"], 700);
+        assert_eq!(
+            stalled[0]["batch_id"],
+            "2f1c928d-9516-48c8-b926-e5cbe33b3168"
+        );
+
+        summary.extra_metrics.insert(
+            "db_observation_timed_out".to_string(),
+            serde_json::json!(true),
+        );
+        let timed_out = summary.transaction_observations();
+        assert_eq!(timed_out[0]["terminal_outcome"], "timed_out");
+        assert_eq!(timed_out[0]["failure_class"], "arm_deadline");
+    }
+
+    #[test]
+    fn pp_rejection_preserves_structured_batch_identity() {
+        let mut summary = PpScenarioSummary::default();
+        summary.record_batch(
+            1,
+            0,
+            1,
+            vec!["recipient".to_string()],
+            Err(payment_processor::PaymentProcessorError::Http {
+                status: 500,
+                url: "http://localhost/v1/payment-batches".to_string(),
+                body: "database busy".to_string(),
+                sqlite_code: Some(5),
+                request_id: Some("request-1".to_string()),
+                batch_id: Some("2f1c928d-9516-48c8-b926-e5cbe33b3168".to_string()),
+            }
+            .into()),
+        );
+
+        let observation = &summary.transaction_observations()[0];
+        assert_eq!(observation["terminal_outcome"], "rejected");
+        assert_eq!(observation["failure_class"], "http_response");
+        assert_eq!(observation["http_status"], 500);
+        assert_eq!(
+            observation["batch_id"],
+            "2f1c928d-9516-48c8-b926-e5cbe33b3168"
+        );
     }
 
     #[test]
@@ -6146,6 +6845,7 @@ mod tests {
                 "confirmed".to_string(),
                 PpChainProof {
                     chain_tx_id: "kernel-confirmed".to_string(),
+                    amount_microtari: 100,
                     fee_microtari: 700,
                     mined_height: 42,
                     tip_height: 45,
@@ -6298,7 +6998,7 @@ mod tests {
             status_value: TX_MINED_CONFIRMED_STATUS,
             mode: "new_wallet".to_string(),
             scenario: ScenarioName::S5.as_str().to_string(),
-            amount_microtari: None,
+            amount_microtari: Some(1_000_000),
             fee_microtari: Some(500),
             mined_height: Some(100),
             confirmations: Some(3),
@@ -6309,6 +7009,9 @@ mod tests {
 
         let observations = summary.transaction_observations(ScenarioName::S5);
         assert_eq!(observations[0]["terminal_outcome"], "confirmed");
+        assert_eq!(observations[0]["amount_microtari"], 1_000_000);
+        assert_eq!(observations[0]["confirmations"], 3);
+        assert_eq!(observations[0]["min_confirmations"], 3);
         assert_eq!(observations[0]["confirmation_ms"], serde_json::Value::Null);
         assert_eq!(
             observations[0]["confirmation_timing_reason"],
@@ -6322,7 +7025,22 @@ mod tests {
         let db_path = directory.path().join("wallet.db");
         let checkpoint_path = db_path.with_extension("prepared-transaction.json");
         std::fs::write(&checkpoint_path, b"{\"schema_version\":1").unwrap();
-        assert!(load_prepared_transaction_checkpoint(&db_path).is_err());
+        assert!(load_prepared_transaction_checkpoint_at(&checkpoint_path).is_err());
+    }
+
+    #[test]
+    fn concurrent_transactions_use_distinct_discoverable_checkpoints() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("wallet.db");
+        let first = prepared_transaction_checkpoint_path(&db_path, "1").unwrap();
+        let second = prepared_transaction_checkpoint_path(&db_path, "2").unwrap();
+        assert_ne!(first, second);
+        std::fs::write(&first, b"one").unwrap();
+        std::fs::write(&second, b"two").unwrap();
+        assert_eq!(
+            prepared_transaction_checkpoint_paths(&db_path).unwrap(),
+            vec![first, second]
+        );
     }
 
     #[test]

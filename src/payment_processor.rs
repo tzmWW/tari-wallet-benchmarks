@@ -766,7 +766,12 @@ impl PaymentProcessorClient {
             self.client
                 .get(format!("{}/health/version", self.base_url))
                 .send()
-                .await?,
+                .await
+                .map_err(|error| PaymentProcessorError::Transport {
+                    message: error.to_string(),
+                    request_id: None,
+                    batch_id: None,
+                })?,
         )
         .await
     }
@@ -780,35 +785,205 @@ impl PaymentProcessorClient {
                 .post(format!("{}/v1/payment-batches", self.base_url))
                 .json(request)
                 .send()
-                .await?,
+                .await
+                .map_err(|error| PaymentProcessorError::Transport {
+                    message: error.to_string(),
+                    request_id: None,
+                    batch_id: None,
+                })?,
         )
         .await
     }
 }
 
+#[derive(Debug)]
+pub enum PaymentProcessorError {
+    Transport {
+        message: String,
+        request_id: Option<String>,
+        batch_id: Option<String>,
+    },
+    Http {
+        status: u16,
+        url: String,
+        body: String,
+        sqlite_code: Option<i32>,
+        request_id: Option<String>,
+        batch_id: Option<String>,
+    },
+    Decode {
+        url: String,
+        body: String,
+        source: serde_json::Error,
+        request_id: Option<String>,
+        batch_id: Option<String>,
+    },
+}
+
+impl std::fmt::Display for PaymentProcessorError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport { message, .. } => {
+                write!(formatter, "payment processor transport failure: {message}")
+            }
+            Self::Http { status, url, .. } => {
+                write!(formatter, "payment processor HTTP {status} for {url}")
+            }
+            Self::Decode { url, source, .. } => write!(
+                formatter,
+                "payment processor response decode failure from {url}: {source}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PaymentProcessorError {}
+
+impl PaymentProcessorError {
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Http { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    pub fn failure_class(&self) -> &'static str {
+        match self {
+            Self::Transport { .. } => "transport",
+            Self::Http { .. } => "http_response",
+            Self::Decode { .. } => "response_decode",
+        }
+    }
+
+    pub fn response_body(&self) -> Option<&str> {
+        match self {
+            Self::Http { body, .. } | Self::Decode { body, .. } => Some(body),
+            Self::Transport { .. } => None,
+        }
+    }
+
+    pub fn sqlite_code(&self) -> Option<i32> {
+        match self {
+            Self::Http { sqlite_code, .. } => *sqlite_code,
+            _ => None,
+        }
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::Transport { request_id, .. }
+            | Self::Http { request_id, .. }
+            | Self::Decode { request_id, .. } => request_id.as_deref(),
+        }
+    }
+
+    pub fn batch_id(&self) -> Option<&str> {
+        match self {
+            Self::Transport { batch_id, .. }
+            | Self::Http { batch_id, .. }
+            | Self::Decode { batch_id, .. } => batch_id.as_deref(),
+        }
+    }
+}
+
+fn truncate_response_body(body: &str) -> String {
+    const MAX_BODY_BYTES: usize = 4096;
+    if body.len() <= MAX_BODY_BYTES {
+        return body.to_string();
+    }
+    let end = body
+        .char_indices()
+        .take_while(|(index, _)| *index < MAX_BODY_BYTES)
+        .map(|(index, character)| index + character.len_utf8())
+        .last()
+        .unwrap_or(0);
+    format!("{}...<truncated>", &body[..end])
+}
+
 async fn response_json<T: DeserializeOwned>(response: reqwest::Response) -> anyhow::Result<T> {
     let status = response.status();
     let url = response.url().to_string();
+    let header_request_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let body = response
         .text()
         .await
         .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
     if !status.is_success() {
-        bail!(
-            "{}",
-            payment_processor_http_error_message(status, &url, &body)
-        );
+        let structured = serde_json::from_str::<serde_json::Value>(&body).ok();
+        return Err(PaymentProcessorError::Http {
+            status: status.as_u16(),
+            url,
+            body: truncate_response_body(&body),
+            sqlite_code: structured_sqlite_code(structured.as_ref()),
+            request_id: structured_request_id(structured.as_ref()).or(header_request_id),
+            batch_id: structured_batch_id(structured.as_ref()),
+        }
+        .into());
     }
-    serde_json::from_str(&body)
-        .with_context(|| format!("decoding payment processor JSON response from {url}: {body}"))
+    serde_json::from_str(&body).map_err(|source| {
+        PaymentProcessorError::Decode {
+            url,
+            body: truncate_response_body(&body),
+            source,
+            request_id: header_request_id,
+            batch_id: structured_batch_id(
+                serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .as_ref(),
+            ),
+        }
+        .into()
+    })
 }
 
-fn payment_processor_http_error_message(
-    status: reqwest::StatusCode,
-    url: &str,
-    body: &str,
-) -> String {
-    format!("payment processor HTTP {status} for {url}: {body}")
+fn structured_request_id(value: Option<&serde_json::Value>) -> Option<String> {
+    value.and_then(|value| {
+        value
+            .get("request_id")
+            .or_else(|| value.get("requestId"))
+            .or_else(|| value.get("error").and_then(|error| error.get("request_id")))
+            .or_else(|| value.get("error").and_then(|error| error.get("requestId")))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn structured_sqlite_code(value: Option<&serde_json::Value>) -> Option<i32> {
+    value.and_then(|value| {
+        value
+            .get("sqlite_code")
+            .or_else(|| value.get("sqliteCode"))
+            .or_else(|| {
+                value
+                    .get("error")
+                    .and_then(|error| error.get("sqlite_code"))
+            })
+            .or_else(|| value.get("error").and_then(|error| error.get("sqliteCode")))
+            .and_then(|code| {
+                code.as_i64()
+                    .and_then(|code| i32::try_from(code).ok())
+                    .or_else(|| code.as_str().and_then(|code| code.parse().ok()))
+            })
+    })
+}
+
+fn structured_batch_id(value: Option<&serde_json::Value>) -> Option<String> {
+    value.and_then(|value| {
+        value
+            .get("batch_id")
+            .or_else(|| value.get("batchId"))
+            .or_else(|| value.get("batch").and_then(|batch| batch.get("id")))
+            .or_else(|| value.get("error").and_then(|error| error.get("batch_id")))
+            .or_else(|| value.get("error").and_then(|error| error.get("batchId")))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 pub fn build_fetch_command(cache_dir: &Path) -> String {
@@ -828,7 +1003,7 @@ mod tests {
 
     use super::{
         build_env, inspect_payment_processor_db, payment_processor_db_path,
-        payment_processor_http_error_message, payment_receiver_command, payment_receiver_db_path,
+        payment_receiver_command, payment_receiver_db_path,
     };
 
     #[test]
@@ -868,16 +1043,44 @@ mod tests {
     }
 
     #[test]
-    fn pp_http_error_message_includes_response_body() {
-        let error = payment_processor_http_error_message(
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-            "http://127.0.0.1:9000/v1/payment-batches",
-            "{\"error\":\"funds pending\"}",
+    fn pp_http_error_evidence_is_structured_and_bounded() {
+        let error = super::PaymentProcessorError::Http {
+            status: 500,
+            url: "http://127.0.0.1:9000/v1/payment-batches".to_string(),
+            body: super::truncate_response_body(&format!("é{}", "x".repeat(5000))),
+            sqlite_code: Some(5),
+            request_id: Some("batch-before-uuid".to_string()),
+            batch_id: Some("batch-7".to_string()),
+        };
+        assert!(matches!(
+            error,
+            super::PaymentProcessorError::Http { status: 500, .. }
+        ));
+        assert!(error.to_string().contains("500"));
+        assert!(
+            super::truncate_response_body(&format!("é{}", "x".repeat(5000)))
+                .ends_with("<truncated>")
         );
+        assert_eq!(error.sqlite_code(), Some(5));
+        assert_eq!(error.request_id(), Some("batch-before-uuid"));
+        assert_eq!(error.batch_id(), Some("batch-7"));
+    }
 
-        assert!(error.contains("500 Internal Server Error"));
-        assert!(error.contains("/v1/payment-batches"));
-        assert!(error.contains("funds pending"));
+    #[test]
+    fn pp_structured_error_metadata_supports_nested_and_string_values() {
+        let value = serde_json::json!({
+            "error": {"sqliteCode": "5", "requestId": "req-7"}
+        });
+        assert_eq!(super::structured_sqlite_code(Some(&value)), Some(5));
+        assert_eq!(
+            super::structured_request_id(Some(&value)).as_deref(),
+            Some("req-7")
+        );
+        assert_eq!(
+            super::structured_batch_id(Some(&serde_json::json!({"error": {"batchId": "b-7"}})))
+                .as_deref(),
+            Some("b-7")
+        );
     }
 
     #[test]

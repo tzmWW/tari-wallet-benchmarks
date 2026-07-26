@@ -30,6 +30,7 @@ pub(super) async fn annotate_mode2_live_scenarios(
         seconds_to_lock: config.timeouts.transaction_lock_secs,
         confirmation_window: config.benchmark.c_min,
         request_timeout: Duration::from_secs(30),
+        tip_height_at_broadcast: None,
     };
 
     let mut s1_request = request.clone();
@@ -108,14 +109,14 @@ pub(super) async fn annotate_mode2_live_scenarios(
         &mut s4.extra_metrics,
         s4_balance_before,
         s4_balance_after,
-        u64::from(s4.success_count).saturating_mul(request.amount.0),
+        confirmed_outgoing_microtari(&s4.tx_infos),
         s4.fee_microtari,
     );
     add_balance_component_metrics(
         &mut s4.extra_metrics,
         s4_components_before,
         s4_components_after,
-        u64::from(s4.success_count).saturating_mul(request.amount.0),
+        confirmed_outgoing_microtari(&s4.tx_infos),
         s4.fee_microtari,
     );
     s4.extra_metrics.insert(
@@ -151,7 +152,6 @@ pub(super) async fn annotate_mode2_live_scenarios(
         .ok()
         .map(|snapshot| snapshot.available_microtari);
     let s5_unspent_before = spendable_output_count(&config.modes.new_wallet_database).ok();
-    let s5_amount_microtari = request.amount.0;
     let s5_start = Instant::now();
     let mut s5 =
         run_send_attempts_to_recipients_sequential("new_wallet/S5", s5_recipients, request).await;
@@ -204,14 +204,14 @@ pub(super) async fn annotate_mode2_live_scenarios(
         &mut s5.extra_metrics,
         s5_balance_before,
         s5_balance_after,
-        u64::from(s5.success_count).saturating_mul(s5_amount_microtari),
+        confirmed_outgoing_microtari(&s5.tx_infos),
         s5.fee_microtari,
     );
     add_balance_component_metrics(
         &mut s5.extra_metrics,
         s5_components_before,
         s5_components_after,
-        u64::from(s5.success_count).saturating_mul(s5_amount_microtari),
+        confirmed_outgoing_microtari(&s5.tx_infos),
         s5.fee_microtari,
     );
     s5.extra_metrics.insert(
@@ -301,17 +301,15 @@ async fn verify_mode2_transactions_until_confirmed_with_timeout(
             accumulated.confirmation_observed_offsets_ms = confirmation_observed_offsets_ms;
             return Ok((accumulated, attempts, start.elapsed().as_millis()));
         }
-        let verification = match time::timeout(
-            remaining,
-            verify_mode2_transactions_with_client(config, db_path, &unresolved, scenario, &client),
+        let verification = verify_mode2_transactions_with_client(
+            config,
+            db_path,
+            &unresolved,
+            scenario,
+            &client,
+            time::Instant::now() + remaining,
         )
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                return Ok((accumulated, attempts, start.elapsed().as_millis()));
-            }
-        };
+        .await?;
         let observed_at = start.elapsed().as_millis();
         merge_mode2_verification(
             &mut accumulated,
@@ -628,7 +626,7 @@ async fn run_mode2_s1_rounds(
             round_balance_before
                 .zip(round_balance_after)
                 .is_some_and(|(before, after)| {
-                    before.saturating_sub(after) == round_summary.fee_microtari
+                    before.checked_sub(after) == Some(round_summary.fee_microtari)
                 });
         let independently_confirmed = mode2_summary_complete(&round_summary);
         if observed_utxos != Some(u64::from(round.target_utxos_after))
@@ -939,13 +937,11 @@ fn mode2_send_repetition(summary: &ScenarioSendSummary, scenario: ScenarioName) 
         wall_ms: Some(summary.wall_ms),
         success_count: confirmed,
         failure_count: terminal_failures,
-        fee_microtari: Some(
-            verified
-                .iter()
-                .filter(|tx| tx.confirmed)
-                .filter_map(|tx| tx.fee_microtari)
-                .sum(),
-        ),
+        fee_microtari: verified
+            .iter()
+            .filter(|tx| tx.confirmed)
+            .filter_map(|tx| tx.fee_microtari)
+            .try_fold(0u64, u64::checked_add),
         error: summary.error_note().or_else(|| {
             (!all_verified_ok)
                 .then_some("one or more tx_ids did not verify as terminal-ok".to_string())

@@ -382,6 +382,9 @@
         "broadcast_to_mempool_ms": {
           "$ref": "#/$defs/nullable_integer"
         },
+        "broadcast_to_mempool_unavailable_reason": {
+          "$ref": "#/$defs/nullable_string"
+        },
         "construction_ms": {
           "$ref": "#/$defs/nullable_integer"
         },
@@ -860,6 +863,9 @@
     "transaction_observation": {
       "additionalProperties": false,
       "properties": {
+        "amount_microtari": {
+          "$ref": "#/$defs/nullable_integer"
+        },
         "api_accepted": {
           "type": [
             "boolean",
@@ -871,6 +877,9 @@
         },
         "attempt_index": {
           "$ref": "#/$defs/nullable_integer"
+        },
+        "batch_id": {
+          "$ref": "#/$defs/nullable_string"
         },
         "batch_index": {
           "$ref": "#/$defs/nullable_integer"
@@ -892,6 +901,9 @@
         },
         "confirmation_timing_reason": {
           "$ref": "#/$defs/nullable_string"
+        },
+        "confirmations": {
+          "$ref": "#/$defs/nullable_integer"
         },
         "construction_complete_offset_ms": {
           "$ref": "#/$defs/nullable_integer"
@@ -954,6 +966,9 @@
         },
         "mempool_reason": {
           "$ref": "#/$defs/nullable_string"
+        },
+        "min_confirmations": {
+          "$ref": "#/$defs/nullable_integer"
         },
         "mined_height": {
           "$ref": "#/$defs/nullable_integer"

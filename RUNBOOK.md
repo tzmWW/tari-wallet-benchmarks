@@ -106,6 +106,12 @@ The fetch scripts pin upstream bases and verify their exact Git trees:
 Minotari is built by applying three tracked patches in order. The first two are
 immutable full diffs of the former `c2b8d7b` and `1391dbd` fork commits:
 
+The verifier also fetches Cargo's pinned
+`tzmWW/minotari-cli@1391dbd2155c96e885379d72b76e33582f0aad87` commit and
+requires its tree to equal the upstream base plus those first two library
+patches byte-for-byte. The third password-environment patch is runtime-only and
+is included in the separately hashed runtime source tree and complete diff.
+
 - `patches/minotari-fixed-range-scan.patch` makes the processor, rather than the
   downloader, publish fixed-range scan completion after queued blocks are
   persisted; it also fixes inclusive range arithmetic and clips responses at the
@@ -143,7 +149,6 @@ read -r -s HARNESS_WALLET_PW
 export HARNESS_WALLET_PW
 export SOURCE_DB=/absolute/path/to/source-wallet.db
 tools/minotari --network esmeralda create \
-  --password "$HARNESS_WALLET_PW" \
   --database-path "$SOURCE_DB"
 ```
 
@@ -152,7 +157,6 @@ keeps the source DB synchronized:
 
 ```sh
 tools/minotari --network esmeralda daemon \
-  --password "$HARNESS_WALLET_PW" \
   --database-path "$SOURCE_DB" \
   --base-url http://127.0.0.1:18142 \
   --batch-size 1000 \

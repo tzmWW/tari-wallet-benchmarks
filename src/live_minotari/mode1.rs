@@ -594,20 +594,19 @@ async fn run_mode1_send_cells(
         .ok();
     let s4_components_after = mode1_balance_components(&mut context.client).await.ok();
     let s4_balance_after = mode1_available_balance(&mut context.client).await.ok();
-    let s4_success_payments =
-        u32::try_from(s4.tx_infos.iter().filter(|tx| tx.confirmed).count()).unwrap_or(u32::MAX);
+    let s4_confirmed_outgoing = confirmed_outgoing_microtari(&s4.tx_infos);
     add_balance_reconciliation_metrics(
         &mut s4.extra_metrics,
         s4_balance_before,
         s4_balance_after,
-        u64::from(s4_success_payments).saturating_mul(amount.0),
+        s4_confirmed_outgoing,
         s4.fee_microtari,
     );
     add_balance_component_metrics(
         &mut s4.extra_metrics,
         s4_components_before,
         s4_components_after,
-        u64::from(s4_success_payments).saturating_mul(amount.0),
+        s4_confirmed_outgoing,
         s4.fee_microtari,
     );
     s4.extra_metrics.insert(
@@ -644,20 +643,19 @@ async fn run_mode1_send_cells(
         serde_json::json!(s5_recipients),
     );
     let s5_balance_after = mode1_available_balance(&mut context.client).await.ok();
-    let s5_success_payments =
-        u32::try_from(s5.tx_infos.iter().filter(|tx| tx.confirmed).count()).unwrap_or(u32::MAX);
+    let s5_confirmed_outgoing = confirmed_outgoing_microtari(&s5.tx_infos);
     add_balance_reconciliation_metrics(
         &mut s5.extra_metrics,
         s5_balance_before,
         s5_balance_after,
-        u64::from(s5_success_payments).saturating_mul(amount.0),
+        s5_confirmed_outgoing,
         s5.fee_microtari,
     );
     add_balance_component_metrics(
         &mut s5.extra_metrics,
         s5_components_before,
         s5_components_after,
-        u64::from(s5_success_payments).saturating_mul(amount.0),
+        s5_confirmed_outgoing,
         s5.fee_microtari,
     );
     s5.extra_metrics.insert(
@@ -797,7 +795,7 @@ async fn run_mode1_s1(
             round_balance_before
                 .zip(balance_after)
                 .is_some_and(|(before, after)| {
-                    before.saturating_sub(after) == round_summary.fee_microtari
+                    before.checked_sub(after) == Some(round_summary.fee_microtari)
                 });
         round_summary.extra_metrics.insert(
             format!("round_{}", round.round_index),
@@ -1372,8 +1370,11 @@ pub(super) struct PpSplitPlan {
 }
 
 impl ExactSplitPlan {
-    pub(super) fn total_children(&self) -> u64 {
-        self.child_amounts.iter().copied().sum()
+    pub(super) fn total_children(&self) -> Option<u64> {
+        self.child_amounts
+            .iter()
+            .copied()
+            .try_fold(0u64, u64::checked_add)
     }
 }
 
@@ -1406,7 +1407,11 @@ pub(super) fn exact_no_change_split_with_fee(
         fee_microtari,
         child_amounts,
     };
-    if plan.total_children().checked_add(plan.fee_microtari) != Some(plan.input_microtari) {
+    if plan
+        .total_children()
+        .and_then(|total| total.checked_add(plan.fee_microtari))
+        != Some(plan.input_microtari)
+    {
         bail!("exact split conservation invariant failed");
     }
     Ok(plan)
@@ -1557,8 +1562,9 @@ mod tests {
         let plan = exact_no_change_split_with_fee(2_499_999_505, 2, 740).unwrap();
         assert_eq!(plan.child_amounts[1], plan.child_amounts[0] + 1);
         assert_eq!(
-            plan.total_children() + plan.fee_microtari,
-            plan.input_microtari
+            plan.total_children()
+                .and_then(|total| total.checked_add(plan.fee_microtari)),
+            Some(plan.input_microtari)
         );
     }
 

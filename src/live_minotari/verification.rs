@@ -226,14 +226,68 @@ pub(super) async fn verify_mode2_transactions_with_client(
     tx_ids: &[String],
     scenario: ScenarioName,
     client: &reqwest::Client,
+    deadline: time::Instant,
 ) -> anyhow::Result<Mode2VerificationResult> {
     if tx_ids.is_empty() || !db_path.exists() {
         return Ok(Mode2VerificationResult::default());
     }
     let conn = Connection::open(db_path)?;
-    let tip_height = base_node_tip_height_with_client(client, &config.network.base_node_http_url)
-        .await
-        .ok();
+    let tip_height = time::timeout(
+        deadline.saturating_duration_since(time::Instant::now()),
+        base_node_tip_height_with_client(client, &config.network.base_node_http_url),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
+    let mut query_tasks = JoinSet::new();
+    let mut prefetched_queries = BTreeMap::new();
+    for tx_id in tx_ids {
+        let Ok(parsed) = tx_id.parse::<u64>() else {
+            continue;
+        };
+        let Some(row) = mode2_completed_transaction_row(&conn, parsed as i64)? else {
+            continue;
+        };
+        let Ok(kernel) =
+            mode2_kernel_query_from_serialized_transaction(&row.serialized_transaction)
+        else {
+            continue;
+        };
+        let query_client = client.clone();
+        let base_node_url = config.network.base_node_http_url.clone();
+        let tx_id = tx_id.clone();
+        query_tasks.spawn(async move {
+            let remaining = deadline.saturating_duration_since(time::Instant::now());
+            let query = match time::timeout(
+                remaining,
+                query_mode2_transaction(&query_client, &base_node_url, &kernel),
+            )
+            .await
+            {
+                Ok(result) => result.map_err(|error| format!("{error:#}")),
+                Err(_) => Err("Mode 2 transaction query exceeded the arm deadline".to_string()),
+            };
+            (tx_id, query)
+        });
+        if query_tasks.len() >= 16
+            && !collect_mode2_query_before_deadline(
+                &mut query_tasks,
+                &mut prefetched_queries,
+                deadline,
+            )
+            .await?
+        {
+            break;
+        }
+    }
+    while collect_mode2_query_before_deadline(&mut query_tasks, &mut prefetched_queries, deadline)
+        .await?
+    {}
+    while let Some(joined) = query_tasks.try_join_next() {
+        let (tx_id, query) = joined.context("Mode 2 verification query task failed")?;
+        prefetched_queries.insert(tx_id, query);
+    }
+    query_tasks.abort_all();
     let mut result = Mode2VerificationResult::default();
     for tx_id in tx_ids {
         let Ok(parsed) = tx_id.parse::<u64>() else {
@@ -252,12 +306,9 @@ pub(super) async fn verify_mode2_transactions_with_client(
                     mode2_kernel_query_from_serialized_transaction(&row.serialized_transaction);
                 match kernel_query {
                     Ok(kernel_query) => {
-                        let query = query_mode2_transaction(
-                            client,
-                            &config.network.base_node_http_url,
-                            &kernel_query,
-                        )
-                        .await;
+                        let query = prefetched_queries.remove(tx_id).unwrap_or_else(|| {
+                            Err("Mode 2 verification query was not prefetched".to_string())
+                        });
                         match query {
                             Ok(response) => {
                                 let (status_value, confirmed) = mode2_transaction_query_status(
@@ -348,12 +399,15 @@ pub(super) async fn verify_mode2_transactions_with_client(
         let confirmations = mined_height
             .zip(tip_height)
             .map(|(mined, tip)| tip.saturating_sub(mined));
+        let amount_microtari = parse_amount(config.benchmark.mode2_scenario_amount())
+            .ok()
+            .map(|amount| amount.0);
         result.observed_transactions.push(VerifiedTransaction {
             tx_id: tx_id.clone(),
             status_value,
             mode: "new_wallet".to_string(),
             scenario: scenario.as_str().to_string(),
-            amount_microtari: None,
+            amount_microtari,
             fee_microtari: row
                 .as_ref()
                 .and_then(|row| {
@@ -372,6 +426,28 @@ pub(super) async fn verify_mode2_transactions_with_client(
         }
     }
     Ok(result)
+}
+
+async fn collect_mode2_query_before_deadline(
+    tasks: &mut JoinSet<(String, Result<TxQueryResponse, String>)>,
+    queries: &mut BTreeMap<String, Result<TxQueryResponse, String>>,
+    deadline: time::Instant,
+) -> anyhow::Result<bool> {
+    if tasks.is_empty() {
+        return Ok(false);
+    }
+    let remaining = deadline.saturating_duration_since(time::Instant::now());
+    if remaining.is_zero() {
+        return Ok(false);
+    }
+    match time::timeout(remaining, tasks.join_next()).await {
+        Ok(Some(joined)) => {
+            let (tx_id, query) = joined.context("Mode 2 verification query task failed")?;
+            queries.insert(tx_id, query);
+            Ok(true)
+        }
+        Ok(None) | Err(_) => Ok(false),
+    }
 }
 
 pub(super) fn mode2_completed_transaction_row(

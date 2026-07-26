@@ -1,10 +1,6 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, fs, io::Write, path::Path};
 
+use anyhow::Context;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::Digest;
 
@@ -215,7 +211,8 @@ pub struct S0FundingTransactionEvidence {
     pub tx_id: String,
     pub fee_microtari: u64,
     pub construction_ms: u128,
-    pub broadcast_to_mempool_ms: u128,
+    pub broadcast_to_mempool_ms: Option<u128>,
+    pub broadcast_to_mempool_unavailable_reason: Option<String>,
     pub broadcast_to_confirmed_at_c_min_ms: u128,
     pub tip_height_at_broadcast: Option<u64>,
     pub mined_height: u64,
@@ -228,7 +225,8 @@ pub struct S0FundingSubmissionEvidence {
     pub broadcasted_at: chrono::DateTime<chrono::Utc>,
     pub fee_microtari: u64,
     pub construction_ms: u128,
-    pub broadcast_to_mempool_ms: u128,
+    pub broadcast_to_mempool_ms: Option<u128>,
+    pub broadcast_to_mempool_unavailable_reason: Option<String>,
     pub tip_height_at_broadcast: Option<u64>,
 }
 
@@ -477,6 +475,8 @@ pub struct TransactionObservation {
     pub transaction_id: Option<String>,
     pub attempt_index: Option<u32>,
     pub batch_index: Option<u32>,
+    #[serde(default)]
+    pub batch_id: Option<String>,
     pub submit_offset_ms: Option<u128>,
     pub construction_complete_offset_ms: Option<u128>,
     pub broadcast_start_offset_ms: Option<u128>,
@@ -490,6 +490,8 @@ pub struct TransactionObservation {
     pub confirmation_ms: Option<u128>,
     pub confirmation_timing_origin: Option<String>,
     pub confirmation_timing_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_microtari: Option<u64>,
     pub fee_microtari: Option<u64>,
     pub fee_unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -505,6 +507,10 @@ pub struct TransactionObservation {
     pub terminal_outcome: TerminalOutcome,
     pub error: Option<String>,
     pub mined_height: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmations: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_confirmations: Option<u64>,
     pub tip_start_height: Option<u64>,
     pub tip_end_height: Option<u64>,
     pub input_count: Option<u32>,
@@ -523,6 +529,35 @@ pub struct OutcomeCounts {
     pub rejected: u32,
     pub stalled: u32,
     pub timed_out: u32,
+}
+
+impl OutcomeCounts {
+    pub(crate) fn from_json_observations(observations: &[serde_json::Value]) -> Self {
+        let mut counts = Self {
+            attempted: u32::try_from(observations.len()).unwrap_or(u32::MAX),
+            accepted: u32::try_from(
+                observations
+                    .iter()
+                    .filter(|observation| observation["api_accepted"] == serde_json::json!(true))
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
+            ..Self::default()
+        };
+        for observation in observations {
+            match observation
+                .get("terminal_outcome")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("confirmed") => counts.confirmed = counts.confirmed.saturating_add(1),
+                Some("rejected") => counts.rejected = counts.rejected.saturating_add(1),
+                Some("stalled") => counts.stalled = counts.stalled.saturating_add(1),
+                Some("timed_out") => counts.timed_out = counts.timed_out.saturating_add(1),
+                _ => {}
+            }
+        }
+        counts
+    }
 }
 
 impl ResultProfile {
@@ -678,15 +713,46 @@ impl ResultProfile {
     }
 
     pub fn write_atomic(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let bytes = {
+            let mut bytes = serde_json::to_vec_pretty(self)?;
+            bytes.push(b'\n');
+            bytes
+        };
+        durable_atomic_write(path, &bytes)
+    }
+}
+
+pub(crate) fn durable_atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let destination = parent.join(
+        path.file_name()
+            .context("atomic write path has no file name")?,
+    );
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(bytes)?;
+    tmp.flush()?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(destination).map_err(|error| error.error)?;
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+pub(crate) fn durable_remove_file(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            fs::File::open(parent)?.sync_all()?;
+            Ok(())
         }
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-        serde_json::to_writer_pretty(&mut tmp, self)?;
-        writeln!(tmp)?;
-        tmp.persist(path)?;
-        Ok(())
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
     }
 }
 
@@ -956,13 +1022,12 @@ fn median(sorted: &[u128]) -> Option<u128> {
     }
 }
 
-pub fn write_schema(path: &PathBuf) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+pub fn write_schema(path: &Path) -> anyhow::Result<()> {
     let schema = profile_validation::schema_document();
-    fs::write(path, serde_json::to_string_pretty(&schema)? + "\n")?;
-    Ok(())
+    durable_atomic_write(
+        path,
+        format!("{}\n", serde_json::to_string_pretty(&schema)?).as_bytes(),
+    )
 }
 
 #[cfg(test)]
@@ -991,6 +1056,28 @@ mod tests {
             decoded.config["scenario_order"],
             serde_json::json!(["B0", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"])
         );
+    }
+
+    #[test]
+    fn durable_atomic_write_replaces_only_complete_documents() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("profile.json");
+        durable_atomic_write(&path, br#"{"version":1}"#).unwrap();
+        durable_atomic_write(&path, br#"{"version":2,"complete":true}"#).unwrap();
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            r#"{"version":2,"complete":true}"#
+        );
+    }
+
+    #[test]
+    fn durable_remove_is_idempotent_and_syncs_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("checkpoint.json");
+        fs::write(&path, b"checkpoint").unwrap();
+        durable_remove_file(&path).unwrap();
+        durable_remove_file(&path).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]

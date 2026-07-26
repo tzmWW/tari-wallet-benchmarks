@@ -89,13 +89,8 @@ fn capture_with_network(
 fn primary_disk(data_dir: Option<&std::path::Path>) -> (Option<String>, Option<String>) {
     let disks = Disks::new_with_refreshed_list();
     let disk = data_dir
-        .and_then(|path| {
-            disks
-                .list()
-                .iter()
-                .filter(|disk| path.starts_with(disk.mount_point()))
-                .max_by_key(|disk| disk.mount_point().as_os_str().len())
-        })
+        .and_then(|path| select_mount(path, disks.list().iter().map(|disk| disk.mount_point())))
+        .and_then(|mount| disks.list().iter().find(|disk| disk.mount_point() == mount))
         .or_else(|| disks.list().iter().max_by_key(|disk| disk.total_space()));
     let Some(disk) = disk else {
         return (None, None);
@@ -104,6 +99,33 @@ fn primary_disk(data_dir: Option<&std::path::Path>) -> (Option<String>, Option<S
         Some(disk.kind().to_string()),
         Some(disk.name().to_string_lossy().to_string()),
     )
+}
+
+fn select_mount<'a>(
+    data_path: &std::path::Path,
+    mounts: impl Iterator<Item = &'a std::path::Path>,
+) -> Option<&'a std::path::Path> {
+    mounts
+        .filter(|mount| mount_matches(data_path, mount))
+        .max_by_key(|mount| mount.as_os_str().len())
+}
+
+fn mount_matches(data_path: &std::path::Path, mount_point: &std::path::Path) -> bool {
+    let data_path = canonicalize_existing_prefix(data_path);
+    let mount_point = mount_point
+        .canonicalize()
+        .unwrap_or_else(|_| mount_point.to_path_buf());
+    data_path.starts_with(mount_point)
+}
+
+fn canonicalize_existing_prefix(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(path) = path.canonicalize() {
+        return path;
+    }
+    path.parent()
+        .map(canonicalize_existing_prefix)
+        .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 fn base_node_network_path(base_node_url: Option<&str>) -> (Option<String>, String) {
@@ -124,6 +146,8 @@ fn base_node_network_path(base_node_url: Option<&str>) -> (Option<String>, Strin
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
@@ -137,5 +161,54 @@ mod tests {
             "remote"
         );
         assert_eq!(base_node_network_path(Some("not a url")).1, "unknown");
+    }
+
+    #[test]
+    fn mount_selection_prefers_nested_mounts_and_handles_missing_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("external");
+        fs::create_dir_all(nested.join("bench/data")).unwrap();
+        assert!(mount_matches(&nested.join("bench/data"), &nested));
+        assert!(mount_matches(&nested.join("bench/data"), root.path()));
+        assert!(!mount_matches(&root.path().join("other"), &nested));
+        assert_eq!(
+            select_mount(
+                &nested.join("bench/data"),
+                [root.path(), nested.as_path()].into_iter(),
+            ),
+            Some(nested.as_path())
+        );
+        assert_eq!(
+            select_mount(
+                &root.path().join("unmatched"),
+                [nested.as_path()].into_iter(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn mount_selection_canonicalizes_symlinked_data_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        let link = root.path().join("link");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(mount_matches(&link.join("data"), &target));
+    }
+
+    #[test]
+    fn mount_selection_handles_external_style_and_unmatched_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let external = root.path().join("Volumes").join("benchmark-disk");
+        fs::create_dir_all(external.join("wallet-bench/.bench-data")).unwrap();
+        assert!(mount_matches(
+            &external.join("wallet-bench/.bench-data"),
+            &external
+        ));
+        assert!(!mount_matches(
+            &root.path().join("other-volume/data"),
+            &external
+        ));
     }
 }

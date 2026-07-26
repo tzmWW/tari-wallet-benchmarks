@@ -22,7 +22,8 @@ pub struct S0FundingEvidence {
     pub addresses: std::collections::BTreeMap<String, String>,
     pub birthday: u16,
     pub birthday_start_height: u64,
-    pub submission: crate::result_profile::S0FundingSubmissionEvidence,
+    #[serde(default)]
+    pub submission: Option<crate::result_profile::S0FundingSubmissionEvidence>,
     pub transaction: Option<crate::result_profile::S0FundingTransactionEvidence>,
 }
 
@@ -177,13 +178,19 @@ async fn recover_prepared_transactions(config: &Config) -> anyhow::Result<()> {
         &paths.new_wallet,
         &paths.payment_processor,
     ] {
-        crate::live_minotari::recover_prepared_transaction_checkpoint(
+        let recoveries = crate::live_minotari::recover_prepared_transaction_checkpoints(
             path,
             &config.network.base_node_http_url,
             config.timeout(config.timeouts.startup_secs),
             config.benchmark.c_min,
         )
         .await?;
+        for recovery in recoveries {
+            println!(
+                "prepared transaction recovery for {}: {recovery:?}",
+                path.display()
+            );
+        }
     }
     Ok(())
 }
@@ -428,7 +435,7 @@ async fn fund_s0_from_checkpoint_inner(
 ) -> anyhow::Result<()> {
     config.validate_prefunding_b0()?;
     let _namespace_lock = RunNamespaceLock::acquire(&config.paths.data_dir)?;
-    crate::live_minotari::recover_prepared_transaction_checkpoint(
+    let recovery = crate::live_minotari::recover_prepared_transaction_checkpoint(
         source_db,
         &config.network.base_node_http_url,
         config.timeout(config.timeouts.startup_secs),
@@ -499,9 +506,10 @@ async fn fund_s0_from_checkpoint_inner(
     })
     .collect::<anyhow::Result<Vec<_>>>()?;
     let protocol_fingerprint = config.protocol_fingerprint()?;
+    let recovered_submission = recovered_s0_submission(&recovery)?;
     let mut evidence = if evidence_path.exists() {
         let existing: S0FundingEvidence = serde_json::from_slice(&fs::read(evidence_path)?)?;
-        if existing.schema_version != 2
+        if !matches!(existing.schema_version, 2 | 3)
             || existing.b0_run_id != checkpoint.run_id
             || existing.protocol_fingerprint != protocol_fingerprint
             || existing.addresses != addresses
@@ -510,35 +518,67 @@ async fn fund_s0_from_checkpoint_inner(
         }
         existing
     } else {
+        crate::live_minotari::require_fresh_s0_wallet_paths(config)?;
         let (birthday, birthday_start_height) =
-            crate::live_minotari::initialize_s0_wallets(config, &book).await?;
-        let mut broadcast_evidence = None;
-        let b0_run_id = checkpoint.run_id.clone();
-        let evidence_addresses = addresses.clone();
-        let evidence_protocol_fingerprint = protocol_fingerprint.clone();
-        crate::live_minotari::submit_s0_outputs(config, source_db, &recipients, |submission| {
-            let evidence = S0FundingEvidence {
-                schema_version: 2,
-                b0_run_id,
-                protocol_fingerprint: evidence_protocol_fingerprint,
-                status: "broadcast".to_string(),
-                addresses: evidence_addresses,
-                birthday,
-                birthday_start_height,
-                submission: submission.clone(),
-                transaction: None,
-            };
-            write_json_atomic(evidence_path, &evidence)?;
-            broadcast_evidence = Some(evidence);
-            Ok(())
-        })
-        .await?;
-        broadcast_evidence.context("S0 broadcast callback did not persist evidence")?
+            crate::live_minotari::plan_s0_wallet_initialization(config).await?;
+        let evidence = S0FundingEvidence {
+            schema_version: 3,
+            b0_run_id: checkpoint.run_id.clone(),
+            protocol_fingerprint: protocol_fingerprint.clone(),
+            status: "initialized".to_string(),
+            addresses: addresses.clone(),
+            birthday,
+            birthday_start_height,
+            submission: None,
+            transaction: None,
+        };
+        write_json_atomic(evidence_path, &evidence)?;
+        evidence
     };
+    if evidence.status == "initialized" {
+        crate::live_minotari::initialize_s0_wallets(config, &book, evidence.birthday).await?;
+        for (db_path, role) in [
+            (
+                config.modes.new_wallet_database.as_path(),
+                WalletRole::NewWallet,
+            ),
+            (
+                payment_processor::payment_receiver_db_path(config).as_path(),
+                WalletRole::PaymentProcessor,
+            ),
+        ] {
+            let expected = &book.addresses[role.label()].wallet_fingerprint_hex;
+            check_minotari_wallet_identity(db_path, expected)?;
+        }
+    }
+    if evidence.submission.is_none() {
+        if let Some(submission) = recovered_submission {
+            evidence.status = "broadcast".to_string();
+            evidence.submission = Some(submission.clone());
+            write_json_atomic(evidence_path, &evidence)?;
+        } else {
+            let mut broadcast_evidence = None;
+            let initialized = evidence.clone();
+            crate::live_minotari::submit_s0_outputs(config, source_db, &recipients, |submission| {
+                let mut evidence = initialized;
+                evidence.status = "broadcast".to_string();
+                evidence.submission = Some(submission.clone());
+                write_json_atomic(evidence_path, &evidence)?;
+                broadcast_evidence = Some(evidence);
+                Ok(())
+            })
+            .await?;
+            evidence =
+                broadcast_evidence.context("S0 broadcast callback did not persist evidence")?;
+        }
+    }
     if evidence.status != "confirmed" || evidence.transaction.is_none() {
+        let submission = evidence
+            .submission
+            .as_ref()
+            .context("S0 evidence has no durable submission identity")?;
         let transaction =
-            crate::live_minotari::observe_s0_funding(config, source_db, &evidence.submission)
-                .await?;
+            crate::live_minotari::observe_s0_funding(config, source_db, submission).await?;
         check_endpoint_authority(config).await?;
         evidence.status = "confirmed".to_string();
         evidence.transaction = Some(transaction);
@@ -554,6 +594,7 @@ async fn fund_s0_from_checkpoint_inner(
         .transaction
         .as_ref()
         .context("confirmed S0 evidence has no transaction")?;
+    crate::live_minotari::remove_prepared_transaction_checkpoint(source_db)?;
     let funded_config = config_with_s0_evidence(config, evidence_path)?;
     crate::live_minotari::synchronize_s0_recipients(
         &funded_config,
@@ -567,6 +608,26 @@ async fn fund_s0_from_checkpoint_inner(
         .context("post-funding recipient readiness")?;
     println!("S0 recipient readiness PASS");
     Ok(())
+}
+
+#[cfg(feature = "live-minotari")]
+fn recovered_s0_submission(
+    recovery: &crate::live_minotari::PreparedTransactionRecovery,
+) -> anyhow::Result<Option<&crate::result_profile::S0FundingSubmissionEvidence>> {
+    match recovery {
+        crate::live_minotari::PreparedTransactionRecovery::NoCheckpoint => Ok(None),
+        crate::live_minotari::PreparedTransactionRecovery::RejectedCheckpointReconciled => {
+            bail!(
+                "rejected S0 checkpoint was reconciled; explicit operator replacement approval is required"
+            )
+        }
+        crate::live_minotari::PreparedTransactionRecovery::RecoveredConfirmedTransaction(
+            submission,
+        )
+        | crate::live_minotari::PreparedTransactionRecovery::RecoveredAcceptedPendingConfirmation(
+            submission,
+        ) => Ok(Some(submission)),
+    }
 }
 
 #[cfg(feature = "live-minotari")]
@@ -601,12 +662,9 @@ fn write_json_atomic(path: &Path, value: &impl serde::Serialize) -> anyhow::Resu
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let temporary = path.with_extension("tmp");
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
-    fs::write(&temporary, bytes)?;
-    fs::rename(&temporary, path)?;
-    Ok(())
+    crate::result_profile::durable_atomic_write(path, &bytes)
 }
 
 struct RunNamespaceLock {
@@ -633,7 +691,7 @@ impl RunNamespaceLock {
 
 impl Drop for RunNamespaceLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = crate::result_profile::durable_remove_file(&self.path);
     }
 }
 
@@ -753,7 +811,7 @@ fn validate_s0_funding_evidence(
         .with_context(|| format!("reading S0 evidence {}", evidence_path.display()))?;
     let evidence: S0FundingEvidence = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing S0 evidence {}", evidence_path.display()))?;
-    if evidence.schema_version != 2
+    if !matches!(evidence.schema_version, 2 | 3)
         || evidence.status != "confirmed"
         || profile.config.get("prefunding_b0_run_id")
             != Some(&serde_json::json!(evidence.b0_run_id))
@@ -785,7 +843,9 @@ fn validate_s0_funding_evidence(
             || funding.birthday != Some(evidence.birthday)
             || funding.birthday_start_height != Some(evidence.birthday_start_height)
             || funding.construction_ms != Some(transaction.construction_ms)
-            || funding.broadcast_to_mempool_ms != Some(transaction.broadcast_to_mempool_ms)
+            || funding.broadcast_to_mempool_ms != transaction.broadcast_to_mempool_ms
+            || funding.broadcast_to_mempool_unavailable_reason
+                != transaction.broadcast_to_mempool_unavailable_reason
             || funding.broadcast_to_confirmed_at_c_min_ms
                 != Some(transaction.broadcast_to_confirmed_at_c_min_ms)
             || funding.tip_height_at_broadcast != transaction.tip_height_at_broadcast
@@ -805,8 +865,8 @@ fn config_with_s0_evidence(config: &Config, evidence_path: &Path) -> anyhow::Res
         &fs::read(evidence_path)
             .with_context(|| format!("reading S0 evidence {}", evidence_path.display()))?,
     )?;
-    if evidence.schema_version != 2 || evidence.status != "confirmed" {
-        bail!("S0 evidence must be a confirmed schema-v2 record");
+    if !matches!(evidence.schema_version, 2 | 3) || evidence.status != "confirmed" {
+        bail!("S0 evidence must be a confirmed schema-v2/v3 record");
     }
     if evidence.protocol_fingerprint != config.protocol_fingerprint()? {
         bail!("S0 evidence protocol fingerprint does not match the run configuration");
@@ -822,7 +882,10 @@ fn config_with_s0_evidence(config: &Config, evidence_path: &Path) -> anyhow::Res
         birthday: Some(evidence.birthday),
         birthday_start_height: Some(evidence.birthday_start_height),
         construction_ms: Some(transaction.construction_ms),
-        broadcast_to_mempool_ms: Some(transaction.broadcast_to_mempool_ms),
+        broadcast_to_mempool_ms: transaction.broadcast_to_mempool_ms,
+        broadcast_to_mempool_unavailable_reason: transaction
+            .broadcast_to_mempool_unavailable_reason
+            .clone(),
         broadcast_to_confirmed_at_c_min_ms: Some(transaction.broadcast_to_confirmed_at_c_min_ms),
         tip_height_at_broadcast: transaction.tip_height_at_broadcast,
         tip_height_at_confirmation: Some(transaction.tip_height_at_confirmation),
@@ -1008,7 +1071,7 @@ fn check_live_funds_at_paths(config: &Config, paths: &LiveWalletPaths) -> anyhow
         }
         let summary = output_status_summary(db_path)
             .with_context(|| format!("reading {label} outputs from {}", db_path.display()))?;
-        let totals = fund_status_totals(&summary);
+        let totals = fund_status_totals(&summary)?;
         println!(
             "{label}: db={} spendable_count={} spendable_microtari={} required_spendable_count={required_unspent} statuses={}",
             db_path.display(),
@@ -1703,13 +1766,19 @@ fn active_output_filter(conn: &Connection) -> anyhow::Result<&'static str> {
     }
 }
 
-fn fund_status_totals(summary: &[OutputStatusSummary]) -> FundStatusTotals {
+fn fund_status_totals(summary: &[OutputStatusSummary]) -> anyhow::Result<FundStatusTotals> {
     let mut totals = FundStatusTotals::default();
     for row in summary {
         match classify_output_status(&row.status) {
             OutputStatusClass::Spendable => {
-                totals.spendable_count = totals.spendable_count.saturating_add(row.count);
-                totals.spendable_value = totals.spendable_value.saturating_add(row.value);
+                totals.spendable_count = totals
+                    .spendable_count
+                    .checked_add(row.count)
+                    .context("spendable output count overflowed u64")?;
+                totals.spendable_value = totals
+                    .spendable_value
+                    .checked_add(row.value)
+                    .context("spendable output value overflowed u64")?;
             }
             OutputStatusClass::Pending => totals.pending_rows.push(format_status_row(row)),
             OutputStatusClass::Spent => totals.spent_rows.push(format_status_row(row)),
@@ -1717,7 +1786,7 @@ fn fund_status_totals(summary: &[OutputStatusSummary]) -> FundStatusTotals {
             OutputStatusClass::Unknown => totals.unknown_rows.push(format_status_row(row)),
         }
     }
-    totals
+    Ok(totals)
 }
 
 fn format_status_row(row: &OutputStatusSummary) -> String {
@@ -1814,6 +1883,50 @@ fn check_harness_worktree_clean() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "live-minotari")]
+    fn recovered_submission_fixture() -> crate::result_profile::S0FundingSubmissionEvidence {
+        crate::result_profile::S0FundingSubmissionEvidence {
+            tx_id: "42".to_string(),
+            broadcasted_at: chrono::Utc::now(),
+            fee_microtari: 700,
+            construction_ms: 10,
+            broadcast_to_mempool_ms: Some(2),
+            broadcast_to_mempool_unavailable_reason: None,
+            tip_height_at_broadcast: Some(100),
+        }
+    }
+
+    #[cfg(feature = "live-minotari")]
+    #[test]
+    fn s0_recovery_never_selects_fresh_submission() {
+        use crate::live_minotari::PreparedTransactionRecovery;
+
+        assert!(
+            recovered_s0_submission(&PreparedTransactionRecovery::NoCheckpoint)
+                .unwrap()
+                .is_none()
+        );
+        for recovery in [
+            PreparedTransactionRecovery::RecoveredConfirmedTransaction(
+                recovered_submission_fixture(),
+            ),
+            PreparedTransactionRecovery::RecoveredAcceptedPendingConfirmation(
+                recovered_submission_fixture(),
+            ),
+        ] {
+            assert_eq!(
+                recovered_s0_submission(&recovery).unwrap().unwrap().tx_id,
+                "42"
+            );
+        }
+        assert!(
+            recovered_s0_submission(&PreparedTransactionRecovery::RejectedCheckpointReconciled)
+                .unwrap_err()
+                .to_string()
+                .contains("operator replacement approval")
+        );
+    }
+
     #[test]
     fn sqlite_fund_summary_classifies_minotari_text_statuses() {
         let dir = tempfile::tempdir().unwrap();
@@ -1829,7 +1942,7 @@ mod tests {
         );
 
         let summary = output_status_summary(&db_path).unwrap();
-        let totals = fund_status_totals(&summary);
+        let totals = fund_status_totals(&summary).unwrap();
 
         assert_eq!(totals.spendable_count, 1);
         assert_eq!(totals.spendable_value, 1_000_000);
@@ -1862,7 +1975,7 @@ mod tests {
         );
 
         let summary = output_status_summary(&db_path).unwrap();
-        let totals = fund_status_totals(&summary);
+        let totals = fund_status_totals(&summary).unwrap();
 
         assert_eq!(totals.spendable_count, 1);
         assert_eq!(totals.spendable_value, 1_000_000);
@@ -1928,12 +2041,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let minotari_totals = fund_status_totals(&output_status_summary(&minotari_db).unwrap());
+        let minotari_totals =
+            fund_status_totals(&output_status_summary(&minotari_db).unwrap()).unwrap();
         assert_eq!(minotari_totals.spendable_count, 1);
         assert_eq!(minotari_totals.spendable_value, 100);
         assert!(minotari_totals.pending_rows.is_empty());
 
-        let console_totals = fund_status_totals(&output_status_summary(&console_db).unwrap());
+        let console_totals =
+            fund_status_totals(&output_status_summary(&console_db).unwrap()).unwrap();
         assert_eq!(console_totals.spendable_count, 1);
         assert_eq!(console_totals.spendable_value, 300);
         assert!(console_totals.pending_rows.is_empty());
@@ -1970,7 +2085,7 @@ mod tests {
             count: 1,
             value: 42,
         };
-        let totals = fund_status_totals(&[row]);
+        let totals = fund_status_totals(&[row]).unwrap();
 
         assert_eq!(totals.spendable_count, 0);
         assert_eq!(totals.unknown_rows, vec!["MYSTERY(Unknown):1:42"]);

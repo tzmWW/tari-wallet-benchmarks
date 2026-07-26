@@ -507,6 +507,7 @@ async fn run_library_fresh_scan(
             config.timeout(config.timeouts.startup_secs),
             target.clone(),
             &mut progress,
+            false,
         ),
     )
     .await;
@@ -959,11 +960,17 @@ pub(super) fn wallet_output_state_counts(db_path: &Path) -> anyhow::Result<serde
         "SELECT CAST(status AS TEXT) FROM outputs WHERE {active} confirmed_height IS NOT NULL"
     ))?;
     let mut counts = serde_json::Map::from_iter([
+        ("spendable_outputs".to_string(), serde_json::json!(0u64)),
         ("pending_outputs".to_string(), serde_json::json!(0u64)),
         ("locked_outputs".to_string(), serde_json::json!(0u64)),
         ("invalid_outputs".to_string(), serde_json::json!(0u64)),
         ("unknown_outputs".to_string(), serde_json::json!(0u64)),
     ]);
+    let spendable = spendable_output_amounts(db_path)?.len() as u64;
+    counts.insert(
+        "spendable_outputs".to_string(),
+        serde_json::json!(spendable),
+    );
     for status in statement.query_map([], |row| row.get::<_, String>(0))? {
         let status = status?;
         let key = match status.to_ascii_uppercase().as_str() {

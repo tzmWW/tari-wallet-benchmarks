@@ -8,7 +8,8 @@ use anyhow::{Context, bail};
 use serde_json::{Value, json};
 
 use super::{
-    CellStatus, ProfileKind, REFERENCE_BASE_NODE_REVISION, RESULT_SCHEMA_VERSION, ResultProfile,
+    CellStatus, OutcomeCounts, ProfileKind, REFERENCE_BASE_NODE_REVISION, RESULT_SCHEMA_VERSION,
+    ResultProfile,
 };
 use crate::{
     modes::{ModeName, ScenarioName},
@@ -194,6 +195,7 @@ pub fn schema_document() -> Value {
                     "birthday_start_height": {"$ref": "#/$defs/nullable_integer"},
                     "construction_ms": {"$ref": "#/$defs/nullable_integer"},
                     "broadcast_to_mempool_ms": {"$ref": "#/$defs/nullable_integer"},
+                    "broadcast_to_mempool_unavailable_reason": {"$ref": "#/$defs/nullable_string"},
                     "broadcast_to_confirmed_at_c_min_ms": {"$ref": "#/$defs/nullable_integer"},
                     "tip_height_at_broadcast": {"$ref": "#/$defs/nullable_integer"},
                     "tip_height_at_confirmation": {"$ref": "#/$defs/nullable_integer"},
@@ -258,6 +260,7 @@ pub fn schema_document() -> Value {
                     "transaction_id": {"$ref": "#/$defs/nullable_string"},
                     "attempt_index": {"$ref": "#/$defs/nullable_integer"},
                     "batch_index": {"$ref": "#/$defs/nullable_integer"},
+                    "batch_id": {"$ref": "#/$defs/nullable_string"},
                     "submit_offset_ms": {"$ref": "#/$defs/nullable_integer"},
                     "construction_complete_offset_ms": {"$ref": "#/$defs/nullable_integer"},
                     "broadcast_start_offset_ms": {"$ref": "#/$defs/nullable_integer"},
@@ -271,6 +274,7 @@ pub fn schema_document() -> Value {
                     "confirmation_ms": {"$ref": "#/$defs/nullable_integer"},
                     "confirmation_timing_origin": {"$ref": "#/$defs/nullable_string"},
                     "confirmation_timing_reason": {"$ref": "#/$defs/nullable_string"},
+                    "amount_microtari": {"$ref": "#/$defs/nullable_integer"},
                     "fee_microtari": {"$ref": "#/$defs/nullable_integer"},
                     "fee_unavailable_reason": {"$ref": "#/$defs/nullable_string"},
                     "fee_disposition": {"enum": ["confirmed_paid", "proposed_unresolved", "rejected", "unavailable"]},
@@ -283,6 +287,8 @@ pub fn schema_document() -> Value {
                     "terminal_outcome": {"enum": ["confirmed", "rejected", "stalled", "timed_out", "unavailable"]},
                     "error": {"$ref": "#/$defs/nullable_string"},
                     "mined_height": {"$ref": "#/$defs/nullable_integer"},
+                    "confirmations": {"$ref": "#/$defs/nullable_integer"},
+                    "min_confirmations": {"$ref": "#/$defs/nullable_integer"},
                     "tip_start_height": {"$ref": "#/$defs/nullable_integer"},
                     "tip_end_height": {"$ref": "#/$defs/nullable_integer"},
                     "input_count": {"$ref": "#/$defs/nullable_integer"},
@@ -835,7 +841,11 @@ fn validate_reference_configuration(
             );
         }
         if funding.construction_ms.is_none()
-            || funding.broadcast_to_mempool_ms.is_none()
+            || (funding.broadcast_to_mempool_ms.is_none()
+                && funding
+                    .broadcast_to_mempool_unavailable_reason
+                    .as_deref()
+                    .is_none_or(str::is_empty))
             || funding.broadcast_to_confirmed_at_c_min_ms.is_none()
             || funding.tip_height_at_broadcast.is_none()
             || funding.tip_height_at_confirmation.is_none()
@@ -949,6 +959,8 @@ fn validate_reference_configuration(
             || funding.tip_height_at_broadcast != first.tip_height_at_broadcast
             || funding.construction_ms != first.construction_ms
             || funding.broadcast_to_mempool_ms != first.broadcast_to_mempool_ms
+            || funding.broadcast_to_mempool_unavailable_reason
+                != first.broadcast_to_mempool_unavailable_reason
             || funding.broadcast_to_confirmed_at_c_min_ms
                 != first.broadcast_to_confirmed_at_c_min_ms
             || funding.tip_height_at_confirmation != first.tip_height_at_confirmation
@@ -996,6 +1008,74 @@ fn validate_confirmed_observation_bindings(
                         tx_id.to_string(),
                     );
                     *observed.entry(key).or_default() += 1;
+                    let chain_row = profile
+                        .chain_verification
+                        .verified_transactions
+                        .iter()
+                        .find(|transaction| {
+                            transaction.mode == mode.as_str()
+                                && transaction.scenario == scenario.as_str()
+                                && transaction.tx_id == tx_id
+                        })
+                        .with_context(|| {
+                            format!(
+                                "confirmed {}/{} transaction {} lacks a matching chain row",
+                                mode.as_str(),
+                                scenario.as_str(),
+                                tx_id
+                            )
+                        })?;
+                    for (name, expected, actual) in [
+                        (
+                            "amount",
+                            observation["amount_microtari"].as_u64(),
+                            chain_row.amount_microtari,
+                        ),
+                        (
+                            "fee",
+                            observation["fee_microtari"].as_u64(),
+                            chain_row.fee_microtari,
+                        ),
+                        (
+                            "mined height",
+                            observation["mined_height"].as_u64(),
+                            chain_row.mined_height,
+                        ),
+                        (
+                            "tip height",
+                            observation["tip_end_height"].as_u64(),
+                            chain_row.tip_height,
+                        ),
+                        (
+                            "confirmations",
+                            observation["confirmations"].as_u64(),
+                            chain_row.confirmations,
+                        ),
+                        (
+                            "minimum confirmations",
+                            observation["min_confirmations"].as_u64(),
+                            chain_row.min_confirmations,
+                        ),
+                    ] {
+                        if expected.is_none() {
+                            bail!(
+                                "confirmed {}/{} transaction {} omits {} evidence",
+                                mode.as_str(),
+                                scenario.as_str(),
+                                tx_id,
+                                name
+                            );
+                        }
+                        if expected != actual {
+                            bail!(
+                                "confirmed {}/{} transaction {} has mismatched {} evidence",
+                                mode.as_str(),
+                                scenario.as_str(),
+                                tx_id,
+                                name
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1083,7 +1163,29 @@ fn validate_cross_cutting_scenario_metrics(document: &Value) -> anyhow::Result<(
                         "submission {label} fee_microtari does not equal confirmed observation fees"
                     );
                 }
-                validate_balance_reconciliation(metrics, &label, run["fee_microtari"].as_u64())?;
+                let confirmed_outgoing_total = metrics
+                    .get("transaction_observations")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|observation| observation["terminal_outcome"] == "confirmed")
+                    .map(|observation| {
+                        observation["amount_microtari"].as_u64().with_context(|| {
+                            format!("submission {label} confirmed observation lacks amount")
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?
+                    .into_iter()
+                    .try_fold(0u64, |total, amount| total.checked_add(amount))
+                    .with_context(|| {
+                        format!("submission {label} confirmed outgoing total overflows")
+                    })?;
+                validate_balance_reconciliation(
+                    metrics,
+                    &label,
+                    run["fee_microtari"].as_u64(),
+                    confirmed_outgoing_total,
+                )?;
                 let has_balance = metrics.contains_key("balance_reconciliation")
                     || metrics
                         .get("balance_delta_microtari")
@@ -1111,6 +1213,7 @@ fn validate_balance_reconciliation(
     metrics: &serde_json::Map<String, Value>,
     label: &str,
     fee_microtari: Option<u64>,
+    confirmed_outgoing_microtari: u64,
 ) -> anyhow::Result<()> {
     let Some(reconciliation) = metrics.get("balance_reconciliation") else {
         return Ok(());
@@ -1120,28 +1223,38 @@ fn validate_balance_reconciliation(
         .get("outgoing_microtari")
         .and_then(Value::as_u64)
         .context("balance reconciliation requires outgoing_microtari")?;
-    let (before, after, domain) = if let (Some(before), Some(after)) = (
-        metrics
-            .get("balance_before_microtari")
-            .and_then(Value::as_u64),
-        metrics
-            .get("balance_after_microtari")
-            .and_then(Value::as_u64),
-    ) {
-        (before, after, "available")
-    } else {
-        let before = metrics
-            .get("balance_before")
-            .and_then(|value| value.get("total"))
-            .and_then(Value::as_u64)
-            .context("balance reconciliation requires balance_before.total")?;
-        let after = metrics
-            .get("balance_after")
-            .and_then(|value| value.get("total"))
-            .and_then(Value::as_u64)
-            .context("balance reconciliation requires balance_after.total")?;
-        (before, after, "total")
+    if outgoing != confirmed_outgoing_microtari {
+        bail!("{label} outgoing_microtari does not equal confirmed observation amounts");
+    }
+    let domain = reconciliation["balance_domain"]
+        .as_str()
+        .context("balance reconciliation requires an explicit balance_domain")?;
+    let (before, after) = match domain {
+        "available" => (
+            metrics
+                .get("balance_before_microtari")
+                .and_then(Value::as_u64),
+            metrics
+                .get("balance_after_microtari")
+                .and_then(Value::as_u64),
+        ),
+        "total" => {
+            let before = metrics
+                .get("balance_before")
+                .and_then(|value| value.get("total"))
+                .and_then(Value::as_u64)
+                .context("balance reconciliation requires balance_before.total")?;
+            let after = metrics
+                .get("balance_after")
+                .and_then(|value| value.get("total"))
+                .and_then(Value::as_u64)
+                .context("balance reconciliation requires balance_after.total")?;
+            (Some(before), Some(after))
+        }
+        _ => bail!("{label} balance reconciliation has an unknown balance_domain"),
     };
+    let before = before.context("balance reconciliation source before is unavailable")?;
+    let after = after.context("balance reconciliation source after is unavailable")?;
     let deduction = outgoing
         .checked_add(fee)
         .context("balance reconciliation outgoing amount and fee overflow")?;
@@ -1489,13 +1602,13 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
                     .filter_map(Value::as_str)
                     .collect::<BTreeSet<_>>();
                 let mut observed = BTreeSet::new();
-                for observation in observations
-                    .iter()
-                    .filter(|observation| observation["terminal_outcome"] == "confirmed")
-                {
-                    let recipients = observation["recipients"]
-                        .as_array()
-                        .with_context(|| format!("submission {mode}/S5 repetition {} confirmed observation lacks recipients", repetition + 1))?;
+                for observation in observations {
+                    let recipients = observation["recipients"].as_array().with_context(|| {
+                        format!(
+                            "submission {mode}/S5 repetition {} observation lacks recipients",
+                            repetition + 1
+                        )
+                    })?;
                     if recipients.is_empty()
                         || recipients.iter().any(|recipient| {
                             recipient
@@ -1508,7 +1621,24 @@ fn validate_scenario_specific_metrics(document: &Value) -> anyhow::Result<()> {
                             repetition + 1
                         );
                     }
-                    observed.extend(recipients.iter().filter_map(Value::as_str));
+                    let distinct = recipients
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<BTreeSet<_>>();
+                    if distinct.len() != recipients.len() {
+                        bail!(
+                            "submission {mode}/S5 repetition {} contains duplicate recipients",
+                            repetition + 1
+                        );
+                    }
+                    for recipient in recipients.iter().filter_map(Value::as_str) {
+                        if !observed.insert(recipient) {
+                            bail!(
+                                "submission {mode}/S5 repetition {} repeats a recipient across observations",
+                                repetition + 1
+                            );
+                        }
+                    }
                 }
                 if scenarios["S5"]["outcome_status"] == "success" && observed != expected {
                     bail!(
@@ -1758,10 +1888,12 @@ fn validate_transaction_observations(
                 })?;
             for observation in confirmed {
                 let tx_id = observation["transaction_id"].as_str().unwrap_or_default();
+                let batch_id = observation["batch_id"].as_str().unwrap_or_default();
                 if tx_id.is_empty()
-                    || !identities
-                        .iter()
-                        .any(|identity| identity["transaction_id"] == tx_id)
+                    || batch_id.is_empty()
+                    || !identities.iter().any(|identity| {
+                        identity["batch_id"] == batch_id && identity["transaction_id"] == tx_id
+                    })
                 {
                     bail!(
                         "submission {mode}/{scenario} confirmed transaction lacks UUID-to-chain mapping"
@@ -1772,15 +1904,35 @@ fn validate_transaction_observations(
     }
     for observation in observations {
         let outcome = observation["terminal_outcome"].as_str().unwrap_or_default();
+        if !matches!(
+            outcome,
+            "confirmed" | "rejected" | "stalled" | "timed_out" | "unavailable"
+        ) {
+            bail!("submission {mode}/{scenario} has an unknown terminal outcome");
+        }
         let api_accepted = observation["api_accepted"].as_bool();
-        let has_identity =
-            observation["transaction_id"].is_string() || observation["batch_index"].is_number();
+        let has_identity = if mode == "payment_processor" {
+            observation["batch_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        } else {
+            observation["transaction_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        };
         if api_accepted == Some(false) && outcome != "rejected" {
             bail!("submission {mode}/{scenario} immediate API failure must be rejected");
         }
-        if outcome == "stalled" && (api_accepted != Some(true) || !has_identity) {
+        if matches!(outcome, "stalled" | "timed_out")
+            && (api_accepted != Some(true) || !has_identity)
+        {
             bail!(
                 "submission {mode}/{scenario} stalled observation lacks accepted operation identity"
+            );
+        }
+        if outcome == "confirmed" && (api_accepted != Some(true) || !has_identity) {
+            bail!(
+                "submission {mode}/{scenario} confirmed observation lacks accepted operation identity"
             );
         }
         if mode == "new_wallet" && observation["transaction_id"].is_string() {
@@ -1864,17 +2016,44 @@ fn validate_transaction_observations(
             bail!("submission {mode}/{scenario} transaction with unknown fee lacks a reason");
         }
         let fee_disposition = observation["fee_disposition"].as_str().unwrap_or_default();
-        if observation.get("fee_disposition").is_some()
-            && outcome == "confirmed"
-            && fee_disposition != "confirmed_paid"
+        if observation
+            .get("fee_disposition")
+            .and_then(Value::as_str)
+            .is_none()
         {
+            bail!("submission {mode}/{scenario} observation must declare fee disposition");
+        }
+        if outcome == "confirmed" && fee_disposition != "confirmed_paid" {
             bail!("submission {mode}/{scenario} confirmed transaction fee is not marked paid");
         }
-        if observation.get("fee_disposition").is_some()
-            && outcome == "rejected"
-            && fee_disposition != "rejected"
-        {
+        if outcome == "rejected" && fee_disposition != "rejected" {
             bail!("submission {mode}/{scenario} rejected transaction has invalid fee disposition");
+        }
+        if matches!(outcome, "stalled" | "timed_out")
+            && !matches!(fee_disposition, "proposed_unresolved" | "unavailable")
+        {
+            bail!(
+                "submission {mode}/{scenario} unresolved transaction has invalid fee disposition"
+            );
+        }
+        if outcome == "unavailable" && fee_disposition != "unavailable" {
+            bail!(
+                "submission {mode}/{scenario} unavailable transaction has invalid fee disposition"
+            );
+        }
+        if fee_disposition == "proposed_unresolved"
+            && (observation["fee_microtari"].as_u64().is_none()
+                || !matches!(outcome, "stalled" | "timed_out"))
+        {
+            bail!("submission {mode}/{scenario} proposed unresolved fee is inconsistent");
+        }
+        if matches!(outcome, "stalled" | "timed_out")
+            && fee_disposition == "unavailable"
+            && observation["fee_microtari"].as_u64().is_some()
+        {
+            bail!(
+                "submission {mode}/{scenario} unresolved transaction exposes a proposed fee but marks it unavailable"
+            );
         }
     }
     Ok(())
@@ -2006,30 +2185,22 @@ fn mode_scenarios(
 }
 
 fn summary_outcome_counts(cell: &Value) -> (usize, usize, usize, usize, usize) {
-    let mut api_accepted = 0;
-    let mut confirmed = 0;
-    let mut rejected = 0;
-    let mut stalled = 0;
-    let mut timed_out = 0;
-    for observation in cell["repetitions"]
+    let observations = cell["repetitions"]
         .as_array()
         .into_iter()
         .flatten()
         .flat_map(|run| run["metrics"]["transaction_observations"].as_array())
         .flatten()
-    {
-        if observation["api_accepted"] == true {
-            api_accepted += 1;
-        }
-        match observation["terminal_outcome"].as_str() {
-            Some("confirmed") => confirmed += 1,
-            Some("rejected") => rejected += 1,
-            Some("stalled") => stalled += 1,
-            Some("timed_out") => timed_out += 1,
-            _ => {}
-        }
-    }
-    (api_accepted, confirmed, rejected, stalled, timed_out)
+        .cloned()
+        .collect::<Vec<_>>();
+    let counts = OutcomeCounts::from_json_observations(&observations);
+    (
+        counts.accepted as usize,
+        counts.confirmed as usize,
+        counts.rejected as usize,
+        counts.stalled as usize,
+        counts.timed_out as usize,
+    )
 }
 
 pub fn write_summary(profile_path: &Path, output_path: &Path) -> anyhow::Result<()> {
@@ -2326,24 +2497,41 @@ mod tests {
                 "balance_domain": "available"
             }
         });
-        validate_balance_reconciliation(metrics.as_object().unwrap(), "test", Some(100)).unwrap();
+        validate_balance_reconciliation(metrics.as_object().unwrap(), "test", Some(100), 600)
+            .unwrap();
         let mut mutated = metrics.clone();
         mutated["balance_reconciliation"]["delta_microtari"] = json!(1);
         assert!(
-            validate_balance_reconciliation(mutated.as_object().unwrap(), "test", Some(100))
+            validate_balance_reconciliation(mutated.as_object().unwrap(), "test", Some(100), 600,)
                 .is_err()
         );
         let mut underflow = metrics.clone();
         underflow["balance_before_microtari"] = json!(50);
         assert!(
-            validate_balance_reconciliation(underflow.as_object().unwrap(), "test", Some(100))
+            validate_balance_reconciliation(
+                underflow.as_object().unwrap(),
+                "test",
+                Some(100),
+                600,
+            )
                 .is_err()
         );
-        let mut missing_domain = metrics;
+        let mut missing_domain = metrics.clone();
         missing_domain["balance_reconciliation"]["balance_domain"] = Value::Null;
         assert!(
-            validate_balance_reconciliation(missing_domain.as_object().unwrap(), "test", Some(100))
-                .is_err()
+            validate_balance_reconciliation(
+                missing_domain.as_object().unwrap(),
+                "test",
+                Some(100),
+                600,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_balance_reconciliation(metrics.as_object().unwrap(), "test", Some(100), 599,)
+                .unwrap_err()
+                .to_string()
+                .contains("confirmed observation amounts")
         );
     }
 
@@ -2391,6 +2579,88 @@ mod tests {
                 confirmed: true,
             });
         assert!(validate_confirmed_observation_bindings(&document, &profile).is_err());
+    }
+
+    #[test]
+    fn pp_confirmed_binding_requires_the_same_batch_uuid() {
+        let metrics = json!({
+            "transaction_observations": [{
+                "batch_id": "batch-a",
+                "transaction_id": "tx-1",
+                "terminal_outcome": "confirmed"
+            }],
+            "batch_chain_identities": [{
+                "batch_id": "batch-b",
+                "transaction_id": "tx-1"
+            }]
+        });
+        assert!(validate_transaction_observations("payment_processor", "S1", &metrics).is_err());
+    }
+
+    #[test]
+    fn fee_disposition_is_outcome_consistent() {
+        let cases = [
+            ("confirmed", true, "tx", "confirmed_paid", Some(10u64)),
+            ("rejected", false, "", "rejected", None),
+            ("stalled", true, "batch", "proposed_unresolved", Some(10)),
+            ("timed_out", true, "batch", "proposed_unresolved", Some(10)),
+        ];
+        for (outcome, accepted, identity, disposition, fee) in cases {
+            let metrics = json!({
+                "transaction_observations": [{
+                    "terminal_outcome": outcome,
+                    "api_accepted": accepted,
+                    "transaction_id": (identity.starts_with("tx")).then_some(identity),
+                    "batch_id": (identity.starts_with("batch")).then_some(identity),
+                    "fee_microtari": fee,
+                    "fee_unavailable_reason": fee.is_none().then_some("not constructed"),
+                    "fee_disposition": disposition,
+                    "error": (outcome != "confirmed").then_some("terminal outcome"),
+                    "construction_timing_reason": "not exposed",
+                    "construction_ms": null,
+                    "confirmation_ms": (outcome == "confirmed").then_some(1),
+                    "confirmation_timing_origin": (outcome == "confirmed").then_some("grpc_dispatch_to_independent_c_min"),
+                    "mined_height": (outcome == "confirmed").then_some(1),
+                    "tip_end_height": (outcome == "confirmed").then_some(2),
+                    "output_commitments": (outcome == "confirmed").then_some(vec!["commitment"]),
+                    "recipients": ["recipient"]
+                }],
+                "batch_chain_identities": (identity.starts_with("batch") && outcome == "confirmed")
+                    .then_some(json!([{"batch_id": identity, "transaction_id": "tx-1"}]))
+            });
+            let mode = if identity.starts_with("batch") {
+                "payment_processor"
+            } else {
+                "old_wallet"
+            };
+            assert!(validate_transaction_observations(mode, "S1", &metrics).is_ok());
+            for bad_disposition in [
+                "confirmed_paid",
+                "proposed_unresolved",
+                "rejected",
+                "unavailable",
+            ] {
+                if bad_disposition == disposition
+                    || (matches!(outcome, "stalled" | "timed_out")
+                        && bad_disposition == "unavailable")
+                {
+                    continue;
+                }
+                let mut mutated = metrics.clone();
+                mutated["transaction_observations"][0]["fee_disposition"] = json!(bad_disposition);
+                assert!(validate_transaction_observations("old_wallet", "S1", &mutated).is_err());
+            }
+        }
+        let exposed_fee = json!({
+            "transaction_observations": [{
+                "terminal_outcome": "timed_out", "api_accepted": true,
+                "transaction_id": "tx-1", "fee_microtari": 10,
+                "fee_disposition": "unavailable", "error": "deadline",
+                "construction_timing_reason": "not exposed", "construction_ms": null,
+                "recipients": ["recipient"]
+            }]
+        });
+        assert!(validate_transaction_observations("old_wallet", "S1", &exposed_fee).is_err());
     }
 
     #[test]
@@ -2542,10 +2812,13 @@ mod tests {
             "mempool_reason": null,
             "confirmation_ms": 40,
             "confirmation_timing_reason": null,
+            "amount_microtari": 1000000,
             "fee_microtari": 700,
             "terminal_outcome": "confirmed",
             "error": null,
             "mined_height": 100,
+            "confirmations": 3,
+            "min_confirmations": 3,
             "tip_start_height": 99,
             "tip_end_height": 103,
             "input_count": 1,
@@ -2601,6 +2874,7 @@ mod tests {
             birthday_start_height: Some(90),
             construction_ms: Some(1),
             broadcast_to_mempool_ms: Some(2),
+            broadcast_to_mempool_unavailable_reason: None,
             broadcast_to_confirmed_at_c_min_ms: Some(3),
             tip_height_at_broadcast: Some(101),
             tip_height_at_confirmation: Some(104),
@@ -2734,6 +3008,7 @@ mod tests {
                         "balance_after": {"total": 1, "available": 1, "locked": 0, "unconfirmed": 0, "immature": 0, "pending_incoming": 0, "pending_outgoing": 0, "timelocked": 0},
                         "transaction_observations": [{
                             "transaction_id": null, "attempt_index": 1, "batch_index": null,
+                            "batch_id": null,
                             "submit_offset_ms": 0, "construction_complete_offset_ms": 1,
                             "broadcast_start_offset_ms": null,
                             "construction_ms": null, "submission_ms": null,
@@ -2743,7 +3018,7 @@ mod tests {
                             "mempool_available": null, "mempool_reason": "not submitted",
                             "confirmation_ms": null, "confirmation_timing_origin": null,
                             "confirmation_timing_reason": "not submitted",
-                            "fee_microtari": null, "fee_unavailable_reason": "not constructed",
+                            "fee_microtari": null, "fee_unavailable_reason": "not constructed", "fee_disposition": "rejected",
                             "recipient": null, "recipients": [], "api_accepted": false,
                             "api_error": "wallet rejected construction", "terminal_outcome": "rejected",
                             "error": "wallet rejected construction", "mined_height": null,

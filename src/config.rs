@@ -172,6 +172,8 @@ pub struct FundingRecord {
     #[serde(default)]
     pub broadcast_to_mempool_ms: Option<u128>,
     #[serde(default)]
+    pub broadcast_to_mempool_unavailable_reason: Option<String>,
+    #[serde(default)]
     pub broadcast_to_confirmed_at_c_min_ms: Option<u128>,
     #[serde(default)]
     pub tip_height_at_broadcast: Option<u64>,
