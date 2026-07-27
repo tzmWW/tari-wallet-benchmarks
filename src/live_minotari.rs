@@ -6601,6 +6601,28 @@ mod tests {
     }
 
     #[test]
+    fn mode1_coin_split_timing_preserves_accepted_transaction_identity() {
+        let outcome = Mode1TransferOutcome {
+            success_count: 1,
+            failure_count: 0,
+            fee_microtari: 0,
+            tx_ids: vec!["42".to_string()],
+            errors: Vec::new(),
+            tx_timings: vec![serde_json::json!({
+                "tx_id": "42",
+                "api_accepted": true
+            })],
+        }
+        .with_rpc_timing(1, 25);
+
+        assert_eq!(outcome.failure_count, 0);
+        assert!(outcome.errors.is_empty());
+        assert_eq!(outcome.tx_timings[0]["tx_id"], "42");
+        assert_eq!(outcome.tx_timings[0]["api_accepted"], true);
+        assert_eq!(outcome.tx_timings[0]["grpc_round_trip_ms"], 25);
+    }
+
+    #[test]
     fn pp_terminal_wait_does_not_stop_while_an_accepted_batch_is_pending() {
         let snapshot = PaymentProcessorDbSnapshot {
             batches: vec![payment_processor::PaymentBatchSnapshot {

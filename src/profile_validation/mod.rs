@@ -1181,11 +1181,13 @@ fn validate_cross_cutting_scenario_metrics(document: &Value) -> anyhow::Result<(
                         format!("submission {label} confirmed outgoing total overflows")
                     })?;
                 if scenario != "S0" {
+                    let reconciliation_outgoing =
+                        reconciliation_outgoing_microtari(mode, scenario, confirmed_outgoing_total);
                     validate_balance_reconciliation(
                         metrics,
                         &label,
                         run["fee_microtari"].as_u64(),
-                        confirmed_outgoing_total,
+                        reconciliation_outgoing,
                     )?;
                 }
                 let has_balance = metrics.contains_key("balance_reconciliation")
@@ -1209,6 +1211,14 @@ fn validate_cross_cutting_scenario_metrics(document: &Value) -> anyhow::Result<(
         }
     }
     Ok(())
+}
+
+fn reconciliation_outgoing_microtari(mode: &str, scenario: &str, confirmed_total: u64) -> u64 {
+    if scenario == "S1" && matches!(mode, "old_wallet" | "new_wallet") {
+        0
+    } else {
+        confirmed_total
+    }
 }
 
 fn validate_balance_reconciliation(
@@ -1922,7 +1932,17 @@ fn validate_transaction_observations(
                 .as_str()
                 .is_some_and(|id| !id.is_empty())
         };
-        if api_accepted == Some(false) && outcome != "rejected" {
+        let reconciled_mode1_not_found = mode == "old_wallet"
+            && outcome == "confirmed"
+            && observation["transaction_id"]
+                .as_str()
+                .zip(observation["api_error"].as_str())
+                .is_some_and(|(tx_id, error)| {
+                    error.contains(&format!(
+                        "status: NotFound, message: \"Transaction {tx_id} not found within timeout\""
+                    ))
+                });
+        if api_accepted == Some(false) && outcome != "rejected" && !reconciled_mode1_not_found {
             bail!("submission {mode}/{scenario} immediate API failure must be rejected");
         }
         if matches!(outcome, "stalled" | "timed_out")
@@ -1932,7 +1952,10 @@ fn validate_transaction_observations(
                 "submission {mode}/{scenario} stalled observation lacks accepted operation identity"
             );
         }
-        if outcome == "confirmed" && (api_accepted != Some(true) || !has_identity) {
+        if outcome == "confirmed"
+            && (api_accepted != Some(true) || !has_identity)
+            && !reconciled_mode1_not_found
+        {
             bail!(
                 "submission {mode}/{scenario} confirmed observation lacks accepted operation identity"
             );
@@ -2547,6 +2570,57 @@ mod tests {
                 .to_string()
                 .contains("confirmed observation amounts")
         );
+    }
+
+    #[test]
+    fn self_directed_s1_has_zero_external_outgoing() {
+        assert_eq!(
+            reconciliation_outgoing_microtari("old_wallet", "S1", 10_000),
+            0
+        );
+        assert_eq!(
+            reconciliation_outgoing_microtari("new_wallet", "S1", 10_000),
+            0
+        );
+        assert_eq!(
+            reconciliation_outgoing_microtari("payment_processor", "S1", 10_000),
+            10_000
+        );
+        assert_eq!(
+            reconciliation_outgoing_microtari("old_wallet", "S4", 10_000),
+            10_000
+        );
+    }
+
+    #[test]
+    fn mode1_not_found_response_can_reconcile_to_confirmed_chain_evidence() {
+        let metrics = json!({
+            "transaction_observations": [{
+                "transaction_id": "42",
+                "submit_offset_ms": 0,
+                "construction_complete_offset_ms": 10,
+                "recipients": ["recipient"],
+                "api_accepted": false,
+                "api_error": "status: NotFound, message: \"Transaction 42 not found within timeout\"",
+                "terminal_outcome": "confirmed",
+                "construction_ms": null,
+                "construction_timing_reason": "console-wallet gRPC does not expose internal construction completion",
+                "confirmation_ms": 100,
+                "confirmation_timing_origin": "grpc_dispatch_to_independent_c_min",
+                "fee_microtari": 660,
+                "fee_disposition": "confirmed_paid",
+                "mined_height": 10,
+                "tip_end_height": 13,
+                "output_commitments": ["commitment"],
+                "error": null
+            }]
+        });
+        validate_transaction_observations("old_wallet", "S4", &metrics).unwrap();
+
+        let mut unrelated = metrics;
+        unrelated["transaction_observations"][0]["api_error"] =
+            json!("status: NotFound, message: \"Transaction 43 not found within timeout\"");
+        assert!(validate_transaction_observations("old_wallet", "S4", &unrelated).is_err());
     }
 
     #[test]

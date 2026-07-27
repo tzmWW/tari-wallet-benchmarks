@@ -1257,7 +1257,10 @@ async fn submit_mode1_coin_split(
         fee_microtari: 0,
         tx_ids: vec![response.tx_id.to_string()],
         errors: Vec::new(),
-        tx_timings: Vec::new(),
+        tx_timings: vec![serde_json::json!({
+            "tx_id": response.tx_id.to_string(),
+            "api_accepted": true
+        })],
     }
     .with_rpc_timing(1, submit_start.elapsed().as_millis()))
 }
