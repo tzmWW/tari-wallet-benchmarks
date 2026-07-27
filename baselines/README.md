@@ -1,30 +1,35 @@
 # Baseline Status
 
-`esmeralda_baseline.json` is the historical schema-v5 joint baseline from the
-uncapped `baseline-20260714T121001Z` run. Validate it with the explicit legacy
-path (this does not recast it as schema-v6 evidence):
+`esmeralda_baseline.json` is the promoted schema-v6 profile from uncapped run
+`baseline-20260727T110514Z`. It contains all 27 benchmark cells and passes strict
+submission validation:
 
 ```sh
-cargo run --release -- validate-profile --profile baselines/esmeralda_baseline.json --legacy-v5
-cargo run --release -- summarize-profile --profile baselines/esmeralda_baseline.json --legacy-v5 --out /tmp/esmeralda_baseline.summary.generated.md
+cargo run --release -- validate-profile --profile baselines/esmeralda_baseline.json --submission
+cargo run --release -- summarize-profile --profile baselines/esmeralda_baseline.json --out /tmp/esmeralda_baseline.summary.generated.md
 cmp -s /tmp/esmeralda_baseline.summary.generated.md baselines/esmeralda_baseline.summary.md
 ```
 
-The profile discloses evidence-backed post-run reporting corrections: one-sided
-receive history is matched by chain output commitments because its wallet-local
-history IDs differ from sender transaction IDs, and payment-processor balance
-fields lost to concurrent SQLite reads were reconstructed from confirmed
-payments, verified fees, fresh-scan balances, and final DB state. Timings and
-wallet outcomes are unchanged. The Mode 2 S1 note was also corrected to describe
-balanced no-change children rather than the unrelated configured payment amount.
-Genuine recovery, timeout, and database-lock failures remain reported.
+The harness measured at commit `769e75c365ed470fbb3d964df4f30d3763f0439e`.
+Reporting corrections were exported with commit
+`ce86e0bc5a287edd3510ac35c810ff4185aa42b9`.
 
-New harness output uses schema-v6. Validate non-funded schema-v6 fixtures with
-the normal command; the committed baseline is intentionally not rewritten here
-because no new funded benchmark was run.
+## Correction Artifacts
 
-No authenticated raw schema-v6 artifact is present in this repository, so no
-corrected schema-v6 baseline is claimed. When an authenticated raw profile is
-available, `scripts/correct-profile.py` applies only the JSON Pointer/value
-mutations listed in a hash-bound manifest and prints the resulting hashes. A
-funded schema-v6 rerun remains external work.
+- `esmeralda_baseline.raw.json`: byte-exact final stage checkpoint.
+- `esmeralda_baseline.correction-evidence.json`: sanitized Mode 1 S1 DB/log
+  evidence and end-anchor evidence; it excludes seeds, private keys, and
+  serialized transactions.
+- `esmeralda_baseline.correction.json`: SHA-256-bound JSON Pointer correction
+  manifest.
+- `scripts/correct-profile.py`: generic manifest applicator.
+- `scripts/build-mode1-s1-correction.py`: fail-closed evidence extractor and
+  manifest generator.
+- `analysis/baseline-20260727-audit.md`: correction rationale and scenario audit.
+
+The correction links the 127 Mode 1 CoinSplit IDs to their raw accepted-submit,
+console DB, shape, commitment, and C-min evidence; treats Mode 1/2 S1 as
+self-directed zero-net-outgoing splits; and restores the final chain anchor.
+No scenario wall time, fee, transaction result, scan result, or wallet failure
+was changed. Genuine recovery mismatches, lock failures, timeouts, and HTTP 500
+responses remain failures in the promoted profile.
