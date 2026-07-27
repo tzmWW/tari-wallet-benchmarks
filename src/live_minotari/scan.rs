@@ -946,8 +946,9 @@ pub(super) fn amount_field_as_microtari(balance: &serde_json::Value, key: &str) 
 pub(super) fn spendable_output_count(db_path: &Path) -> anyhow::Result<u64> {
     let conn = Connection::open(db_path)?;
     let active = active_output_predicate(&conn)?;
+    let confirmed = confirmed_output_predicate(&conn)?;
     let sql = format!(
-        "SELECT COUNT(*) FROM outputs WHERE {active} confirmed_height IS NOT NULL AND CAST(status AS TEXT) IN ('UNSPENT', '0')"
+        "SELECT COUNT(*) FROM outputs WHERE {active} {confirmed} AND CAST(status AS TEXT) IN ('UNSPENT', '0')"
     );
     let count: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
     Ok(u64::try_from(count).unwrap_or_default())
@@ -956,8 +957,9 @@ pub(super) fn spendable_output_count(db_path: &Path) -> anyhow::Result<u64> {
 pub(super) fn wallet_output_state_counts(db_path: &Path) -> anyhow::Result<serde_json::Value> {
     let conn = Connection::open(db_path)?;
     let active = active_output_predicate(&conn)?;
+    let confirmed = confirmed_output_predicate(&conn)?;
     let mut statement = conn.prepare(&format!(
-        "SELECT CAST(status AS TEXT) FROM outputs WHERE {active} confirmed_height IS NOT NULL"
+        "SELECT CAST(status AS TEXT) FROM outputs WHERE {active} {confirmed}"
     ))?;
     let mut counts = serde_json::Map::from_iter([
         ("spendable_outputs".to_string(), serde_json::json!(0u64)),
@@ -989,8 +991,9 @@ pub(super) fn wallet_output_state_counts(db_path: &Path) -> anyhow::Result<serde
 pub(super) fn spendable_output_amounts(db_path: &Path) -> anyhow::Result<Vec<u64>> {
     let conn = Connection::open(db_path)?;
     let active = active_output_predicate(&conn)?;
+    let confirmed = confirmed_output_predicate(&conn)?;
     let sql = format!(
-        "SELECT value FROM outputs WHERE {active} confirmed_height IS NOT NULL AND CAST(status AS TEXT) IN ('UNSPENT', '0') ORDER BY value DESC"
+        "SELECT value FROM outputs WHERE {active} {confirmed} AND CAST(status AS TEXT) IN ('UNSPENT', '0') ORDER BY value DESC"
     );
     let mut stmt = conn.prepare(&sql)?;
     stmt.query_map([], |row| row.get::<_, i64>(0))?
@@ -999,6 +1002,17 @@ pub(super) fn spendable_output_amounts(db_path: &Path) -> anyhow::Result<Vec<u64
             u64::try_from(value).context("spendable output has negative value")
         })
         .collect()
+}
+
+fn confirmed_output_predicate(conn: &Connection) -> anyhow::Result<&'static str> {
+    let columns = table_columns_for_scan(conn, "outputs")?;
+    if columns.contains("confirmed_height") {
+        Ok("confirmed_height IS NOT NULL")
+    } else if columns.contains("mined_height") {
+        Ok("mined_height IS NOT NULL")
+    } else {
+        bail!("outputs has no confirmed_height or mined_height column")
+    }
 }
 
 pub(super) fn spendable_wallet_outputs(
@@ -1093,6 +1107,35 @@ mod tests {
 
         assert_eq!(spendable_output_count(&db_path).unwrap(), 1);
         assert_eq!(spendable_output_amounts(&db_path).unwrap(), vec![100]);
+    }
+
+    #[test]
+    fn wallet_state_queries_support_console_wallet_mined_height() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("console-wallet.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE outputs (
+                value INTEGER NOT NULL,
+                status INTEGER NOT NULL,
+                mined_height INTEGER,
+                marked_deleted_at_height INTEGER
+            );
+            INSERT INTO outputs (value, status, mined_height, marked_deleted_at_height) VALUES
+                (10000, 0, 100, NULL),
+                (20000, 1, 100, NULL),
+                (30000, 0, NULL, NULL);",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(spendable_output_count(&db_path).unwrap(), 1);
+        assert_eq!(spendable_output_amounts(&db_path).unwrap(), vec![10_000]);
+        let counts = wallet_output_state_counts(&db_path).unwrap();
+        assert_eq!(counts["spendable_outputs"], 1);
+        assert_eq!(counts["pending_outputs"], 1);
+        assert_eq!(counts["invalid_outputs"], 0);
+        assert_eq!(counts["unknown_outputs"], 0);
     }
 
     #[test]

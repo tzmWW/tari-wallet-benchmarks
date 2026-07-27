@@ -1180,12 +1180,14 @@ fn validate_cross_cutting_scenario_metrics(document: &Value) -> anyhow::Result<(
                     .with_context(|| {
                         format!("submission {label} confirmed outgoing total overflows")
                     })?;
-                validate_balance_reconciliation(
-                    metrics,
-                    &label,
-                    run["fee_microtari"].as_u64(),
-                    confirmed_outgoing_total,
-                )?;
+                if scenario != "S0" {
+                    validate_balance_reconciliation(
+                        metrics,
+                        &label,
+                        run["fee_microtari"].as_u64(),
+                        confirmed_outgoing_total,
+                    )?;
+                }
                 let has_balance = metrics.contains_key("balance_reconciliation")
                     || metrics
                         .get("balance_delta_microtari")
@@ -2472,7 +2474,7 @@ mod tests {
                 .contains("explicit fees")
         );
 
-        let mut missing_balance = document;
+        let mut missing_balance = document.clone();
         missing_balance["modes"]["old_wallet"]["scenarios"]["S0"]["repetitions"][0]["metrics"] =
             serde_json::json!({});
         assert!(
@@ -2481,6 +2483,18 @@ mod tests {
                 .to_string()
                 .contains("final balance reconciliation")
         );
+
+        let mut s0_reconciliation = document;
+        s0_reconciliation["modes"]["old_wallet"]["scenarios"]["S0"]["repetitions"][0]["metrics"] = serde_json::json!({
+            "balance_reconciliation": {
+                "assumption": "S0 expected balance equals A_fund; funding fee is outside measurement",
+                "expected_balance_microtari": 10_000,
+                "observed_balance_microtari": 10_000,
+                "delta_microtari": 0,
+                "flagged": false
+            }
+        });
+        validate_cross_cutting_scenario_metrics(&s0_reconciliation).unwrap();
     }
 
     #[test]
