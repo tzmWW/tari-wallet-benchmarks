@@ -528,6 +528,9 @@ async fn run_mode1_send_cells(
 ) -> anyhow::Result<()> {
     let amount = parse_amount(&config.benchmark.mode1_payment_amount)?;
     let fee_rate = config.fee_rate()?.0;
+    let expected_s1_batches = s1_round_plan(config, config.benchmark.mode1_live_max_s1_txs)
+        .iter()
+        .fold(0u32, |total, round| total.saturating_add(round.tx_count));
     let s1_components_before = mode1_balance_components(&mut context.client).await.ok();
     let mut s1 = run_mode1_s1(config, &mut context.client, fee_rate).await;
     s1.tip_end_height = base_node_tip_height(&config.network.base_node_http_url)
@@ -545,12 +548,13 @@ async fn run_mode1_send_cells(
         profile,
         ScenarioName::S1,
         &s1,
+        Some(expected_s1_batches),
         vec![format!(
             "Mode 1 S1 drove native gRPC CoinSplit rounds with requested_splits=target_outputs-1 so wallet change completes the exact output count; attempted_batches={} cap={}",
             s1.attempted_batches, config.benchmark.mode1_live_max_s1_txs
         )],
     );
-    if !mode1_s1_complete(&s1) {
+    if !mode1_s1_complete(&s1, expected_s1_batches) {
         record_blocked_prerequisite_cells(
             profile,
             "old_wallet",
@@ -567,7 +571,8 @@ async fn run_mode1_send_cells(
         return Ok(());
     }
     if config.benchmark.live_fresh_scan_cells {
-        let checkpoint = checkpoint_from_mode1_summary(&s1, ScanCheckpoint::PostS1);
+        let checkpoint =
+            checkpoint_from_mode1_summary(&s1, ScanCheckpoint::PostS1, Some(expected_s1_batches));
         run_mode1_checkpoint_scan_cells(
             config,
             profile,
@@ -617,6 +622,7 @@ async fn run_mode1_send_cells(
         profile,
         ScenarioName::S4,
         &s4,
+        None,
         vec![format!(
             "Mode 1 S4 dispatched configured concurrent_batches={:?} through console-wallet gRPC Transfer; per-batch cap={}",
             config.benchmark.concurrent_batches, config.benchmark.mode1_live_max_s4_batch
@@ -670,6 +676,7 @@ async fn run_mode1_send_cells(
         profile,
         ScenarioName::S5,
         &s5,
+        None,
         vec![format!(
             "Mode 1 S5 used deterministic distinct recipients; attempted_payments={} of configured S5_M={} and S5_K={}; cap={}",
             s5.attempted_payments,
@@ -679,7 +686,7 @@ async fn run_mode1_send_cells(
         )],
     );
     if config.benchmark.live_fresh_scan_cells {
-        let checkpoint = checkpoint_from_mode1_summary(&s5, ScanCheckpoint::PostS5Complete);
+        let checkpoint = checkpoint_from_mode1_summary(&s5, ScanCheckpoint::PostS5Complete, None);
         run_mode1_checkpoint_scan_cells(
             config,
             profile,
@@ -815,7 +822,7 @@ async fn run_mode1_s1(
                 "wall_ms": round_summary.wall_ms
             }),
         );
-        let round_complete = mode1_s1_complete(&round_summary)
+        let round_complete = mode1_s1_complete(&round_summary, round.tx_count)
             && observed_utxos == Some(u64::from(round.target_utxos_after))
             && balance_delta_matches_fees;
         if !round_complete {

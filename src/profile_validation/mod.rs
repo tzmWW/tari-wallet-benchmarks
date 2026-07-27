@@ -283,7 +283,7 @@ pub fn schema_document() -> Value {
                     "api_accepted": {"type": ["boolean", "null"]},
                     "api_error": {"$ref": "#/$defs/nullable_string"},
                     "http_status": {"type": ["integer", "null"], "minimum": 100, "maximum": 599},
-                    "failure_class": {"enum": ["http_response", "request_timeout", "arm_deadline", "transport", "response_decode", "response_shape", "database", "process", "chain_target"]},
+                    "failure_class": {"enum": ["http_response", "request_timeout", "arm_deadline", "transport", "response_decode", "response_shape", "database", "process", "chain_target", "wallet"]},
                     "terminal_outcome": {"enum": ["confirmed", "rejected", "stalled", "timed_out", "unavailable"]},
                     "error": {"$ref": "#/$defs/nullable_string"},
                     "mined_height": {"$ref": "#/$defs/nullable_integer"},

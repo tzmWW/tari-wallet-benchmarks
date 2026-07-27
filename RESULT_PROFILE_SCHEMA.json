@@ -930,7 +930,8 @@
             "response_shape",
             "database",
             "process",
-            "chain_target"
+            "chain_target",
+            "wallet"
           ]
         },
         "fee_disposition": {

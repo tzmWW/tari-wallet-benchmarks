@@ -883,6 +883,7 @@ fn record_mode1_transfer_summary(
     profile: &mut ResultProfile,
     scenario: ScenarioName,
     summary: &Mode1TransferSummary,
+    expected_s1_batches: Option<u32>,
     mut notes: Vec<String>,
 ) {
     profile
@@ -905,7 +906,16 @@ fn record_mode1_transfer_summary(
     };
     let confirmed = u32::try_from(summary.tx_infos.iter().filter(|tx| tx.confirmed).count())
         .unwrap_or(u32::MAX);
-    let terminal_failures = attempted.saturating_sub(confirmed);
+    let protocol_failures = expected_s1_batches
+        .map(|expected| {
+            if mode1_s1_complete(summary, expected) {
+                0
+            } else {
+                expected.saturating_sub(attempted).max(1)
+            }
+        })
+        .unwrap_or_default();
+    let terminal_failures = attempted.saturating_sub(confirmed).max(protocol_failures);
     let status = if terminal_failures == 0 && verification_complete && all_verified_ok {
         CellStatus::Ok
     } else {
@@ -1601,6 +1611,7 @@ fn double_selection_rejections(errors: &[String]) -> u32 {
                 || lower.contains("duplicate input")
                 || lower.contains("already locked")
                 || lower.contains("funds are pending")
+                || lower.contains("funds are still pending")
         })
         .count()
         .try_into()
@@ -1617,8 +1628,10 @@ fn mode1_summary_verification_complete(summary: &Mode1TransferSummary) -> bool {
         && summary.tx_infos.iter().all(|tx| tx.confirmed)
 }
 
-fn mode1_s1_complete(summary: &Mode1TransferSummary) -> bool {
-    summary.attempted_batches > 0
+fn mode1_s1_complete(summary: &Mode1TransferSummary, expected_batches: u32) -> bool {
+    expected_batches > 0
+        && summary.attempted_batches == expected_batches
+        && summary.failure_count == 0
         && summary.tx_ids.len() == summary.attempted_batches as usize
         && mode1_summary_verification_complete(summary)
 }
@@ -2457,31 +2470,56 @@ fn pp_snapshot_has_progress_or_error(snapshot: &PaymentProcessorDbSnapshot) -> b
 
 impl Mode1TransferOutcome {
     fn with_rpc_timing(mut self, batch_index: u32, submit_response_ms: u128) -> Self {
-        if self.tx_ids.is_empty() {
+        if self.tx_timings.is_empty() {
+            let error = "console-wallet gRPC response contained no transfer results";
+            self.failure_count = self.failure_count.saturating_add(1);
+            self.errors.push(error.to_string());
             self.tx_timings.push(serde_json::json!({
                 "batch_index": batch_index,
+                "tx_id": null,
                 "construction_complete_ms": submit_response_ms,
                 "grpc_round_trip_ms": submit_response_ms,
                 "construction_timing_reason": "console-wallet gRPC does not expose internal construction completion",
                 "submission_timing_origin": "console_wallet_grpc_round_trip",
                 "api_accepted": false,
+                "api_error": error,
+                "failure_class": "wallet",
+                "error": error,
                 "broadcast_to_mempool_ms": null,
                 "broadcast_to_mempool_unavailable_reason": "console_wallet_grpc_transfer_response_does_not_expose_mempool_timestamp"
             }));
         } else {
-            self.tx_timings.extend(self.tx_ids.iter().map(|tx_id| {
-                serde_json::json!({
-                    "batch_index": batch_index,
-                    "tx_id": tx_id,
-                    "construction_complete_ms": submit_response_ms,
-                    "grpc_round_trip_ms": submit_response_ms,
-                    "construction_timing_reason": "console-wallet gRPC does not expose internal construction completion",
-                    "submission_timing_origin": "console_wallet_grpc_round_trip",
-                    "api_accepted": true,
-                    "broadcast_to_mempool_ms": null,
-                    "broadcast_to_mempool_unavailable_reason": "console_wallet_grpc_transfer_response_does_not_expose_mempool_timestamp"
-                })
-            }));
+            for timing in &mut self.tx_timings {
+                if let Some(map) = timing.as_object_mut() {
+                    map.insert("batch_index".to_string(), serde_json::json!(batch_index));
+                    map.insert(
+                        "construction_complete_ms".to_string(),
+                        serde_json::json!(submit_response_ms),
+                    );
+                    map.insert(
+                        "grpc_round_trip_ms".to_string(),
+                        serde_json::json!(submit_response_ms),
+                    );
+                    map.insert(
+                        "construction_timing_reason".to_string(),
+                        serde_json::json!(
+                            "console-wallet gRPC does not expose internal construction completion"
+                        ),
+                    );
+                    map.insert(
+                        "submission_timing_origin".to_string(),
+                        serde_json::json!("console_wallet_grpc_round_trip"),
+                    );
+                    map.insert(
+                        "broadcast_to_mempool_ms".to_string(),
+                        serde_json::Value::Null,
+                    );
+                    map.insert(
+                        "broadcast_to_mempool_unavailable_reason".to_string(),
+                        serde_json::json!("console_wallet_grpc_transfer_response_does_not_expose_mempool_timestamp"),
+                    );
+                }
+            }
         }
         self
     }
@@ -2498,7 +2536,12 @@ impl Mode1TransferOutcome {
         for result in response.results {
             if result.is_success {
                 outcome.success_count += 1;
-                outcome.tx_ids.push(result.transaction_id.to_string());
+                let tx_id = result.transaction_id.to_string();
+                outcome.tx_ids.push(tx_id.clone());
+                outcome.tx_timings.push(serde_json::json!({
+                    "tx_id": tx_id,
+                    "api_accepted": true
+                }));
                 if let Some(info) = result.transaction_info {
                     if let Some(total) = outcome.fee_microtari.checked_add(info.fee) {
                         outcome.fee_microtari = total;
@@ -2510,10 +2553,18 @@ impl Mode1TransferOutcome {
                 }
             } else {
                 outcome.failure_count += 1;
-                outcome.errors.push(format!(
+                let error = format!(
                     "address={} failure={}",
                     result.address, result.failure_message
-                ));
+                );
+                outcome.tx_timings.push(serde_json::json!({
+                    "tx_id": null,
+                    "api_accepted": false,
+                    "api_error": &error,
+                    "failure_class": "wallet",
+                    "error": &error
+                }));
+                outcome.errors.push(error);
             }
         }
         outcome
@@ -2538,7 +2589,7 @@ impl Mode1TransferSummary {
         }
         self.success_count = u32::try_from(self.tx_infos.iter().filter(|tx| tx.confirmed).count())
             .unwrap_or(u32::MAX);
-        self.failure_count = self.attempted_payments.saturating_sub(self.success_count);
+        self.failure_count = self.attempted_batches.saturating_sub(self.success_count);
     }
 
     fn record_batch(
@@ -4977,9 +5028,12 @@ fn fresh_scan_wallet_state(scenario: ScenarioName, birthday: u16) -> FreshScanWa
 fn checkpoint_from_mode1_summary(
     summary: &Mode1TransferSummary,
     complete_checkpoint: ScanCheckpoint,
+    expected_s1_batches: Option<u32>,
 ) -> ScanCheckpoint {
     let complete = match complete_checkpoint {
-        ScanCheckpoint::PostS1 => mode1_s1_complete(summary),
+        ScanCheckpoint::PostS1 => {
+            expected_s1_batches.is_some_and(|expected| mode1_s1_complete(summary, expected))
+        }
         _ => mode1_send_complete(summary),
     };
     if complete {
@@ -5583,10 +5637,11 @@ mod tests {
     fn double_selection_rejections_classifies_wallet_lock_errors() {
         let errors = vec![
             "Funds are pending. Available: 0".to_string(),
+            "Funds are still pending. Unable to fulfil transaction right now.".to_string(),
             "duplicate input detected".to_string(),
             "plain network timeout".to_string(),
         ];
-        assert_eq!(double_selection_rejections(&errors), 2);
+        assert_eq!(double_selection_rejections(&errors), 3);
     }
 
     #[test]
@@ -5640,6 +5695,62 @@ mod tests {
     }
 
     #[test]
+    fn mode1_coin_split_counts_transactions_not_created_outputs() {
+        let mut summary = Mode1TransferSummary {
+            attempted_batches: 1,
+            attempted_payments: 2,
+            tx_ids: vec!["tx".to_string()],
+            tx_infos: vec![VerifiedTransaction {
+                tx_id: "tx".to_string(),
+                status_value: TX_MINED_CONFIRMED_STATUS,
+                mode: "old_wallet".to_string(),
+                scenario: ScenarioName::S1.as_str().to_string(),
+                amount_microtari: None,
+                fee_microtari: Some(660),
+                mined_height: Some(784_029),
+                confirmations: Some(3),
+                min_confirmations: Some(3),
+                tip_height: Some(784_032),
+                confirmed: true,
+            }],
+            ..Mode1TransferSummary::default()
+        };
+
+        summary.backfill_verified_fee_total();
+
+        assert_eq!(summary.success_count, 1);
+        assert_eq!(summary.failure_count, 0);
+        assert!(mode1_s1_complete(&summary, 1));
+        assert!(!mode1_s1_complete(&summary, 127));
+    }
+
+    #[test]
+    fn mode1_wallet_rejection_is_not_reported_as_timeout() {
+        let summary = Mode1TransferSummary {
+            attempted_batches: 1,
+            attempted_payments: 1,
+            failure_count: 1,
+            errors: vec!["Funds are still pending".to_string()],
+            tx_timings: vec![serde_json::json!({
+                "batch_index": 1,
+                "tx_id": null,
+                "api_accepted": false,
+                "api_error": "Funds are still pending",
+                "failure_class": "wallet",
+                "error": "Funds are still pending"
+            })],
+            ..Mode1TransferSummary::default()
+        };
+
+        let observations = summary.transaction_observations(ScenarioName::S5);
+
+        assert_eq!(observations[0]["terminal_outcome"], "rejected");
+        assert_eq!(observations[0]["failure_class"], "wallet");
+        assert_eq!(observations[0]["api_error"], "Funds are still pending");
+        assert_eq!(outcome_counts(&observations, 0).rejected, 1);
+    }
+
+    #[test]
     fn terminal_ok_status_matches_bounty_status_set() {
         assert!(terminal_ok_status(6));
         for status in [1, 2, 7, 9, 11, 13, 14] {
@@ -5669,7 +5780,7 @@ mod tests {
             }],
             ..Mode1TransferSummary::default()
         };
-        assert!(!mode1_s1_complete(&pending));
+        assert!(!mode1_s1_complete(&pending, 1));
 
         let confirmed = Mode1TransferSummary {
             tx_infos: vec![VerifiedTransaction {
@@ -5687,7 +5798,7 @@ mod tests {
             }],
             ..pending
         };
-        assert!(mode1_s1_complete(&confirmed));
+        assert!(mode1_s1_complete(&confirmed, 1));
     }
 
     #[test]
@@ -5719,7 +5830,13 @@ mod tests {
             ..Mode1TransferSummary::default()
         };
 
-        record_mode1_transfer_summary(&mut profile, ScenarioName::S1, &summary, Vec::new());
+        record_mode1_transfer_summary(
+            &mut profile,
+            ScenarioName::S1,
+            &summary,
+            Some(1),
+            Vec::new(),
+        );
 
         let cell = &profile
             .modes
@@ -5728,6 +5845,49 @@ mod tests {
             .scenarios[ScenarioName::S1.as_str()];
         assert_eq!(cell.status, CellStatus::Failed);
         assert!(profile.chain_verification.verified_transactions.is_empty());
+    }
+
+    #[test]
+    fn mode1_summary_rejects_a_confirmed_but_truncated_s1_plan() {
+        let config = Config::default();
+        let mut profile = ResultProfile::new(&config, crate::env_capture::capture());
+        profile.modes.insert(
+            ModeName::OldWallet.as_str().to_string(),
+            empty_mode_profile(ModeName::OldWallet, None),
+        );
+        let summary = Mode1TransferSummary {
+            attempted_batches: 1,
+            attempted_payments: 2,
+            success_count: 1,
+            tx_ids: vec!["42".to_string()],
+            tx_infos: vec![VerifiedTransaction {
+                tx_id: "42".to_string(),
+                status_value: TX_MINED_CONFIRMED_STATUS,
+                mode: "old_wallet".to_string(),
+                scenario: ScenarioName::S1.as_str().to_string(),
+                amount_microtari: None,
+                fee_microtari: Some(660),
+                mined_height: Some(784_029),
+                confirmations: Some(3),
+                min_confirmations: Some(3),
+                tip_height: Some(784_032),
+                confirmed: true,
+            }],
+            ..Mode1TransferSummary::default()
+        };
+
+        record_mode1_transfer_summary(
+            &mut profile,
+            ScenarioName::S1,
+            &summary,
+            Some(127),
+            Vec::new(),
+        );
+
+        let repetition = &profile.modes["old_wallet"].scenarios["S1"].repetitions[0];
+        assert_eq!(repetition.status, CellStatus::Failed);
+        assert_eq!(repetition.success_count, 1);
+        assert_eq!(repetition.failure_count, 126);
     }
 
     #[test]
@@ -5765,7 +5925,7 @@ mod tests {
             ..Mode1TransferSummary::default()
         };
 
-        record_mode1_transfer_summary(&mut profile, ScenarioName::S4, &summary, Vec::new());
+        record_mode1_transfer_summary(&mut profile, ScenarioName::S4, &summary, None, Vec::new());
         let repetition = &profile.modes["old_wallet"].scenarios["S4"].repetitions[0];
         assert_eq!(repetition.status, CellStatus::Ok);
         assert_eq!(repetition.success_count, 1);

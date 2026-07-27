@@ -96,6 +96,7 @@ pub enum ObservationFailureClass {
     Database,
     Process,
     ChainTarget,
+    Wallet,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
