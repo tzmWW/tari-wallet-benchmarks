@@ -39,6 +39,14 @@ def main() -> None:
     actual = digest(raw_bytes)
     if actual != manifest["raw_profile_sha256"]:
         raise SystemExit(f"raw profile SHA-256 mismatch: expected {manifest['raw_profile_sha256']}, got {actual}")
+    evidence = manifest.get("evidence")
+    if evidence is not None:
+        evidence_path = Path(evidence["path"])
+        evidence_actual = digest(evidence_path.read_bytes())
+        if evidence_actual != evidence["sha256"]:
+            raise SystemExit(
+                f"evidence SHA-256 mismatch: expected {evidence['sha256']}, got {evidence_actual}"
+            )
     document = json.loads(raw_bytes)
     for transformation in manifest["transformations"]:
         set_pointer(document, transformation["pointer"], copy.deepcopy(transformation["value"]))

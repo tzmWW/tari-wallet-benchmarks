@@ -32,14 +32,19 @@ jobs:
         run: ast-grep scan
       - name: Generated schema is current
         run: cargo run -- schema --out RESULT_PROFILE_SCHEMA.json && git diff --exit-code -- RESULT_PROFILE_SCHEMA.json
-      - name: Validate committed baseline when present
-        run: if test -f baselines/esmeralda_baseline.json; then cargo run -- validate-profile --profile baselines/esmeralda_baseline.json --legacy-v5; fi
-      - name: Verify committed legacy summary when present
+      - name: Reproduce committed baseline correction
         run: |
-          if test -f baselines/esmeralda_baseline.summary.md; then
-            cargo run -- summarize-profile --profile baselines/esmeralda_baseline.json --legacy-v5 --out /tmp/esmeralda_baseline.summary.md
-            cmp baselines/esmeralda_baseline.summary.md /tmp/esmeralda_baseline.summary.md
-          fi
+          scripts/correct-profile.py \
+            --raw baselines/esmeralda_baseline.raw.json \
+            --manifest baselines/esmeralda_baseline.correction.json \
+            --out /tmp/esmeralda_baseline.corrected.json
+          cmp baselines/esmeralda_baseline.json /tmp/esmeralda_baseline.corrected.json
+      - name: Validate committed baseline
+        run: cargo run -- validate-profile --profile baselines/esmeralda_baseline.json --submission
+      - name: Verify committed summary
+        run: |
+          cargo run -- summarize-profile --profile baselines/esmeralda_baseline.json --out /tmp/esmeralda_baseline.summary.md
+          cmp baselines/esmeralda_baseline.summary.md /tmp/esmeralda_baseline.summary.md
       - name: Reject tracked secret artifacts
         run: test -z "$(git ls-files '*.env' '*.db' '*.sqlite' '.secrets/**')"
       - name: Diff hygiene

@@ -138,7 +138,7 @@ pub enum Command {
         profile: PathBuf,
         #[arg(long)]
         submission: bool,
-        /// Validate the committed historical schema-v5 profile.
+        /// Validate a historical schema-v5 profile.
         #[arg(long)]
         legacy_v5: bool,
     },
@@ -147,7 +147,7 @@ pub enum Command {
         profile: PathBuf,
         #[arg(long)]
         out: PathBuf,
-        /// Summarize the committed historical schema-v5 profile.
+        /// Summarize a historical schema-v5 profile.
         #[arg(long)]
         legacy_v5: bool,
     },

@@ -147,6 +147,7 @@ use the same `HARNESS_WALLET_PW` exported for the workflow and hold at least
 ```sh
 read -r -s HARNESS_WALLET_PW
 export HARNESS_WALLET_PW
+export MINOTARI_WALLET_PASSWORD="$HARNESS_WALLET_PW"
 export SOURCE_DB=/absolute/path/to/source-wallet.db
 tools/minotari --network esmeralda create \
   --database-path "$SOURCE_DB"

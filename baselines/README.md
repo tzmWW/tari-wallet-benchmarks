@@ -5,6 +5,11 @@
 submission validation:
 
 ```sh
+scripts/correct-profile.py \
+  --raw baselines/esmeralda_baseline.raw.json \
+  --manifest baselines/esmeralda_baseline.correction.json \
+  --out /tmp/esmeralda_baseline.corrected.json
+cmp -s /tmp/esmeralda_baseline.corrected.json baselines/esmeralda_baseline.json
 cargo run --release -- validate-profile --profile baselines/esmeralda_baseline.json --submission
 cargo run --release -- summarize-profile --profile baselines/esmeralda_baseline.json --out /tmp/esmeralda_baseline.summary.generated.md
 cmp -s /tmp/esmeralda_baseline.summary.generated.md baselines/esmeralda_baseline.summary.md
@@ -22,7 +27,8 @@ Reporting corrections were exported with commit
   serialized transactions.
 - `esmeralda_baseline.correction.json`: SHA-256-bound JSON Pointer correction
   manifest.
-- `scripts/correct-profile.py`: generic manifest applicator.
+- `scripts/correct-profile.py`: generic manifest applicator; it verifies the raw
+  profile and referenced evidence hashes before applying transformations.
 - `scripts/build-mode1-s1-correction.py`: fail-closed evidence extractor and
   manifest generator.
 - `analysis/baseline-20260727-audit.md`: correction rationale and scenario audit.

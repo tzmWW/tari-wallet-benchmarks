@@ -2,10 +2,12 @@
 
 ## Verdict
 
-The uncapped `baseline-20260714T121001Z` workflow is promotable after two
-evidence-preserving reporting corrections. The corrected joint profile is
-`baselines/esmeralda_baseline.json` and passes schema-v5 submission validation.
-No measured duration, fee, API result, or chain result was changed.
+The uncapped `baseline-20260714T121001Z` workflow was promoted after two
+evidence-preserving reporting corrections. Its corrected joint profile passes
+schema-v5 submission validation and is preserved in Git at commit `8df7689`;
+the current `baselines/esmeralda_baseline.json` supersedes it with the 2026-07-27
+schema-v6 run. No measured duration, fee, API result, or chain result was
+changed.
 
 ## Run Integrity
 
