@@ -2,8 +2,8 @@
 
 ## Verdict
 
-The uncapped `baseline-20260727T110514Z` run is promotable with an explicit,
-hash-bound reporting correction. The corrected schema-v6 profile is
+The uncapped `baseline-20260727T110514Z` run was promoted with explicit,
+hash-bound reporting reconciliation. The promoted schema-v6 profile is
 `baselines/esmeralda_baseline.json` and passes strict submission validation.
 
 ## Integrity
@@ -13,10 +13,10 @@ hash-bound reporting correction. The corrected schema-v6 profile is
 - Export commit: `ce86e0bc5a287edd3510ac35c810ff4185aa42b9`.
 - Raw checkpoint SHA-256:
   `8d5650d7fdf360b3f7e0a625c680fc9ca64e5c530926eb069c18f8ea5b157017`.
-- Corrected profile SHA-256:
-  `818c274d63144afb29c4f38d0ce5feac1a6bf61e668edc2e26a4523a83acd52b`.
-- Correction manifest SHA-256:
-  `98de1d55ff522ac776ebdfe3990dd6668b64354c440ae9ec475da89b3d339924`.
+- Promoted profile SHA-256:
+  `5f43e00a30292ed6301c45e7b9c0f02ea26f8e426f73f057d9b9658344c9425d`.
+- Reconciliation manifest SHA-256:
+  `67a49451c6410e46744ab4b59aac0a13b69c99f4fe3b880beaaabe0546fdc5bf`.
 - Sanitized evidence SHA-256:
   `45349fa7dbddaf5c5d75e28fe5707fed9425fc858eaf5a4f674078e819294467`.
 - Final anchor: height `785232`, hash
@@ -27,12 +27,12 @@ hash-bound reporting correction. The corrected schema-v6 profile is
   doubling rounds plus fan-out, S4 `[8,16,32,64,128]`, 900-second arm budget,
   S5 `M=100/K=10`, `C_min=3`, and `5 uT` fee rate.
 
-## Corrections
+## Reporting Reconciliation
 
 1. Mode 1 CoinSplit returned a transaction ID but no transfer-result timing
    vector. Shared enrichment incorrectly interpreted the empty vector as an API
    rejection, although all 127 transactions subsequently passed independent
-   C-min verification. The correction joins the ordered IDs to timestamped
+   C-min verification. The reconciliation joins the ordered IDs to timestamped
    accepted-submit logs, status-6 console DB rows, one spent input, 63 two-output
    and 64 eight-output shapes, 638 output commitments, and timestamped wallet tip
    observations. Derived dispatch-to-C-min durations range from 178,690 ms to
@@ -47,7 +47,7 @@ hash-bound reporting correction. The corrected schema-v6 profile is
    acceptance count remain recorded; validation now permits only this pinned
    Mode 1 reconciliation shape. The eight unreconciled attempts remain rejected.
 4. The final stage checkpoint was written before finalization failed. The
-   correction marks it final and restores the end anchor from the persisted
+   reconciliation marks it final and restores the end anchor from the persisted
    final scan and matching authority header.
 
 ## Scenario Audit
@@ -56,7 +56,7 @@ hash-bound reporting correction. The corrected schema-v6 profile is
 |---|---:|---|---:|---:|---:|---|
 | Old | B0 | success | 414007 | 0 | 0 | Empty genesis scan completed. |
 | Old | S0 | success | 1060 | 0 | 0 | Exact shared `10000 T` funding state. |
-| Old | S1 | success | 1928820 | 127 | 0 | Exact 512-output plan; observation linkage corrected. |
+| Old | S1 | success | 1928820 | 127 | 0 | Exact 512-output plan; observation linkage reconciled. |
 | Old | S2 | failure | 363018 | 0 | 1 | Genuine recovery mismatch: 639 spendable vs 512 expected. |
 | Old | S3 | failure | 5014 | 0 | 1 | Same birthday-scan spent-state mismatch. |
 | Old | S4 | failure | 1490613 | 240 | 8 | 224 false NotFound responses reconciled; 8 genuine failures. |

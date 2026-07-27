@@ -32,13 +32,13 @@ jobs:
         run: ast-grep scan
       - name: Generated schema is current
         run: cargo run -- schema --out RESULT_PROFILE_SCHEMA.json && git diff --exit-code -- RESULT_PROFILE_SCHEMA.json
-      - name: Reproduce committed baseline correction
+      - name: Verify committed baseline integrity
         run: |
           scripts/correct-profile.py \
-            --raw baselines/esmeralda_baseline.raw.json \
-            --manifest baselines/esmeralda_baseline.correction.json \
-            --out /tmp/esmeralda_baseline.corrected.json
-          cmp baselines/esmeralda_baseline.json /tmp/esmeralda_baseline.corrected.json
+            --raw analysis/reconciliation/esmeralda_baseline.raw.json \
+            --manifest analysis/reconciliation/esmeralda_baseline.correction.json \
+            --out /tmp/esmeralda_baseline.verified.json
+          cmp baselines/esmeralda_baseline.json /tmp/esmeralda_baseline.verified.json
       - name: Validate committed baseline
         run: cargo run -- validate-profile --profile baselines/esmeralda_baseline.json --submission
       - name: Verify committed summary

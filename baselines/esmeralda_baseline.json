@@ -321784,7 +321784,7 @@
   "provenance": {
     "correction": {
       "corrected_at": "2026-07-27T15:45:16Z",
-      "manifest_path": "baselines/esmeralda_baseline.correction.json",
+      "manifest_path": "analysis/reconciliation/esmeralda_baseline.correction.json",
       "manifest_schema_version": 1,
       "raw_profile_sha256": "8d5650d7fdf360b3f7e0a625c680fc9ca64e5c530926eb069c18f8ea5b157017",
       "raw_profile_size": 16714602,
