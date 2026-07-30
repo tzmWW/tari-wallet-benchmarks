@@ -1363,13 +1363,6 @@ fn mode1_coin_split_plan(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ExactSplitPlan {
-    pub(super) input_microtari: u64,
-    pub(super) fee_microtari: u64,
-    pub(super) child_amounts: Vec<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PpSplitPlan {
     pub(super) input_microtari: u64,
     pub(super) fee_microtari: u64,
@@ -1377,54 +1370,6 @@ pub(super) struct PpSplitPlan {
     /// final balanced child as the ordinary change output.
     pub(super) payment_amounts: Vec<u64>,
     pub(super) change_microtari: u64,
-}
-
-impl ExactSplitPlan {
-    pub(super) fn total_children(&self) -> Option<u64> {
-        self.child_amounts
-            .iter()
-            .copied()
-            .try_fold(0u64, u64::checked_add)
-    }
-}
-
-pub(super) fn exact_no_change_split_with_fee(
-    input_microtari: u64,
-    child_count: u32,
-    fee_microtari: u64,
-) -> anyhow::Result<ExactSplitPlan> {
-    if child_count < 2 {
-        bail!("exact split requires at least two child outputs");
-    }
-    let child_count_u64 = u64::from(child_count);
-    let available = input_microtari
-        .checked_sub(fee_microtari)
-        .context("exact split input does not cover fee")?;
-    let base_child = available / child_count_u64;
-    if base_child == 0 {
-        bail!("exact split would create a zero-value child output");
-    }
-    let remainder = available % child_count_u64;
-    let mut child_amounts = vec![base_child; child_count as usize];
-    let last = child_amounts
-        .last_mut()
-        .context("exact split unexpectedly has no child outputs")?;
-    *last = last
-        .checked_add(remainder)
-        .context("exact split final child overflow")?;
-    let plan = ExactSplitPlan {
-        input_microtari,
-        fee_microtari,
-        child_amounts,
-    };
-    if plan
-        .total_children()
-        .and_then(|total| total.checked_add(plan.fee_microtari))
-        != Some(plan.input_microtari)
-    {
-        bail!("exact split conservation invariant failed");
-    }
-    Ok(plan)
 }
 
 pub(super) fn exact_pp_split_with_change(
@@ -1503,33 +1448,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_split_conserves_value_without_change_for_all_s1_targets() {
-        let mut amounts = vec![10_000_000_000u64];
-        for target in [2usize, 4, 8, 16, 32, 64] {
-            amounts = amounts
-                .into_iter()
-                .flat_map(|input| {
-                    let fee = (18 + CONSOLE_SELF_OUTPUT_GRAMS * 2) * 5;
-                    exact_no_change_split_with_fee(input, 2, fee)
-                        .unwrap()
-                        .child_amounts
-                })
-                .collect();
-            assert_eq!(amounts.len(), target);
-        }
-        amounts = amounts
-            .into_iter()
-            .flat_map(|input| {
-                let fee = (18 + CONSOLE_SELF_OUTPUT_GRAMS * 8) * 5;
-                exact_no_change_split_with_fee(input, 8, fee)
-                    .unwrap()
-                    .child_amounts
-            })
-            .collect();
-        assert_eq!(amounts.len(), 512);
-    }
-
-    #[test]
     fn parses_only_pinned_mode1_not_found_status() {
         let status =
             tonic::Status::not_found("Transaction 18446744073709551615 not found within timeout");
@@ -1565,17 +1483,6 @@ mod tests {
         assert!(contents.contains("http_server_url = \"http://127.0.0.1:18142\""));
         assert!(contents.contains("fallback_http_server_url = \"http://127.0.0.1:18142\""));
         assert!(!contents.contains("rpc.esmeralda.tari.com"));
-    }
-
-    #[test]
-    fn final_child_absorbs_division_remainder() {
-        let plan = exact_no_change_split_with_fee(2_499_999_505, 2, 740).unwrap();
-        assert_eq!(plan.child_amounts[1], plan.child_amounts[0] + 1);
-        assert_eq!(
-            plan.total_children()
-                .and_then(|total| total.checked_add(plan.fee_microtari)),
-            Some(plan.input_microtari)
-        );
     }
 
     #[test]

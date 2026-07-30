@@ -31,9 +31,9 @@ PP_DIR="${CACHE_DIR}/minotari_payment_processor"
 MINOTARI_REPO="https://github.com/tari-project/minotari-cli.git"
 MINOTARI_BASE_REV="360c4848a54d65fd710266233cc9277b0f785e74"
 MINOTARI_BASE_TREE="e9bbd1fb7b538e213e17c2986b85940435adce26"
-MINOTARI_FEATURE_REV="1391dbd2155c96e885379d72b76e33582f0aad87"
-MINOTARI_RESULT_TREE="f36ef55c065732ea9cfcfdfda94f71b7199842e1"
-MINOTARI_COMPLETE_DIFF_SHA256="881428c6a82e1add7a516e16b706c4d168ef14f222085f03cd9b792c523deef7"
+MINOTARI_RESULT_TREE="cf6acf000f787817a795668c93470b139970feb6"
+MINOTARI_COMPLETE_DIFF_SHA256="118dbe659efed99528159e56f509a01f5a9b789ea57a9ea3267e2b60fbf0d144"
+MINOTARI_PASSWORD_PATCH_SHA256="fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6"
 
 TARI_REPO="https://github.com/tari-project/tari.git"
 TARI_CONSOLE_WALLET_REV="9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
@@ -153,19 +153,51 @@ CONSOLE_SHA="$(sha256_file "${TOOLS_DIR}/minotari_console_wallet")"
 NODE_SHA="$(sha256_file "${TOOLS_DIR}/minotari_node")"
 PP_SHA="$(sha256_file "${TOOLS_DIR}/minotari_payment_processor")"
 
-printf '{\n  "schema_version": 2,\n  "sources": {\n    "minotari_cli": {\n      "repository": "%s",\n      "upstream": {"revision": "%s", "commit": "%s", "tree": "%s"},\n      "patches": [\n        {"path": "patches/minotari-fixed-range-scan.patch", "sha256": "8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d", "result_tree": "2fc434e0309f0ee92806eeea97bc33edacfbb793"},\n        {"path": "patches/minotari-exact-output-locking.patch", "sha256": "56f65ce897c1f428aeb8858faefeaf691d66e4cfa4e3027bd27b2ac856461b63", "result_tree": "818201e82cc3ab35cccba2fd1ffa4b95bdc08fd2"},\n        {"path": "patches/minotari-wallet-password-env.patch", "sha256": "c8f203f78cf5a2549be49e1e52e27474e13955a89c79a54658a0e2c06ae039c9", "result_tree": "%s"}\n      ],\n      "complete_diff_sha256": "%s",\n      "result_tree": "%s"\n    },\n    "tari_console_wallet": {\n      "repository": "%s",\n      "upstream": {"revision": "%s", "commit": "%s", "tree": "%s"},\n      "patches": [],\n      "complete_diff_sha256": "%s",\n      "result_tree": "%s"\n    },\n    "minotari_node": {\n      "repository": "%s",\n      "upstream": {"revision": "%s", "commit": "%s", "tree": "%s"},\n      "patches": [],\n      "complete_diff_sha256": "%s",\n      "result_tree": "%s"\n    },\n    "payment_processor": {\n      "repository": "%s",\n      "upstream": {"revision": "%s", "commit": "%s", "tree": "%s"},\n      "patches": [\n        {"path": "patches/payment-processor-fee-rate.patch", "sha256": "%s", "result_tree": "%s"}\n      ],\n      "complete_diff_sha256": "%s",\n      "result_tree": "%s"\n    }\n  },\n  "artifacts": {\n    "minotari": {"source": "minotari_cli", "source_revision": "%s", "source_tree": "%s", "sha256": "%s"},\n    "minotari_console_wallet": {"source": "tari_console_wallet", "source_revision": "%s", "source_tree": "%s", "sha256": "%s"},\n    "minotari_node": {"source": "minotari_node", "source_revision": "%s", "source_tree": "%s", "sha256": "%s"},\n    "minotari_payment_processor": {"source": "payment_processor", "source_revision": "%s", "source_tree": "%s", "sha256": "%s"}\n  }\n}\n' \
-  "${MINOTARI_REPO}" "${MINOTARI_BASE_REV}" "${MINOTARI_BASE_REV}" "${MINOTARI_BASE_TREE}" \
-  "${MINOTARI_RESULT_TREE}" "${MINOTARI_COMPLETE_DIFF_SHA256}" "${MINOTARI_RESULT_TREE}" \
-  "${TARI_REPO}" "${TARI_CONSOLE_WALLET_REV}" "${TARI_CONSOLE_WALLET_REV}" "${TARI_CONSOLE_WALLET_TREE}" \
-  "${EMPTY_DIFF_SHA256}" "${TARI_CONSOLE_WALLET_TREE}" \
-  "${TARI_REPO}" "${TARI_NODE_REV}" "${TARI_NODE_COMMIT}" "${TARI_NODE_TREE}" \
-  "${EMPTY_DIFF_SHA256}" "${TARI_NODE_TREE}" \
-  "${PP_REPO}" "${PP_REV}" "${PP_REV}" "${PP_BASE_TREE}" \
-  "${PP_PATCH_SHA256}" "${PP_RESULT_TREE}" "${PP_COMPLETE_DIFF_SHA256}" "${PP_RESULT_TREE}" \
-  "${MINOTARI_FEATURE_REV}" "${MINOTARI_RESULT_TREE}" "${MINOTARI_SHA}" \
-  "${TARI_CONSOLE_WALLET_REV}" "${TARI_CONSOLE_WALLET_TREE}" "${CONSOLE_SHA}" \
-  "${TARI_NODE_REV}" "${TARI_NODE_TREE}" "${NODE_SHA}" \
-  "${PP_REV}" "${PP_RESULT_TREE}" "${PP_SHA}" > "${MANIFEST}"
+cat > "${MANIFEST}" <<EOF
+{
+  "schema_version": 2,
+  "sources": {
+    "minotari_cli": {
+      "repository": "${MINOTARI_REPO}",
+      "upstream": {"revision": "${MINOTARI_BASE_REV}", "commit": "${MINOTARI_BASE_REV}", "tree": "${MINOTARI_BASE_TREE}"},
+      "patches": [
+        {"path": "patches/minotari-wallet-password-env.patch", "sha256": "${MINOTARI_PASSWORD_PATCH_SHA256}", "result_tree": "${MINOTARI_RESULT_TREE}"}
+      ],
+      "complete_diff_sha256": "${MINOTARI_COMPLETE_DIFF_SHA256}",
+      "result_tree": "${MINOTARI_RESULT_TREE}"
+    },
+    "tari_console_wallet": {
+      "repository": "${TARI_REPO}",
+      "upstream": {"revision": "${TARI_CONSOLE_WALLET_REV}", "commit": "${TARI_CONSOLE_WALLET_REV}", "tree": "${TARI_CONSOLE_WALLET_TREE}"},
+      "patches": [],
+      "complete_diff_sha256": "${EMPTY_DIFF_SHA256}",
+      "result_tree": "${TARI_CONSOLE_WALLET_TREE}"
+    },
+    "minotari_node": {
+      "repository": "${TARI_REPO}",
+      "upstream": {"revision": "${TARI_NODE_REV}", "commit": "${TARI_NODE_COMMIT}", "tree": "${TARI_NODE_TREE}"},
+      "patches": [],
+      "complete_diff_sha256": "${EMPTY_DIFF_SHA256}",
+      "result_tree": "${TARI_NODE_TREE}"
+    },
+    "payment_processor": {
+      "repository": "${PP_REPO}",
+      "upstream": {"revision": "${PP_REV}", "commit": "${PP_REV}", "tree": "${PP_BASE_TREE}"},
+      "patches": [
+        {"path": "patches/payment-processor-fee-rate.patch", "sha256": "${PP_PATCH_SHA256}", "result_tree": "${PP_RESULT_TREE}"}
+      ],
+      "complete_diff_sha256": "${PP_COMPLETE_DIFF_SHA256}",
+      "result_tree": "${PP_RESULT_TREE}"
+    }
+  },
+  "artifacts": {
+    "minotari": {"source": "minotari_cli", "source_revision": "${MINOTARI_BASE_REV}", "source_tree": "${MINOTARI_RESULT_TREE}", "sha256": "${MINOTARI_SHA}"},
+    "minotari_console_wallet": {"source": "tari_console_wallet", "source_revision": "${TARI_CONSOLE_WALLET_REV}", "source_tree": "${TARI_CONSOLE_WALLET_TREE}", "sha256": "${CONSOLE_SHA}"},
+    "minotari_node": {"source": "minotari_node", "source_revision": "${TARI_NODE_REV}", "source_tree": "${TARI_NODE_TREE}", "sha256": "${NODE_SHA}"},
+    "minotari_payment_processor": {"source": "payment_processor", "source_revision": "${PP_REV}", "source_tree": "${PP_RESULT_TREE}", "sha256": "${PP_SHA}"}
+  }
+}
+EOF
 
 printf 'built payment processor at %s, verified exact source provenance, and wrote schema-v2 manifest %s\n' \
   "${PP_REV}" "${MANIFEST}"

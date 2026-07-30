@@ -4,16 +4,8 @@ use sha2::{Digest, Sha256};
 
 const PATCHES: &[(&str, &str)] = &[
     (
-        "patches/minotari-fixed-range-scan.patch",
-        "8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d",
-    ),
-    (
-        "patches/minotari-exact-output-locking.patch",
-        "56f65ce897c1f428aeb8858faefeaf691d66e4cfa4e3027bd27b2ac856461b63",
-    ),
-    (
         "patches/minotari-wallet-password-env.patch",
-        "c8f203f78cf5a2549be49e1e52e27474e13955a89c79a54658a0e2c06ae039c9",
+        "fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6",
     ),
     (
         "patches/payment-processor-fee-rate.patch",
@@ -29,25 +21,13 @@ pub(crate) const EXPECTED_SOURCES: &[ExpectedSource] = &[
         upstream_revision: "360c4848a54d65fd710266233cc9277b0f785e74",
         upstream_commit: "360c4848a54d65fd710266233cc9277b0f785e74",
         upstream_tree: "e9bbd1fb7b538e213e17c2986b85940435adce26",
-        patches: &[
-            ExpectedPatch {
-                path: "patches/minotari-fixed-range-scan.patch",
-                sha256: "8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d",
-                result_tree: "2fc434e0309f0ee92806eeea97bc33edacfbb793",
-            },
-            ExpectedPatch {
-                path: "patches/minotari-exact-output-locking.patch",
-                sha256: "56f65ce897c1f428aeb8858faefeaf691d66e4cfa4e3027bd27b2ac856461b63",
-                result_tree: "818201e82cc3ab35cccba2fd1ffa4b95bdc08fd2",
-            },
-            ExpectedPatch {
-                path: "patches/minotari-wallet-password-env.patch",
-                sha256: "c8f203f78cf5a2549be49e1e52e27474e13955a89c79a54658a0e2c06ae039c9",
-                result_tree: "f36ef55c065732ea9cfcfdfda94f71b7199842e1",
-            },
-        ],
-        complete_diff_sha256: "881428c6a82e1add7a516e16b706c4d168ef14f222085f03cd9b792c523deef7",
-        result_tree: "f36ef55c065732ea9cfcfdfda94f71b7199842e1",
+        patches: &[ExpectedPatch {
+            path: "patches/minotari-wallet-password-env.patch",
+            sha256: "fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6",
+            result_tree: "cf6acf000f787817a795668c93470b139970feb6",
+        }],
+        complete_diff_sha256: "118dbe659efed99528159e56f509a01f5a9b789ea57a9ea3267e2b60fbf0d144",
+        result_tree: "cf6acf000f787817a795668c93470b139970feb6",
     },
     ExpectedSource {
         name: "tari_console_wallet",
@@ -89,8 +69,8 @@ pub(crate) const EXPECTED_ARTIFACTS: &[ExpectedArtifact] = &[
     ExpectedArtifact {
         name: "minotari",
         source: "minotari_cli",
-        source_revision: "1391dbd2155c96e885379d72b76e33582f0aad87",
-        source_tree: "f36ef55c065732ea9cfcfdfda94f71b7199842e1",
+        source_revision: "360c4848a54d65fd710266233cc9277b0f785e74",
+        source_tree: "cf6acf000f787817a795668c93470b139970feb6",
     },
     ExpectedArtifact {
         name: "minotari_console_wallet",

@@ -54,13 +54,13 @@ pub(super) async fn annotate_mode2_live_scenarios(
         &s1,
         vec![
             format!(
-                "Mode 2 S1 live scenario: attempted {} self-directed no-change split txs with balanced children derived from each selected parent; recipient={} planned_rounds={} cap={}",
+                "Mode 2 S1 live scenario: attempted {} self-directed normal-selection split txs with N-1 explicit children and wallet change as child N; recipient={} planned_rounds={} cap={}",
                 s1.attempted,
                 sender_seed.address,
                 s1_round_plan(config, 0).len(),
                 config.benchmark.mode2_live_max_s1_txs
             ),
-            "Mode 2 S1 uses the minotari multi-recipient one-sided builder directly so the measured wallet builds the output set without shelling out or pre-partitioning UTXOs."
+            "Mode 2 S1 uses upstream Minotari FundLocker selection and ordinary wallet change; any multi-input selection or shape failure is recorded without retry."
                 .to_string(),
         ],
     );
@@ -514,41 +514,63 @@ async fn run_mode2_s1_rounds(
         let round_balance_before = account_snapshot(&request.db_path)
             .ok()
             .map(|snapshot| snapshot.available_microtari);
-        let mut spendable_outputs =
-            match spendable_wallet_outputs(&request.db_path, request.confirmation_window) {
-                Ok(outputs) => outputs,
-                Err(error) => {
-                    round_summary.failure_count = round_summary.failure_count.saturating_add(1);
-                    round_summary.errors.push(format!(
-                        "mode2 S1 round {} could not read spendable outputs: {error:#}",
-                        round.round_index
-                    ));
-                    total.add_batch(round.round_index, round_summary);
-                    break;
-                }
-            };
-        spendable_outputs.sort_unstable_by_key(|output| std::cmp::Reverse(output.output.value()));
-        if spendable_outputs.len() != round.tx_count as usize {
+        let spendable_amounts = match spendable_output_amounts(&request.db_path) {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                round_summary.failure_count = round_summary.failure_count.saturating_add(1);
+                round_summary.errors.push(format!(
+                    "mode2 S1 round {} could not read spendable outputs: {error:#}",
+                    round.round_index
+                ));
+                total.add_batch(round.round_index, round_summary);
+                break;
+            }
+        };
+        if spendable_amounts.len() != round.tx_count as usize {
             round_summary.failure_count = round_summary.failure_count.saturating_add(1);
             round_summary.errors.push(format!(
                 "mode2 S1 round {} expected {} spendable inputs before dispatch, observed {}; refusing noncanonical state",
                 round.round_index,
                 round.tx_count,
-                spendable_outputs.len()
+                spendable_amounts.len()
             ));
             total.add_batch(round.round_index, round_summary);
             break;
         }
+        let Some(input_floor) = spendable_amounts.iter().copied().min() else {
+            round_summary.failure_count = round_summary.failure_count.saturating_add(1);
+            round_summary.errors.push(format!(
+                "mode2 S1 round {} has no spendable input floor",
+                round.round_index
+            ));
+            total.add_batch(round.round_index, round_summary);
+            break;
+        };
+        let explicit_child_amounts = match normal_change_split_amounts(
+            input_floor,
+            round.outputs_per_tx,
+            request.fee_rate.0,
+        ) {
+            Ok(amounts) => amounts,
+            Err(error) => {
+                round_summary.failure_count = round_summary.failure_count.saturating_add(1);
+                round_summary.errors.push(format!(
+                    "mode2 S1 round {} split planner failed: {error:#}",
+                    round.round_index
+                ));
+                total.add_batch(round.round_index, round_summary);
+                break;
+            }
+        };
         for tx_index in 1..=round.tx_count {
             println!(
                 "new_wallet/S1 round {} tx {}/{} outputs={}",
                 round.round_index, tx_index, round.tx_count, round.outputs_per_tx
             );
-            let selected = spendable_outputs[(tx_index - 1) as usize].clone();
             let submit_offset_ms = round_start.elapsed().as_millis();
-            let result = construct_sign_broadcast_exact_split_owned(
+            let result = construct_sign_broadcast_normal_split_owned(
                 request.clone(),
-                selected,
+                explicit_child_amounts.clone(),
                 round.outputs_per_tx,
             )
             .await;
@@ -682,6 +704,38 @@ async fn run_mode2_s1_rounds(
         .extra_metrics
         .insert("rounds".to_string(), serde_json::json!(round_metrics));
     total
+}
+
+fn normal_change_split_amounts(
+    input_floor: u64,
+    child_count: u32,
+    fee_per_gram: u64,
+) -> anyhow::Result<Vec<u64>> {
+    if child_count < 2 {
+        bail!("normal split requires at least two child outputs");
+    }
+    let explicit_count = child_count - 1;
+    // Reserve the larger pinned self-output weight for every child. FundLocker
+    // computes the real fee; this only keeps the requested amount below every
+    // available one-input parent so ordinary wallet change remains possible.
+    let fee_reserve_weight = 18u64
+        .checked_add(
+            mode1::CONSOLE_SELF_OUTPUT_GRAMS
+                .checked_mul(u64::from(child_count))
+                .context("normal split fee-reserve output weight overflow")?,
+        )
+        .context("normal split fee-reserve weight overflow")?;
+    let fee_reserve = fee_reserve_weight
+        .checked_mul(fee_per_gram)
+        .context("normal split fee reserve overflow")?;
+    let available = input_floor
+        .checked_sub(fee_reserve)
+        .context("normal split input floor does not cover fee reserve")?;
+    let amount = available / u64::from(child_count);
+    if amount == 0 {
+        bail!("normal split would create a zero-value child output");
+    }
+    Ok(vec![amount; explicit_count as usize])
 }
 
 pub(super) fn repeated_recipient(recipient: &str, count: usize) -> Vec<String> {
@@ -1111,5 +1165,96 @@ mod tests {
                 .iter()
                 .any(|row| row["terminal_outcome"] == "timed_out")
         );
+    }
+
+    #[test]
+    fn normal_split_requests_one_fewer_output_and_leaves_change() {
+        let amounts = normal_change_split_amounts(10_000_000_000, 8, 5).unwrap();
+        let fee_reserve = (18 + mode1::CONSOLE_SELF_OUTPUT_GRAMS * 8) * 5;
+        assert_eq!(amounts.len(), 7);
+        assert!(amounts.iter().all(|amount| *amount > 0));
+        assert!(
+            amounts.iter().sum::<u64>() + fee_reserve < 10_000_000_000,
+            "ordinary wallet change must remain"
+        );
+    }
+
+    #[test]
+    fn normal_split_rejects_invalid_or_dust_inputs() {
+        assert!(normal_change_split_amounts(10_000, 1, 5).is_err());
+        assert!(normal_change_split_amounts(1, 8, 5).is_err());
+    }
+
+    #[test]
+    fn normal_split_shape_requires_wallet_to_select_one_input() {
+        assert!(validate_normal_split_shape(1, 2, 2).is_ok());
+        assert!(validate_normal_split_shape(1, 8, 8).is_ok());
+        assert!(validate_normal_split_shape(2, 8, 8).is_err());
+        assert!(validate_normal_split_shape(1, 7, 8).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a funded disposable Esmeralda Minotari wallet"]
+    async fn live_upstream_normal_split_uses_one_input_and_wallet_change() -> anyhow::Result<()> {
+        let db_path = PathBuf::from(std::env::var("MODE2_S1_PROOF_DB")?);
+        let password = std::env::var("MODE2_S1_PROOF_PASSWORD")?;
+        let base_node_url = std::env::var("MODE2_S1_PROOF_BASE_URL")?;
+        let pool = init_db(db_path.clone())?;
+        let account = {
+            let conn = pool.get()?;
+            db::get_account_by_name(&conn, "default")?.context("Account not found: default")?
+        };
+        let recipient = account
+            .get_address(Network::Esmeralda, &password)?
+            .to_base58();
+        let input_floor = spendable_output_amounts(&db_path)?
+            .into_iter()
+            .min()
+            .context("proof wallet has no spendable outputs")?;
+        let child_count = 2;
+        let explicit_child_amounts = normal_change_split_amounts(input_floor, child_count, 5)?;
+        let outcome = construct_sign_broadcast_normal_split_owned(
+            OwnedOneSidedSendRequest {
+                db_path: db_path.clone(),
+                password,
+                base_node_url: base_node_url.clone(),
+                recipient,
+                amount: MicroMinotari(1),
+                fee_rate: MicroMinotari(5),
+                seconds_to_lock: 3_600,
+                confirmation_window: 3,
+                request_timeout: Duration::from_secs(30),
+                tip_height_at_broadcast: None,
+            },
+            explicit_child_amounts,
+            child_count,
+        )
+        .await?;
+        assert!(
+            outcome.accepted,
+            "base node rejected the proof transaction: {:?}",
+            outcome.rejection_reason
+        );
+
+        let mut config = Config::default();
+        config.network.base_node_http_url = base_node_url;
+        config.benchmark.c_min = 3;
+        let tx_ids = vec![outcome.tx_id.clone()];
+        let (verification, _, _) = verify_mode2_transactions_until_confirmed_with_timeout(
+            &config,
+            &db_path,
+            &tx_ids,
+            ScenarioName::S1,
+            Duration::from_secs(900),
+        )
+        .await?;
+        assert!(mode2_verification_confirmed(&verification, &tx_ids));
+        let shape = verification
+            .transaction_shapes
+            .get(&outcome.tx_id)
+            .context("proof verification did not recover transaction shape")?;
+        assert_eq!(shape.input_count, 1);
+        assert_eq!(shape.total_output_count, child_count);
+        Ok(())
     }
 }

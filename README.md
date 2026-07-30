@@ -52,9 +52,11 @@ pinned local node, then replace `REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY` with its
 `whoami` public key. Canonical live configuration rejects a remote scan endpoint,
 a local authority endpoint, or identical scan/authority URLs.
 
-The fetchers build from upstream bases plus the ordered patches in `patches/`.
-They verify immutable patch SHA-256 values, each intermediate/final Git tree,
-and the complete diff before building. The second fetcher writes typed schema-v2
+The harness links the unmodified upstream Minotari library. The runtime Minotari
+CLI adds only an environment-password patch, and the payment processor adds its
+required fee-rate patch; neither changes Mode 2 wallet selection or scanning.
+The fetchers verify immutable patch SHA-256 values, final Git trees, and complete
+diffs before building. The second fetcher writes typed schema-v2
 `tools/build-manifest.json`; preflight fails closed unless its upstream bases,
 ordered patches, result trees, and every runtime artifact SHA-256 match the
 provenance embedded by `build.rs`. CI performs the source checks without building

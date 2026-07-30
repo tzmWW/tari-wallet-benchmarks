@@ -55,16 +55,8 @@ fn source_provenance_inputs_are_immutable_and_verifiable() {
     assert_eq!(BUILD_MANIFEST_SCHEMA_VERSION, 2);
     let patches = [
         (
-            "patches/minotari-fixed-range-scan.patch",
-            "8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d",
-        ),
-        (
-            "patches/minotari-exact-output-locking.patch",
-            "56f65ce897c1f428aeb8858faefeaf691d66e4cfa4e3027bd27b2ac856461b63",
-        ),
-        (
             "patches/minotari-wallet-password-env.patch",
-            "c8f203f78cf5a2549be49e1e52e27474e13955a89c79a54658a0e2c06ae039c9",
+            "fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6",
         ),
         (
             "patches/payment-processor-fee-rate.patch",
@@ -77,6 +69,11 @@ fn source_provenance_inputs_are_immutable_and_verifiable() {
             expected
         );
     }
+    assert!(
+        fs::read_to_string("patches/minotari-wallet-password-env.patch")
+            .unwrap()
+            .contains("hide_env_values = true")
+    );
 
     for script in [
         "scripts/fetch-minotari-cli.sh",
@@ -89,6 +86,14 @@ fn source_provenance_inputs_are_immutable_and_verifiable() {
             "{script}"
         );
         assert!(contents.contains("write-tree"), "{script}");
+        assert!(
+            !contents.contains("minotari-fixed-range-scan.patch"),
+            "{script}"
+        );
+        assert!(
+            !contents.contains("minotari-exact-output-locking.patch"),
+            "{script}"
+        );
     }
     let license = fs::read_to_string("LICENSE").unwrap();
     assert!(license.contains("BSD 3-Clause License"));

@@ -1015,25 +1015,6 @@ fn confirmed_output_predicate(conn: &Connection) -> anyhow::Result<&'static str>
     }
 }
 
-pub(super) fn spendable_wallet_outputs(
-    db_path: &Path,
-    confirmation_window: u64,
-) -> anyhow::Result<Vec<DbWalletOutput>> {
-    let pool = init_db(db_path.to_path_buf())?;
-    let conn = pool.get()?;
-    let account = get_accounts(&conn, None)?
-        .into_iter()
-        .next()
-        .context("no account")?;
-    let tip_height = get_latest_scanned_tip_block_by_account(&conn, account.id)?
-        .map(|tip| tip.height)
-        .unwrap_or_default();
-    let min_height = tip_height.saturating_sub(confirmation_window);
-    Ok(db::fetch_unspent_outputs(
-        &conn, account.id, min_height, tip_height,
-    )?)
-}
-
 fn active_output_predicate(conn: &Connection) -> anyhow::Result<&'static str> {
     let mut stmt = conn.prepare("PRAGMA table_info(outputs)")?;
     let columns = stmt

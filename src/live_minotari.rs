@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, bail};
 use minotari::{
     ScanMode, Scanner,
-    db::{self, DbWalletOutput, SqlitePool, get_latest_scanned_tip_block_by_account},
+    db::{self, SqlitePool, get_latest_scanned_tip_block_by_account},
     get_accounts, get_balance, init_db,
     models::PendingTransactionStatus,
     transactions::{
@@ -43,8 +43,8 @@ mod scan;
 mod verification;
 
 use mode1::{
-    annotate_mode1_console_wallet, exact_no_change_split_with_fee, exact_pp_split_with_change,
-    grpc_bind_multiaddr, mode1_scan_grpc_address, mode1_unspent_count, old_wallet_base_path,
+    annotate_mode1_console_wallet, exact_pp_split_with_change, grpc_bind_multiaddr,
+    mode1_scan_grpc_address, mode1_unspent_count, old_wallet_base_path,
     send_mode1_operator_one_sided, start_mode1_console_wallet_with_recovery,
     wait_for_mode1_grpc_address, wait_for_mode1_scan_to_tip, write_mode1_runtime_config,
 };
@@ -67,7 +67,7 @@ use scan::{
     ResourcePeaks, account_balance, account_snapshot, amount_field_as_microtari,
     record_blocked_prerequisite_cells, run_b0_fresh_scan_for_mode,
     run_library_checkpoint_scan_cells, run_mode1_checkpoint_scan_cells, spendable_output_amounts,
-    spendable_output_count, spendable_wallet_outputs, wallet_output_state_counts,
+    spendable_output_count, wallet_output_state_counts,
 };
 #[cfg(test)]
 use scan::{record_blocked_checkpoint_scan, record_blocked_prerequisite_cell};
@@ -3852,36 +3852,26 @@ async fn construct_sign_broadcast_one_sided_recipient_amounts(
     .await
 }
 
-async fn construct_sign_broadcast_exact_split_owned(
+async fn construct_sign_broadcast_normal_split_owned(
     request: OwnedOneSidedSendRequest,
-    selected: DbWalletOutput,
+    explicit_child_amounts: Vec<u64>,
     child_count: u32,
 ) -> anyhow::Result<OneSidedSendOutcome> {
     let construction_start = Instant::now();
+    if explicit_child_amounts.len() != child_count.saturating_sub(1) as usize {
+        bail!(
+            "normal split requires {} explicit children before wallet change, got {}",
+            child_count.saturating_sub(1),
+            explicit_child_amounts.len()
+        );
+    }
     let pool = init_db(request.db_path.clone())?;
     let account = {
         let conn = pool.get()?;
         db::get_account_by_name(&conn, "default")?.context("Account not found: default")?
     };
     let address = TariAddress::from_str(&request.recipient)?;
-    let provisional = (0..child_count)
-        .map(|_| Recipient {
-            address: address.clone(),
-            amount: MicroMinotari(1),
-            payment_id: None,
-        })
-        .collect::<Vec<_>>();
-    let one_sided_tx =
-        OneSidedTransaction::new(pool.clone(), Network::Esmeralda, request.password.clone());
-    let fee = one_sided_tx.estimate_fee_without_change(
-        &account,
-        std::slice::from_ref(&selected.output),
-        &provisional,
-        request.fee_rate,
-    )?;
-    let plan = exact_no_change_split_with_fee(selected.output.value().0, child_count, fee.0)?;
-    let recipients = plan
-        .child_amounts
+    let recipients = explicit_child_amounts
         .into_iter()
         .map(|amount| Recipient {
             address: address.clone(),
@@ -3894,14 +3884,15 @@ async fn construct_sign_broadcast_exact_split_owned(
             .iter()
             .map(|recipient| recipient.amount.0)
             .try_fold(0u64, u64::checked_add)
-            .context("exact-split amount overflowed u64")?,
+            .context("normal-selection split amount overflowed u64")?,
     );
     let idempotency_key = uuid_like_idempotency();
-    let locked_funds = FundLocker::new(pool.clone()).lock_specific_output(
+    let locked_funds = FundLocker::new(pool.clone()).lock(
         account.id,
-        selected.id,
         amount,
-        fee,
+        recipients.len(),
+        request.fee_rate,
+        None,
         Some(idempotency_key.clone()),
         request.seconds_to_lock,
         request.confirmation_window,
@@ -3914,32 +3905,17 @@ async fn construct_sign_broadcast_exact_split_owned(
                 format!("pending transaction missing for idempotency key {idempotency_key}")
             })?
     };
+    let one_sided_tx =
+        OneSidedTransaction::new(pool.clone(), Network::Esmeralda, request.password.clone());
     let unsigned = one_sided_tx
         .create_unsigned_transaction(&account, locked_funds, recipients, request.fee_rate)
-        .context("creating exact-split unsigned transaction")?;
+        .context("creating normal-selection split transaction")?;
     let key_manager = account.get_key_manager(&request.password)?;
     let constants = ConsensusConstantsBuilder::new(Network::Esmeralda).build();
     let signed = sign_locked_transaction(&key_manager, constants, Network::Esmeralda, unsigned)
-        .context("signing exact-split transaction")?;
+        .context("signing normal-selection split transaction")?;
     let body = signed.signed_transaction.transaction.body();
-    let signed_fee = body
-        .kernels()
-        .iter()
-        .map(|kernel| kernel.fee.0)
-        .sum::<u64>();
-    if body.inputs().len() != 1
-        || body.outputs().len() != child_count as usize
-        || signed_fee != fee.0
-    {
-        bail!(
-            "exact-split signed shape mismatch: inputs={} outputs={} expected_outputs={} fee={} expected_fee={}",
-            body.inputs().len(),
-            body.outputs().len(),
-            child_count,
-            signed_fee,
-            fee.0
-        );
-    }
+    validate_normal_split_shape(body.inputs().len(), body.outputs().len(), child_count)?;
     let construction_ms = construction_start.elapsed().as_millis();
     finalize_signed_transaction_and_broadcast_without_retry(
         &pool,
@@ -3950,6 +3926,19 @@ async fn construct_sign_broadcast_exact_split_owned(
         construction_ms,
     )
     .await
+}
+
+fn validate_normal_split_shape(
+    input_count: usize,
+    output_count: usize,
+    expected_outputs: u32,
+) -> anyhow::Result<()> {
+    if input_count != 1 || output_count != expected_outputs as usize {
+        bail!(
+            "normal-selection split signed shape mismatch: inputs={input_count} outputs={output_count} expected_outputs={expected_outputs}"
+        );
+    }
+    Ok(())
 }
 
 pub async fn fund_one_sided_outputs(

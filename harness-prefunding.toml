@@ -57,7 +57,7 @@ payment_processor_listen = "127.0.0.1:9145"
 payment_receiver_listen = "127.0.0.1:9146"
 
 [versions]
-minotari_cli_rev = "1391dbd2155c96e885379d72b76e33582f0aad87"
+minotari_cli_rev = "360c4848a54d65fd710266233cc9277b0f785e74"
 tari_console_wallet_rev = "9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
 payment_processor_rev = "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c"
 base_node_rev = "v5.4.0"

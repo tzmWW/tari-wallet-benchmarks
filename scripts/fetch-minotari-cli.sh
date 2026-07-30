@@ -20,12 +20,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_DIR="${SCRIPT_DIR}/../patches"
 
 MINOTARI_REPO="https://github.com/tari-project/minotari-cli.git"
-MINOTARI_FEATURE_REPO="https://github.com/tzmWW/minotari-cli.git"
 MINOTARI_BASE_REV="360c4848a54d65fd710266233cc9277b0f785e74"
 MINOTARI_BASE_TREE="e9bbd1fb7b538e213e17c2986b85940435adce26"
-MINOTARI_FEATURE_REV="1391dbd2155c96e885379d72b76e33582f0aad87"
-MINOTARI_FINAL_TREE="f36ef55c065732ea9cfcfdfda94f71b7199842e1"
-MINOTARI_COMPLETE_DIFF_SHA256="881428c6a82e1add7a516e16b706c4d168ef14f222085f03cd9b792c523deef7"
+MINOTARI_FINAL_TREE="cf6acf000f787817a795668c93470b139970feb6"
+MINOTARI_COMPLETE_DIFF_SHA256="118dbe659efed99528159e56f509a01f5a9b789ea57a9ea3267e2b60fbf0d144"
 MINOTARI_DIR="${CACHE_DIR}/minotari-cli"
 
 TARI_REPO="https://github.com/tari-project/tari.git"
@@ -123,29 +121,8 @@ cleanup_minotari() {
 trap cleanup_minotari EXIT
 
 apply_minotari_patch \
-  "minotari-fixed-range-scan.patch" \
-  "8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d" \
-  "2fc434e0309f0ee92806eeea97bc33edacfbb793"
-apply_minotari_patch \
-  "minotari-exact-output-locking.patch" \
-  "56f65ce897c1f428aeb8858faefeaf691d66e4cfa4e3027bd27b2ac856461b63" \
-  "818201e82cc3ab35cccba2fd1ffa4b95bdc08fd2"
-
-# Cargo consumes this public feature commit. Its tree must be exactly the
-# upstream base plus the two library patches above.
-git -C "${MINOTARI_DIR}" fetch --no-tags "${MINOTARI_FEATURE_REPO}" "${MINOTARI_FEATURE_REV}"
-if [ "$(git -C "${MINOTARI_DIR}" rev-parse FETCH_HEAD)" != "${MINOTARI_FEATURE_REV}" ]; then
-  printf 'Cargo Minotari revision did not resolve to %s\n' "${MINOTARI_FEATURE_REV}" >&2
-  exit 1
-fi
-if [ "$(git -C "${MINOTARI_DIR}" rev-parse FETCH_HEAD^{tree})" != "818201e82cc3ab35cccba2fd1ffa4b95bdc08fd2" ]; then
-  printf 'Cargo Minotari tree does not match upstream plus tracked library patches\n' >&2
-  exit 1
-fi
-
-apply_minotari_patch \
   "minotari-wallet-password-env.patch" \
-  "c8f203f78cf5a2549be49e1e52e27474e13955a89c79a54658a0e2c06ae039c9" \
+  "fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6" \
   "${MINOTARI_FINAL_TREE}"
 
 git -C "${MINOTARI_DIR}" diff --cached --check
@@ -176,7 +153,7 @@ verify_checkout \
 
 if [ "${VERIFY_ONLY}" = true ]; then
   verify_checkout "${TARI_DIR}" "${TARI_NODE_REV}" "${TARI_NODE_COMMIT}" "${TARI_NODE_TREE}" "Tari node"
-  printf 'source provenance PASS: minotari base %s + 3 ordered patches -> %s; console %s; node %s\n' \
+  printf 'source provenance PASS: minotari base %s + runtime-only password patch -> %s; console %s; node %s\n' \
     "${MINOTARI_BASE_REV}" "${MINOTARI_FINAL_TREE}" "${TARI_CONSOLE_WALLET_REV}" "${TARI_NODE_REV}"
   exit 0
 fi
@@ -202,5 +179,5 @@ cp "${MINOTARI_DIR}/target/release/minotari" "${TOOLS_DIR}/minotari"
 cp "${TARI_DIR}/target/release/minotari_console_wallet" "${TOOLS_DIR}/minotari_console_wallet"
 cp "${TARI_DIR}/target/release/minotari_node" "${TOOLS_DIR}/minotari_node"
 
-printf 'installed patched minotari (compatibility revision %s), minotari_console_wallet at %s, and minotari_node at %s in %s\n' \
-  "${MINOTARI_FEATURE_REV}" "${TARI_CONSOLE_WALLET_REV}" "${TARI_NODE_REV}" "${TOOLS_DIR}"
+printf 'installed minotari from upstream %s with runtime-only password patch, minotari_console_wallet at %s, and minotari_node at %s in %s\n' \
+  "${MINOTARI_BASE_REV}" "${TARI_CONSOLE_WALLET_REV}" "${TARI_NODE_REV}" "${TOOLS_DIR}"
