@@ -94,6 +94,10 @@ fn source_provenance_inputs_are_immutable_and_verifiable() {
             !contents.contains("minotari-exact-output-locking.patch"),
             "{script}"
         );
+        assert!(
+            contents.contains("codesign --force --sign -"),
+            "{script} must normalize copied macOS artifact signatures"
+        );
     }
     let license = fs::read_to_string("LICENSE").unwrap();
     assert!(license.contains("BSD 3-Clause License"));

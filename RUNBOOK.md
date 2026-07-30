@@ -133,6 +133,8 @@ without compiling. A normal PP build emits schema-v2 `tools/build-manifest.json`
 with upstream bases, ordered patch hashes/result trees, and artifact hashes;
 runtime preflight compares it against provenance embedded by `build.rs` and fails
 closed on missing, extra, reordered, or changed claims.
+On macOS, the fetchers ad-hoc re-sign copied executables before hashing them so
+the manifest binds the runnable artifact bytes accepted by kernel code signing.
 
 ### Source Wallet
 

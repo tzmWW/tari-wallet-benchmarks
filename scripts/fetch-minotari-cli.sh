@@ -51,6 +51,13 @@ sha256_stdin() {
   fi
 }
 
+normalize_macos_signature() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    codesign --force --sign - "$1"
+    codesign --verify --strict "$1"
+  fi
+}
+
 require_sha256() {
   local path="$1"
   local expected="$2"
@@ -178,6 +185,9 @@ mkdir -p "${TOOLS_DIR}"
 cp "${MINOTARI_DIR}/target/release/minotari" "${TOOLS_DIR}/minotari"
 cp "${TARI_DIR}/target/release/minotari_console_wallet" "${TOOLS_DIR}/minotari_console_wallet"
 cp "${TARI_DIR}/target/release/minotari_node" "${TOOLS_DIR}/minotari_node"
+normalize_macos_signature "${TOOLS_DIR}/minotari"
+normalize_macos_signature "${TOOLS_DIR}/minotari_console_wallet"
+normalize_macos_signature "${TOOLS_DIR}/minotari_node"
 
 printf 'installed minotari from upstream %s with runtime-only password patch, minotari_console_wallet at %s, and minotari_node at %s in %s\n' \
   "${MINOTARI_BASE_REV}" "${TARI_CONSOLE_WALLET_REV}" "${TARI_NODE_REV}" "${TOOLS_DIR}"

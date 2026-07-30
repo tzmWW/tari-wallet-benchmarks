@@ -59,6 +59,13 @@ sha256_stdin() {
   fi
 }
 
+normalize_macos_signature() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    codesign --force --sign - "$1"
+    codesign --verify --strict "$1"
+  fi
+}
+
 require_sha256() {
   local path="$1"
   local expected="$2"
@@ -147,6 +154,7 @@ for artifact in minotari minotari_console_wallet minotari_node; do
 done
 mkdir -p "${TOOLS_DIR}"
 cp "${PP_DIR}/target/release/minotari_payment_processor" "${TOOLS_DIR}/minotari_payment_processor"
+normalize_macos_signature "${TOOLS_DIR}/minotari_payment_processor"
 
 MINOTARI_SHA="$(sha256_file "${TOOLS_DIR}/minotari")"
 CONSOLE_SHA="$(sha256_file "${TOOLS_DIR}/minotari_console_wallet")"
