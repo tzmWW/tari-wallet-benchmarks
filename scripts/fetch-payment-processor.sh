@@ -31,8 +31,11 @@ PP_DIR="${CACHE_DIR}/minotari_payment_processor"
 MINOTARI_REPO="https://github.com/tari-project/minotari-cli.git"
 MINOTARI_BASE_REV="360c4848a54d65fd710266233cc9277b0f785e74"
 MINOTARI_BASE_TREE="e9bbd1fb7b538e213e17c2986b85940435adce26"
-MINOTARI_RESULT_TREE="cf6acf000f787817a795668c93470b139970feb6"
-MINOTARI_COMPLETE_DIFF_SHA256="118dbe659efed99528159e56f509a01f5a9b789ea57a9ea3267e2b60fbf0d144"
+MINOTARI_FEATURE_REV="c2b8d7b65a3b4320d85b7ba118145d190c264777"
+MINOTARI_SCANNER_PATCH_SHA256="8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d"
+MINOTARI_SCANNER_TREE="2fc434e0309f0ee92806eeea97bc33edacfbb793"
+MINOTARI_RESULT_TREE="bd03010af1c92a690bc55d1c4931c683a78d4571"
+MINOTARI_COMPLETE_DIFF_SHA256="23740f25aca7031827506d814ace58f30ed181bf22e269840cdc63bc3759b11f"
 MINOTARI_PASSWORD_PATCH_SHA256="fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6"
 
 TARI_REPO="https://github.com/tari-project/tari.git"
@@ -169,6 +172,7 @@ cat > "${MANIFEST}" <<EOF
       "repository": "${MINOTARI_REPO}",
       "upstream": {"revision": "${MINOTARI_BASE_REV}", "commit": "${MINOTARI_BASE_REV}", "tree": "${MINOTARI_BASE_TREE}"},
       "patches": [
+        {"path": "patches/minotari-fixed-range-scan.patch", "sha256": "${MINOTARI_SCANNER_PATCH_SHA256}", "result_tree": "${MINOTARI_SCANNER_TREE}"},
         {"path": "patches/minotari-wallet-password-env.patch", "sha256": "${MINOTARI_PASSWORD_PATCH_SHA256}", "result_tree": "${MINOTARI_RESULT_TREE}"}
       ],
       "complete_diff_sha256": "${MINOTARI_COMPLETE_DIFF_SHA256}",
@@ -199,7 +203,7 @@ cat > "${MANIFEST}" <<EOF
     }
   },
   "artifacts": {
-    "minotari": {"source": "minotari_cli", "source_revision": "${MINOTARI_BASE_REV}", "source_tree": "${MINOTARI_RESULT_TREE}", "sha256": "${MINOTARI_SHA}"},
+    "minotari": {"source": "minotari_cli", "source_revision": "${MINOTARI_FEATURE_REV}", "source_tree": "${MINOTARI_RESULT_TREE}", "sha256": "${MINOTARI_SHA}"},
     "minotari_console_wallet": {"source": "tari_console_wallet", "source_revision": "${TARI_CONSOLE_WALLET_REV}", "source_tree": "${TARI_CONSOLE_WALLET_TREE}", "sha256": "${CONSOLE_SHA}"},
     "minotari_node": {"source": "minotari_node", "source_revision": "${TARI_NODE_REV}", "source_tree": "${TARI_NODE_TREE}", "sha256": "${NODE_SHA}"},
     "minotari_payment_processor": {"source": "payment_processor", "source_revision": "${PP_REV}", "source_tree": "${PP_RESULT_TREE}", "sha256": "${PP_SHA}"}

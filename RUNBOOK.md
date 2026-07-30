@@ -98,29 +98,34 @@ ast-grep scan
 
 The fetch scripts pin upstream bases and verify their exact Git trees:
 
-- minotari CLI/scanner upstream base: `tari-project/minotari-cli@360c4848a54d65fd710266233cc9277b0f785e74`
+- minotari CLI/scanner: upstream base `tari-project/minotari-cli@360c4848a54d65fd710266233cc9277b0f785e74`
+  plus the fixed-range completion patch at `tzmWW/minotari-cli@c2b8d7b65a3b4320d85b7ba118145d190c264777`
 - console wallet: `tari-project/tari@9f5adb7183dc2ec285f5c8fae05f4be9735d9749`
 - node: `tari-project/tari@v5.4.0`
 - payment processor: `tari-project/minotari_payment_processor@f0572c98cbfac7377412dc6d4094c7d7dfc5de2c`
 
-Cargo links the unmodified upstream Minotari library at that revision. Mode 2 S1
-uses its ordinary `FundLocker` selection and wallet change path: each transaction
-requests `N-1` self-payment outputs, change supplies output `N`, and the harness
-records any multi-input selection or shape failure without retry.
+Cargo links the public scanner-fix compatibility commit. It differs from the
+upstream base only by `patches/minotari-fixed-range-scan.patch`, which prevents a
+download-completion marker from overtaking queued block batches and fixes the
+inclusive partial-scan stop height. Mode 2 S1 still uses upstream's ordinary
+`FundLocker` selection and wallet change path: each transaction requests `N-1`
+self-payment outputs, change supplies output `N`, and the harness records any
+multi-input selection or shape failure without retry.
 
-The runtime Minotari CLI applies one operational patch only:
+The runtime Minotari CLI applies one additional operational patch:
 
 - `patches/minotari-wallet-password-env.patch` enables Clap's environment support
   and accepts `MINOTARI_WALLET_PASSWORD`, so the payment receiver does not expose
-  its wallet password in process arguments. It does not alter scanning,
-  selection, transaction construction, signing, or broadcasting, and it hides
+  its wallet password in process arguments. It does not alter selection,
+  transaction construction, signing, or broadcasting, and it hides
   the environment value from CLI help output.
 
-The scanner correctness and exact-output behavioral patches used by the
-2026-07-27 historical profile are no longer applied. Upstream premature scan
-completion or transaction-shape failures are benchmark outcomes. The historical
-profile and its hash-bound audit remain unchanged; do not describe it as evidence
-from the current upstream-wallet build.
+The exact-output behavioral patch used by the 2026-07-27 historical profile is
+not applied. The scanner completion fix is applied because the upstream race
+prevents fixed-target B0 scans from consuming already downloaded blocks.
+Transaction-shape failures remain benchmark outcomes. The historical profile and
+its hash-bound audit remain unchanged; do not describe it as evidence from the
+current scanner-fix build.
 
 The PP build applies `patches/payment-processor-fee-rate.patch` to both ordinary
 payment construction and self-spend consolidation. Upstream hard-codes `5`; the

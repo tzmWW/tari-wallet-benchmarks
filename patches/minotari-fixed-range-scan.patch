@@ -1,0 +1,119 @@
+diff --git a/minotari-scanning/src/scanning/http/scanner.rs b/minotari-scanning/src/scanning/http/scanner.rs
+index 4d6dcc9d50ed3b37d1c76c748f28b80a4c5467ee..4b0a12d00ba82c37cae4c5f8d7816293b30b35db 100644
+--- a/minotari-scanning/src/scanning/http/scanner.rs
++++ b/minotari-scanning/src/scanning/http/scanner.rs
+@@ -398,6 +398,7 @@ where
+                 self.current_in_progress.clear();
+                 more_blocks = false;
+                 has_next_page = false;
++                break;
+             }
+             all_blocks.push(block);
+         }
+@@ -550,13 +551,15 @@ where
+         let (send_download, rec_download) = mpsc::channel(1000);
+         self.update_scan_config(config)?;
+         let mut download_scanner = self.clone();
+-        let send_download_1 = send_download.clone();
+         let scan_config = config.clone();
+         tokio::spawn(async move {
+             let tip = match download_scanner.get_tip_info().await {
+                 Ok(tip) => tip,
+                 Err(e) => {
+                     error!("Failed to get tip info: {}", e);
++                    let _unused = send_scan_result.send(Err(e)).await.inspect_err(|send_error| {
++                        error!("Failed to send tip error: {}", send_error);
++                    });
+                     return;
+                 },
+             };
+@@ -566,26 +569,22 @@ where
+                     tip.best_block_height, scan_config.start_height
+                 );
+ 
+-                let _unused = send_download_1
+-                    .send(Ok(Vec::<BlockScanResult>::new()))
+-                    .await
+-                    .inspect_err(|e| {
+-                        error!("Failed to send tip result with error: {}", e);
+-                    });
+                 return;
+             }
+             loop {
+                 let more_blocks = match download_scanner.fetch_block_range().await {
+                     Ok((http_blocks, more_blocks)) => {
+-                        if let Err(e) = send_scan_result.send(Ok(http_blocks)).await {
++                        if !http_blocks.is_empty()
++                            && let Err(e) = send_scan_result.send(Ok(http_blocks)).await
++                        {
+                             error!("Failed to send download result with error: {}", e);
+                             return;
+                         };
+                         more_blocks
+                     },
+                     Err(e) => {
+-                        let _unused = send_download_1.send(Err(e)).await.inspect_err(|e| {
+-                            error!("Failed to send download result with error: {}", e);
++                        let _unused = send_scan_result.send(Err(e)).await.inspect_err(|send_error| {
++                            error!("Failed to send download error: {}", send_error);
+                         });
+                         return;
+                     },
+@@ -596,9 +595,6 @@ where
+                 }
+             }
+             debug!("Finished downloading blocks");
+-            if let Err(e) = send_download_1.send(Ok(Vec::new())).await {
+-                error!("Failed to send download result with error: {}", e);
+-            };
+         });
+         let thread_count = self.thread_count;
+         let processing_scanner = self.clone();
+@@ -747,7 +743,10 @@ where
+                     error!("Failed to send download error with error: {}", e);
+                 });
+             }
+-            debug!("HTTP scan completed, found",);
++            debug!("HTTP scan processing completed");
++            if let Err(e) = send_download.send(Ok(Vec::new())).await {
++                error!("Failed to send scan completion: {}", e);
++            }
+         });
+ 
+         Ok(rec_download)
+diff --git a/minotari/src/scan/coordinator.rs b/minotari/src/scan/coordinator.rs
+index 6d08678a8df953b9be709a3387571ff6310ac35b..2695a5f0ad90d940be67b4c775cea42420c1b08b 100644
+--- a/minotari/src/scan/coordinator.rs
++++ b/minotari/src/scan/coordinator.rs
+@@ -216,9 +216,8 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
+ 
+             let mut end_height = next_horizon_height.map(|h| h.saturating_sub(1));
+             if let ScanMode::Partial { max_blocks } = mode {
+-                let max_height_to_scan = global_next_block
+-                    .saturating_add(max_blocks)
+-                    .saturating_sub(total_scanned_globally);
++                let remaining = max_blocks.saturating_sub(total_scanned_globally);
++                let max_height_to_scan = inclusive_partial_end(global_next_block, remaining);
+                 end_height = match end_height {
+                     Some(h) => Some(h.min(max_height_to_scan)),
+                     None => Some(max_height_to_scan),
+@@ -489,3 +488,19 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
+             .map_err(|e| ScanError::Intermittent(e.to_string()))
+     }
+ }
++
++fn inclusive_partial_end(start_height: u64, block_count: u64) -> u64 {
++    start_height.saturating_add(block_count.saturating_sub(1))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::inclusive_partial_end;
++
++    #[test]
++    fn partial_end_height_is_inclusive() {
++        assert_eq!(inclusive_partial_end(751_501, 14), 751_514);
++        assert_eq!(inclusive_partial_end(10, 1), 10);
++        assert_eq!(inclusive_partial_end(u64::MAX - 1, 10), u64::MAX);
++    }
++}

@@ -52,9 +52,10 @@ pinned local node, then replace `REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY` with its
 `whoami` public key. Canonical live configuration rejects a remote scan endpoint,
 a local authority endpoint, or identical scan/authority URLs.
 
-The harness links the unmodified upstream Minotari library. The runtime Minotari
-CLI adds only an environment-password patch, and the payment processor adds its
-required fee-rate patch; neither changes Mode 2 wallet selection or scanning.
+The harness links upstream Minotari plus a fixed-range scanner completion patch;
+the public compatibility commit is `c2b8d7b`. The runtime Minotari CLI also adds
+an environment-password patch, and the payment processor adds its required
+fee-rate patch. None changes Mode 2 wallet transaction selection.
 The fetchers verify immutable patch SHA-256 values, final Git trees, and complete
 diffs before building. The second fetcher writes typed schema-v2
 `tools/build-manifest.json`; preflight fails closed unless its upstream bases,

@@ -20,10 +20,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_DIR="${SCRIPT_DIR}/../patches"
 
 MINOTARI_REPO="https://github.com/tari-project/minotari-cli.git"
+MINOTARI_FEATURE_REPO="https://github.com/tzmWW/minotari-cli.git"
 MINOTARI_BASE_REV="360c4848a54d65fd710266233cc9277b0f785e74"
 MINOTARI_BASE_TREE="e9bbd1fb7b538e213e17c2986b85940435adce26"
-MINOTARI_FINAL_TREE="cf6acf000f787817a795668c93470b139970feb6"
-MINOTARI_COMPLETE_DIFF_SHA256="118dbe659efed99528159e56f509a01f5a9b789ea57a9ea3267e2b60fbf0d144"
+MINOTARI_FEATURE_REV="c2b8d7b65a3b4320d85b7ba118145d190c264777"
+MINOTARI_FEATURE_TREE="2fc434e0309f0ee92806eeea97bc33edacfbb793"
+MINOTARI_FINAL_TREE="bd03010af1c92a690bc55d1c4931c683a78d4571"
+MINOTARI_COMPLETE_DIFF_SHA256="23740f25aca7031827506d814ace58f30ed181bf22e269840cdc63bc3759b11f"
 MINOTARI_DIR="${CACHE_DIR}/minotari-cli"
 
 TARI_REPO="https://github.com/tari-project/tari.git"
@@ -128,6 +131,20 @@ cleanup_minotari() {
 trap cleanup_minotari EXIT
 
 apply_minotari_patch \
+  "minotari-fixed-range-scan.patch" \
+  "8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d" \
+  "${MINOTARI_FEATURE_TREE}"
+
+# Cargo consumes this public scanner-fix commit. Its tree must exactly match
+# the upstream base plus the tracked scanner patch.
+git -C "${MINOTARI_DIR}" fetch --no-tags "${MINOTARI_FEATURE_REPO}" "${MINOTARI_FEATURE_REV}"
+if [ "$(git -C "${MINOTARI_DIR}" rev-parse FETCH_HEAD)" != "${MINOTARI_FEATURE_REV}" ] ||
+   [ "$(git -C "${MINOTARI_DIR}" rev-parse FETCH_HEAD^{tree})" != "${MINOTARI_FEATURE_TREE}" ]; then
+  printf 'Cargo Minotari scanner-fix revision/tree verification failed\n' >&2
+  exit 1
+fi
+
+apply_minotari_patch \
   "minotari-wallet-password-env.patch" \
   "fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6" \
   "${MINOTARI_FINAL_TREE}"
@@ -160,7 +177,7 @@ verify_checkout \
 
 if [ "${VERIFY_ONLY}" = true ]; then
   verify_checkout "${TARI_DIR}" "${TARI_NODE_REV}" "${TARI_NODE_COMMIT}" "${TARI_NODE_TREE}" "Tari node"
-  printf 'source provenance PASS: minotari base %s + runtime-only password patch -> %s; console %s; node %s\n' \
+  printf 'source provenance PASS: minotari base %s + fixed-range scanner and password patches -> %s; console %s; node %s\n' \
     "${MINOTARI_BASE_REV}" "${MINOTARI_FINAL_TREE}" "${TARI_CONSOLE_WALLET_REV}" "${TARI_NODE_REV}"
   exit 0
 fi
@@ -189,5 +206,5 @@ normalize_macos_signature "${TOOLS_DIR}/minotari"
 normalize_macos_signature "${TOOLS_DIR}/minotari_console_wallet"
 normalize_macos_signature "${TOOLS_DIR}/minotari_node"
 
-printf 'installed minotari from upstream %s with runtime-only password patch, minotari_console_wallet at %s, and minotari_node at %s in %s\n' \
-  "${MINOTARI_BASE_REV}" "${TARI_CONSOLE_WALLET_REV}" "${TARI_NODE_REV}" "${TOOLS_DIR}"
+printf 'installed fixed-range minotari %s, minotari_console_wallet at %s, and minotari_node at %s in %s\n' \
+  "${MINOTARI_FEATURE_REV}" "${TARI_CONSOLE_WALLET_REV}" "${TARI_NODE_REV}" "${TOOLS_DIR}"

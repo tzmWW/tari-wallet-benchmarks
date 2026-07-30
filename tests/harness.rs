@@ -55,6 +55,10 @@ fn source_provenance_inputs_are_immutable_and_verifiable() {
     assert_eq!(BUILD_MANIFEST_SCHEMA_VERSION, 2);
     let patches = [
         (
+            "patches/minotari-fixed-range-scan.patch",
+            "8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d",
+        ),
+        (
             "patches/minotari-wallet-password-env.patch",
             "fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6",
         ),
@@ -87,7 +91,7 @@ fn source_provenance_inputs_are_immutable_and_verifiable() {
         );
         assert!(contents.contains("write-tree"), "{script}");
         assert!(
-            !contents.contains("minotari-fixed-range-scan.patch"),
+            contents.contains("minotari-fixed-range-scan.patch"),
             "{script}"
         );
         assert!(

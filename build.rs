@@ -4,6 +4,10 @@ use sha2::{Digest, Sha256};
 
 const PATCHES: &[(&str, &str)] = &[
     (
+        "patches/minotari-fixed-range-scan.patch",
+        "8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d",
+    ),
+    (
         "patches/minotari-wallet-password-env.patch",
         "fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6",
     ),
@@ -21,13 +25,20 @@ pub(crate) const EXPECTED_SOURCES: &[ExpectedSource] = &[
         upstream_revision: "360c4848a54d65fd710266233cc9277b0f785e74",
         upstream_commit: "360c4848a54d65fd710266233cc9277b0f785e74",
         upstream_tree: "e9bbd1fb7b538e213e17c2986b85940435adce26",
-        patches: &[ExpectedPatch {
-            path: "patches/minotari-wallet-password-env.patch",
-            sha256: "fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6",
-            result_tree: "cf6acf000f787817a795668c93470b139970feb6",
-        }],
-        complete_diff_sha256: "118dbe659efed99528159e56f509a01f5a9b789ea57a9ea3267e2b60fbf0d144",
-        result_tree: "cf6acf000f787817a795668c93470b139970feb6",
+        patches: &[
+            ExpectedPatch {
+                path: "patches/minotari-fixed-range-scan.patch",
+                sha256: "8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d",
+                result_tree: "2fc434e0309f0ee92806eeea97bc33edacfbb793",
+            },
+            ExpectedPatch {
+                path: "patches/minotari-wallet-password-env.patch",
+                sha256: "fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6",
+                result_tree: "bd03010af1c92a690bc55d1c4931c683a78d4571",
+            },
+        ],
+        complete_diff_sha256: "23740f25aca7031827506d814ace58f30ed181bf22e269840cdc63bc3759b11f",
+        result_tree: "bd03010af1c92a690bc55d1c4931c683a78d4571",
     },
     ExpectedSource {
         name: "tari_console_wallet",
@@ -69,8 +80,8 @@ pub(crate) const EXPECTED_ARTIFACTS: &[ExpectedArtifact] = &[
     ExpectedArtifact {
         name: "minotari",
         source: "minotari_cli",
-        source_revision: "360c4848a54d65fd710266233cc9277b0f785e74",
-        source_tree: "cf6acf000f787817a795668c93470b139970feb6",
+        source_revision: "c2b8d7b65a3b4320d85b7ba118145d190c264777",
+        source_tree: "bd03010af1c92a690bc55d1c4931c683a78d4571",
     },
     ExpectedArtifact {
         name: "minotari_console_wallet",
