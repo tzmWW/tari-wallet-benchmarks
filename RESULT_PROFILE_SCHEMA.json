@@ -481,75 +481,9 @@
         "unavailable"
       ]
     },
-    "profile_correction": {
-      "additionalProperties": false,
-      "properties": {
-        "corrected_at": {
-          "format": "date-time",
-          "type": "string"
-        },
-        "manifest_path": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "manifest_schema_version": {
-          "minimum": 1,
-          "type": "integer"
-        },
-        "raw_profile_sha256": {
-          "pattern": "^[0-9a-fA-F]{64}$",
-          "type": "string"
-        },
-        "raw_profile_size": {
-          "minimum": 1,
-          "type": "integer"
-        },
-        "tool": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "tool_version": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "transformations": {
-          "items": {
-            "additionalProperties": false,
-            "properties": {
-              "pointer": {
-                "minLength": 1,
-                "pattern": "^/",
-                "type": "string"
-              },
-              "value": {}
-            },
-            "required": [
-              "pointer",
-              "value"
-            ],
-            "type": "object"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "manifest_schema_version",
-        "manifest_path",
-        "tool",
-        "tool_version",
-        "corrected_at",
-        "raw_profile_sha256",
-        "raw_profile_size",
-        "transformations"
-      ],
-      "type": "object"
-    },
     "provenance": {
       "additionalProperties": false,
       "properties": {
-        "correction": {
-          "$ref": "#/$defs/profile_correction"
-        },
         "export_build_manifest": {
           "anyOf": [
             {

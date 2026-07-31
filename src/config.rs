@@ -54,10 +54,7 @@ pub struct BenchmarkConfig {
     pub scan_batch_size: u64,
     #[serde(default)]
     pub mode1_live_topology: bool,
-    #[serde(
-        default = "default_mode1_payment_amount",
-        alias = "mode1_scenario_amount"
-    )]
+    #[serde(default = "default_mode1_payment_amount")]
     pub mode1_payment_amount: String,
     #[serde(default)]
     pub mode1_live_max_s1_txs: u32,
@@ -69,10 +66,7 @@ pub struct BenchmarkConfig {
     pub live_fresh_scan_cells: bool,
     #[serde(default)]
     pub mode2_live_scenarios: bool,
-    #[serde(
-        default = "default_mode2_payment_amount",
-        alias = "mode2_scenario_amount"
-    )]
+    #[serde(default = "default_mode2_payment_amount")]
     pub mode2_payment_amount: String,
     #[serde(default)]
     pub mode2_live_max_s1_txs: u32,
@@ -82,10 +76,7 @@ pub struct BenchmarkConfig {
     pub mode2_live_max_s5_txs: u32,
     #[serde(default)]
     pub mode3_live_topology: bool,
-    #[serde(
-        default = "default_mode3_payment_amount",
-        alias = "mode3_scenario_amount"
-    )]
+    #[serde(default = "default_mode3_payment_amount")]
     pub mode3_payment_amount: String,
     #[serde(default)]
     pub mode3_live_max_s1_batches: u32,
@@ -829,19 +820,6 @@ mod tests {
         cfg.benchmark.concurrent_batches = vec![8, 0, 16];
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("concurrent_batches"));
-    }
-
-    #[test]
-    fn legacy_scenario_amount_names_deserialize_as_payment_amounts() {
-        let legacy = toml::to_string(&Config::default())
-            .unwrap()
-            .replace("mode1_payment_amount", "mode1_scenario_amount")
-            .replace("mode2_payment_amount", "mode2_scenario_amount")
-            .replace("mode3_payment_amount", "mode3_scenario_amount");
-        let parsed: Config = toml::from_str(&legacy).unwrap();
-        assert_eq!(parsed.benchmark.mode1_payment_amount, "1 T");
-        assert_eq!(parsed.benchmark.mode2_payment_amount, "1 T");
-        assert_eq!(parsed.benchmark.mode3_payment_amount, "1 T");
     }
 
     #[test]

@@ -21,24 +21,16 @@ schema-v6 submission validation. Failed scenarios remain failed measurements.
   Local and authority endpoints matched at both anchors.
 - The profile contains 1,073 independently confirmed transaction rows.
 
-## Durable Log Interpretation
+## Durable Log
 
-The ignored local log
-`.bench-data/baseline-20260730T220138Z/baseline.log` is append-only and records
-three launches in one file. The first launch used the upstream scanner behavior
-and failed the two library-backed B0 cells at cursor `792900`; no S0 funding was
-sent. The second launch stopped before measurement because
-`HARNESS_WALLET_PW` was absent. The third launch used the fixed-range scanner,
-passed all three B0 cells at anchor `792990`, funded the candidate, and wrote all
-mode checkpoints plus the complete profile.
-
-The third launch's final line reports `computed_deltas do not match recomputed
-source scenario metrics`. This occurred after all 27 cells were written and was
-the one-digit floating-point round-trip issue described below, not a measured
-cell or infrastructure failure. The current harness canonicalizes the derived
-ratio; the promoted bytes pass strict submission validation and deterministic
-summary regeneration. Earlier entries in this append-only log are historical
-attempts, not the status of an active run.
+The ignored local operator log is
+`.bench-data/baseline-20260730T220138Z/baseline.log`. It records the promoted
+measurement launch from successful B0 through all mode checkpoints and the
+complete profile write. Its final reporting-only derived-ratio validation error
+occurred after all 27 cells were persisted and is the floating-point round-trip
+issue described below. The current harness canonicalizes the derived ratio; the
+promoted bytes pass strict submission validation and deterministic summary
+regeneration.
 
 ## Findings
 

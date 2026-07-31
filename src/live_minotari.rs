@@ -3455,7 +3455,7 @@ mod compact_json_tests {
     }
 
     #[test]
-    fn mode2_historical_partial_shape_accounts_only_confirmed_debits() {
+    fn mode2_partial_shape_accounts_only_confirmed_debits() {
         let mut observations = Vec::new();
         observations.extend((0..119).map(|_| {
             serde_json::json!({
@@ -4564,10 +4564,6 @@ fn prepared_transaction_checkpoint_path(db_path: &Path, tx_id: &str) -> anyhow::
 
 fn prepared_transaction_checkpoint_paths(db_path: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
-    let legacy = db_path.with_extension("prepared-transaction.json");
-    if legacy.exists() {
-        paths.push(legacy);
-    }
     let parent = db_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

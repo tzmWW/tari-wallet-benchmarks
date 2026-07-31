@@ -25,26 +25,6 @@ pub struct ProfileProvenance {
     pub export_commit: String,
     pub measurement_build_manifest: serde_json::Value,
     pub export_build_manifest: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub correction: Option<ProfileCorrection>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProfileCorrection {
-    pub manifest_schema_version: u32,
-    pub manifest_path: String,
-    pub tool: String,
-    pub tool_version: String,
-    pub corrected_at: chrono::DateTime<chrono::Utc>,
-    pub raw_profile_sha256: String,
-    pub raw_profile_size: u64,
-    pub transformations: Vec<ProfileCorrectionTransformation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProfileCorrectionTransformation {
-    pub pointer: String,
-    pub value: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -623,7 +603,6 @@ impl ResultProfile {
                 export_commit: harness_git_commit(),
                 measurement_build_manifest: build_manifest.clone(),
                 export_build_manifest: build_manifest,
-                correction: None,
             },
             completed_stages: Vec::new(),
             generated_at: chrono::Utc::now(),

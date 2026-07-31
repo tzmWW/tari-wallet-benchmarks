@@ -71,30 +71,7 @@ pub fn schema_document() -> Value {
                     "measurement_commit": {"type": "string", "minLength": 1},
                     "export_commit": {"type": "string", "minLength": 1},
                     "measurement_build_manifest": {"anyOf": [{"$ref": "#/$defs/build_manifest"}, {"type": "null"}]},
-                    "export_build_manifest": {"anyOf": [{"$ref": "#/$defs/build_manifest"}, {"type": "null"}]},
-                    "correction": {"$ref": "#/$defs/profile_correction"}
-                }
-            },
-            "profile_correction": {
-                "type": "object", "additionalProperties": false,
-                "required": ["manifest_schema_version", "manifest_path", "tool", "tool_version", "corrected_at", "raw_profile_sha256", "raw_profile_size", "transformations"],
-                "properties": {
-                    "manifest_schema_version": {"type": "integer", "minimum": 1},
-                    "manifest_path": {"type": "string", "minLength": 1},
-                    "tool": {"type": "string", "minLength": 1},
-                    "tool_version": {"type": "string", "minLength": 1},
-                    "corrected_at": {"type": "string", "format": "date-time"},
-                    "raw_profile_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
-                    "raw_profile_size": {"type": "integer", "minimum": 1},
-                    "transformations": {"type": "array", "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["pointer", "value"],
-                        "properties": {
-                            "pointer": {"type": "string", "minLength": 1, "pattern": "^/"},
-                            "value": {}
-                        }
-                    }}
+                    "export_build_manifest": {"anyOf": [{"$ref": "#/$defs/build_manifest"}, {"type": "null"}]}
                 }
             },
             "build_manifest": {
@@ -429,60 +406,6 @@ pub fn validate_path(path: &Path, submission: bool) -> anyhow::Result<ResultProf
     let document: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing {} as JSON", path.display()))?;
     validate_document(&document, submission)
-}
-
-pub fn validate_legacy_v5_path(path: &Path) -> anyhow::Result<()> {
-    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let document: Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing {} as JSON", path.display()))?;
-    validate_legacy_v5_document(&document)
-}
-
-fn validate_legacy_v5_document(document: &Value) -> anyhow::Result<()> {
-    if document["schema_version"] != json!(5) {
-        bail!("legacy validation requires schema_version 5");
-    }
-    if document["profile_kind"] != json!("final") || document["run_complete"] != json!(true) {
-        bail!("legacy schema-v5 profile must be a complete final profile");
-    }
-    for key in [
-        "run_id",
-        "harness_git_commit",
-        "generated_at",
-        "network",
-        "base_node",
-        "environment",
-        "versions",
-        "config",
-        "funding",
-        "modes",
-        "computed_deltas",
-        "findings",
-        "chain_verification",
-    ] {
-        if document.get(key).is_none() {
-            bail!("legacy schema-v5 profile is missing {key}");
-        }
-    }
-    let modes = document["modes"]
-        .as_object()
-        .context("legacy schema-v5 modes must be an object")?;
-    for mode in ModeName::ALL {
-        let scenarios = modes
-            .get(mode.as_str())
-            .and_then(|value| value["scenarios"].as_object())
-            .with_context(|| format!("legacy schema-v5 missing {}/scenarios", mode.as_str()))?;
-        for scenario in ScenarioName::ALL {
-            if !scenarios.contains_key(scenario.as_str()) {
-                bail!(
-                    "legacy schema-v5 missing {}/{}",
-                    mode.as_str(),
-                    scenario.as_str()
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 pub fn validate_document(document: &Value, submission: bool) -> anyhow::Result<ResultProfile> {
@@ -2242,79 +2165,6 @@ pub fn write_summary(profile_path: &Path, output_path: &Path) -> anyhow::Result<
     Ok(())
 }
 
-pub fn write_legacy_v5_summary(profile_path: &Path, output_path: &Path) -> anyhow::Result<()> {
-    let bytes =
-        fs::read(profile_path).with_context(|| format!("reading {}", profile_path.display()))?;
-    let document: Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing {} as JSON", profile_path.display()))?;
-    validate_legacy_v5_document(&document)?;
-    let mut output = String::new();
-    output.push_str("# Tari Wallet Benchmark Result\n\n");
-    output.push_str(&format!(
-        "- Run ID: `{}`\n",
-        markdown_text(&document["run_id"])
-    ));
-    output.push_str(&format!(
-        "- Profile: `{}`\n",
-        markdown_text(&document["profile_kind"])
-    ));
-    output.push_str(&format!("- Complete: `{}`\n", document["run_complete"]));
-    output.push_str(&format!(
-        "- Network: `{}`\n",
-        markdown_text(&document["network"])
-    ));
-    output.push_str(&format!(
-        "- Harness commit: `{}`\n",
-        markdown_text(&document["harness_git_commit"])
-    ));
-    output.push_str(&format!(
-        "- Selected scan node: `{}` (`{}`; `{}`)\n",
-        markdown_text(&document["base_node"]["endpoint"]),
-        markdown_text(&document["base_node"]["configured_revision"]),
-        markdown_text(&document["environment"]["base_node_network_path"])
-    ));
-    output.push_str(&format!(
-        "- Independent authority: `{}` (`{}`)\n\n",
-        markdown_text(&document["base_node"]["authority_endpoint"]),
-        markdown_text(&document["environment"]["authority_network_path"])
-    ));
-    output
-        .push_str("| Mode | Scenario | Execution | Outcome | Median ms | Successes | Failures |\n");
-    output.push_str("|---|---:|---|---|---:|---:|---:|\n");
-    for mode in ModeName::ALL {
-        for scenario in ScenarioName::ALL {
-            let cell = &document["modes"][mode.as_str()]["scenarios"][scenario.as_str()];
-            let (successes, failures) = cell["repetitions"]
-                .as_array()
-                .and_then(|runs| runs.last())
-                .map(|run| (&run["success_count"], &run["failure_count"]))
-                .unwrap_or((&Value::Null, &Value::Null));
-            output.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} |\n",
-                mode.as_str(),
-                scenario.as_str(),
-                markdown_text(&cell["execution_status"]),
-                markdown_text(&cell["outcome_status"]),
-                display_value(&cell["median_wall_ms"]),
-                display_value(successes),
-                display_value(failures)
-            ));
-        }
-    }
-    output.push_str(&format!(
-        "\nConfirmed top-level transactions: **{}**\n",
-        document["chain_verification"]["verified_transactions"]
-            .as_array()
-            .map(Vec::len)
-            .unwrap_or_default()
-    ));
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(output_path, output).with_context(|| format!("writing {}", output_path.display()))?;
-    Ok(())
-}
-
 pub fn render_summary(document: &Value) -> anyhow::Result<String> {
     validate_document(document, false)?;
     let mut output = String::new();
@@ -2445,24 +2295,10 @@ mod tests {
     }
 
     #[test]
-    fn valid_v5_checkpoint_round_trips() {
+    fn valid_profile_round_trips() {
         let document = profile_document();
         let profile = validate_document(&document, false).unwrap();
         assert_eq!(profile.schema_version, RESULT_SCHEMA_VERSION);
-    }
-
-    #[test]
-    fn legacy_v5_validation_is_explicit_and_does_not_accept_v6() {
-        let mut legacy = profile_document();
-        legacy["schema_version"] = json!(5);
-        legacy["profile_kind"] = json!("final");
-        legacy["run_complete"] = json!(true);
-        legacy["harness_git_commit"] = json!("historical");
-        legacy.as_object_mut().unwrap().remove("provenance");
-        validate_legacy_v5_document(&legacy).unwrap();
-
-        legacy["schema_version"] = json!(6);
-        assert!(validate_legacy_v5_document(&legacy).is_err());
     }
 
     #[test]

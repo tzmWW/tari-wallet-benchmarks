@@ -1941,7 +1941,9 @@ mod tests {
     fn s0_checkpoint_is_retained_until_recipient_reconciliation_succeeds() {
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("wallet.db");
-        let checkpoint = db_path.with_extension("prepared-transaction.json");
+        let checkpoint = directory
+            .path()
+            .join("wallet.db.s0.prepared-transaction.json");
         fs::write(&checkpoint, b"durable submission").unwrap();
 
         let error = remove_s0_checkpoint_after_recipient_reconciliation(

@@ -138,18 +138,12 @@ pub enum Command {
         profile: PathBuf,
         #[arg(long)]
         submission: bool,
-        /// Validate a historical schema-v5 profile.
-        #[arg(long)]
-        legacy_v5: bool,
     },
     SummarizeProfile {
         #[arg(long)]
         profile: PathBuf,
         #[arg(long)]
         out: PathBuf,
-        /// Summarize a historical schema-v5 profile.
-        #[arg(long)]
-        legacy_v5: bool,
     },
 }
 
