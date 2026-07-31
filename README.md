@@ -10,6 +10,10 @@ The canonical protocol is `B0,S0,S1,S2,S3,S4,S5,S6,S7`. Wallet rejection,
 locking, contention, stalls, and timeouts are measured outcomes. The harness
 does not retry scenario transactions or pre-partition UTXOs.
 
+The current uncapped Esmeralda profile is
+[`baselines/esmeralda_baseline.json`](baselines/esmeralda_baseline.json). Its
+failed cells remain failed measurements; see the adjacent generated summary.
+
 ## Prerequisites
 
 - Rustup; `rust-toolchain.toml` installs the pinned Rust toolchain, `rustfmt`, and `clippy`

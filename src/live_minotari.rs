@@ -1122,15 +1122,16 @@ fn add_balance_component_metrics(
     metrics.insert("balance_before".to_string(), serde_json::json!(before));
     metrics.insert("balance_after".to_string(), serde_json::json!(after));
     if metrics["balance_before"].is_null() || metrics["balance_after"].is_null() {
-        metrics.remove("balance_reconciliation");
         metrics.insert(
             "balance_components_unavailable_reason".to_string(),
             serde_json::json!("wallet balance-component query failed"),
         );
-        metrics.insert(
-            "balance_reconciliation_unavailable_reason".to_string(),
-            serde_json::json!("wallet balance-component query failed"),
-        );
+        if !metrics.contains_key("balance_reconciliation") {
+            metrics.insert(
+                "balance_reconciliation_unavailable_reason".to_string(),
+                serde_json::json!("wallet balance-component query failed"),
+            );
+        }
     } else if let (Some(before), Some(after)) = (before, after)
         && let (Some(before_total), Some(after_total)) = (
             before.get("total").and_then(serde_json::Value::as_u64),
@@ -1162,11 +1163,16 @@ fn add_balance_component_metrics(
             );
         }
     } else {
-        metrics.remove("balance_reconciliation");
         metrics.insert(
-            "balance_reconciliation_unavailable_reason".to_string(),
+            "balance_components_unavailable_reason".to_string(),
             serde_json::json!("total balance components were not completely observed before and after the scenario"),
         );
+        if !metrics.contains_key("balance_reconciliation") {
+            metrics.insert(
+                "balance_reconciliation_unavailable_reason".to_string(),
+                serde_json::json!("total balance components were not completely observed before and after the scenario"),
+            );
+        }
     }
 }
 
@@ -5566,7 +5572,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_total_components_remove_available_fallback() {
+    fn incomplete_total_components_preserve_available_reconciliation() {
         let mut metrics = serde_json::Map::new();
         add_balance_reconciliation_metrics(&mut metrics, Some(100), Some(90), 5, 5);
         add_balance_component_metrics(
@@ -5576,12 +5582,20 @@ mod tests {
             5,
             5,
         );
-        assert!(metrics.get("balance_reconciliation").is_none());
+        assert_eq!(
+            metrics["balance_reconciliation"]["balance_domain"],
+            "available"
+        );
+        assert!(
+            metrics
+                .get("balance_components_unavailable_reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        );
         assert!(
             metrics
                 .get("balance_reconciliation_unavailable_reason")
-                .and_then(serde_json::Value::as_str)
-                .is_some()
+                .is_none()
         );
     }
 
