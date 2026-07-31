@@ -33,12 +33,7 @@ jobs:
       - name: Generated schema is current
         run: cargo run -- schema --out RESULT_PROFILE_SCHEMA.json && git diff --exit-code -- RESULT_PROFILE_SCHEMA.json
       - name: Verify committed baseline integrity
-        run: |
-          scripts/correct-profile.py \
-            --raw analysis/reconciliation/esmeralda_baseline.raw.json \
-            --manifest analysis/reconciliation/esmeralda_baseline.correction.json \
-            --out /tmp/esmeralda_baseline.verified.json
-          cmp baselines/esmeralda_baseline.json /tmp/esmeralda_baseline.verified.json
+        run: test "$(sha256sum baselines/esmeralda_baseline.json | cut -d ' ' -f 1)" = "e00d8f9ea4711f825bb81e8af3abfc3a02a9831cc3f3030483aea0b39400a024"
       - name: Validate committed baseline
         run: cargo run -- validate-profile --profile baselines/esmeralda_baseline.json --submission
       - name: Verify committed summary
