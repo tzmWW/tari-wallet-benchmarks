@@ -2,12 +2,16 @@
 
 ## Verdict
 
-The uncapped `baseline-20260727T110514Z` run was promoted with explicit,
-hash-bound reporting reconciliation. The promoted schema-v6 profile is
-`baselines/esmeralda_baseline.json` and passes strict submission validation.
-It used the former Minotari scanner and exact-output behavioral patches and is
-therefore preserved as historical patched-wallet evidence, not the canonical
-upstream-wallet comparison after the 2026-07-30 protocol correction.
+The uncapped `baseline-20260727T110514Z` run was originally promoted with
+explicit, hash-bound reporting reconciliation. Its tracked raw checkpoint,
+correction manifest, and sanitized evidence are preserved under
+`analysis/reconciliation/`; applying the manifest reconstructs the historical
+schema-v6 profile identified by the hashes below. The live
+`baselines/esmeralda_baseline.json` path now contains the replacement July 31
+run, not this profile. The July 27 run used the former Minotari scanner and
+exact-output behavioral patches and remains historical patched-wallet evidence,
+not the canonical upstream-selection comparison after the 2026-07-30 protocol
+correction.
 
 ## Integrity
 
@@ -79,5 +83,6 @@ upstream-wallet comparison after the 2026-07-30 protocol correction.
 | PP | S5 | success | 232059 | 10 | 0 | Ten batches, 100 payments, all confirmed. |
 | PP | S6/S7 | success | 78597/972 | 0 | 0 | Both post-S5 companion scans passed. |
 
-The promoted profile contains 1,059 confirmed top-level transaction rows. Failed
-cells retain their measured all-run wall times and structured failure evidence.
+The reconstructed historical profile contains 1,059 confirmed top-level
+transaction rows. Failed cells retain their measured all-run wall times and
+structured failure evidence.

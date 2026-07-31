@@ -282,6 +282,27 @@ Only after validation should the candidate JSON and summary replace the files in
 `baselines/`. Never promote partial checkpoints or combine modes from separate
 runs.
 
+### Evidence and Logs
+
+The canonical result is the validated profile, its deterministic summary, and
+its dated audit. Raw operator and child-process logs are append-only diagnostic
+evidence: preserve them byte-for-byte and do not rewrite old errors to match a
+later launch. A namespace log can contain multiple invocations, so interpret it
+in order and correlate each launch with its B0/S0 checkpoints and profile.
+
+The current published profile is from candidate
+`baseline-20260730T220138Z`, measurement commit
+`fc37c668b3ff1ccbe94e343d80a7065db9fa0cf6`, with SHA-256
+`e00d8f9ea4711f825bb81e8af3abfc3a02a9831cc3f3030483aea0b39400a024`.
+Its local durable `baseline.log` contains an initial pre-patch B0 failure, a
+missing-password launch, and then the scanner-fixed launch that measured all 27
+cells. That final invocation wrote the complete profile before a reporting-only
+derived-ratio round-trip check stopped final re-validation. The current harness
+canonicalizes that derived value; strict submission validation and deterministic
+summary generation now pass. See `analysis/baseline-20260731-audit.md` for the
+authoritative assessment. Historical `logs/` and other `.bench-data/`
+namespaces are not active-run status.
+
 ## Interrupted Runs
 
 - Before S0 funding: rerun `prepare-b0` only in a new namespace if the checkpoint

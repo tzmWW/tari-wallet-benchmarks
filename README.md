@@ -11,8 +11,13 @@ locking, contention, stalls, and timeouts are measured outcomes. The harness
 does not retry scenario transactions or pre-partition UTXOs.
 
 The current uncapped Esmeralda profile is
-[`baselines/esmeralda_baseline.json`](baselines/esmeralda_baseline.json). Its
-failed cells remain failed measurements; see the adjacent generated summary.
+[`baselines/esmeralda_baseline.json`](baselines/esmeralda_baseline.json), from
+completed candidate `baseline-20260730T220138Z` at measurement commit
+`fc37c668b3ff1ccbe94e343d80a7065db9fa0cf6`. Its SHA-256 is
+`e00d8f9ea4711f825bb81e8af3abfc3a02a9831cc3f3030483aea0b39400a024`.
+All 27 cells are present; failed cells remain failed measurements. See the
+adjacent generated summary and the
+[`2026-07-31 audit`](analysis/baseline-20260731-audit.md).
 
 ## Prerequisites
 
