@@ -236,6 +236,12 @@
           "minLength": 64,
           "type": "string"
         },
+        "provenance_policy": {
+          "enum": [
+            "canonical",
+            "local"
+          ]
+        },
         "scan_repetitions": {
           "minimum": 1,
           "type": "integer"

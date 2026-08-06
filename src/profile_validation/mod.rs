@@ -143,6 +143,7 @@ pub fn schema_document() -> Value {
                     "protocol_fingerprint"
                 ],
                 "properties": {
+                    "provenance_policy": {"enum": ["canonical", "local"]},
                     "A_fund": {"type": "string"},
                     "C_min": {"type": "integer", "minimum": 1},
                     "volume_target": {"type": "integer", "minimum": 1},
@@ -592,6 +593,9 @@ fn validate_reference_configuration(
     document: &Value,
 ) -> anyhow::Result<()> {
     let config = &document["config"];
+    if config["provenance_policy"] == "local" {
+        bail!("a local baseline cannot pass submission validation");
+    }
     let exact = [
         ("A_fund", json!("10000 T")),
         ("C_min", json!(3)),
@@ -2299,6 +2303,17 @@ mod tests {
         let document = profile_document();
         let profile = validate_document(&document, false).unwrap();
         assert_eq!(profile.schema_version, RESULT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn local_profile_is_never_submission_eligible() {
+        let mut document = profile_document();
+        document["config"]["provenance_policy"] = json!("local");
+        let profile: ResultProfile = serde_json::from_value(document.clone()).unwrap();
+        let error = validate_reference_configuration(&profile, &document)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("local baseline"));
     }
 
     #[test]

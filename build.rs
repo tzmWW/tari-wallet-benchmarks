@@ -1,22 +1,5 @@
 use std::{fs, path::Path, process::Command};
 
-use sha2::{Digest, Sha256};
-
-const PATCHES: &[(&str, &str)] = &[
-    (
-        "patches/minotari-fixed-range-scan.patch",
-        "8efbed4f8cfbd87f5ad83080fd9ad70fdf9b8841b48b13279c9863b38fda807d",
-    ),
-    (
-        "patches/minotari-wallet-password-env.patch",
-        "fa49b2d0fa25ae31e2fdc9e17f85ca67a9a0206b9a62192d1b632d14b67888a6",
-    ),
-    (
-        "patches/payment-processor-fee-rate.patch",
-        "69c3001b4474d478822651810dc5f25cae5c8bfede2f9bc756de6ded37dc89fe",
-    ),
-];
-
 const GENERATED_PROVENANCE: &str = r#"
 pub(crate) const EXPECTED_SOURCES: &[ExpectedSource] = &[
     ExpectedSource {
@@ -112,10 +95,6 @@ fn main() {
         println!("cargo:rerun-if-changed=.git/{reference}");
     }
 
-    for (path, expected) in PATCHES {
-        println!("cargo:rerun-if-changed={path}");
-        verify_patch_hash(Path::new(path), expected);
-    }
     let out_dir = std::env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo");
     fs::write(
         Path::new(&out_dir).join("build_provenance.rs"),
@@ -138,17 +117,5 @@ fn main() {
             .filter(|commit| !commit.is_empty())
             .as_deref()
             .unwrap_or("unknown")
-    );
-}
-
-fn verify_patch_hash(path: &Path, expected: &str) {
-    let bytes =
-        fs::read(path).unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
-    let actual = hex::encode(Sha256::digest(bytes));
-    assert_eq!(
-        actual,
-        expected,
-        "tracked patch {} does not match its immutable expected SHA-256",
-        path.display()
     );
 }

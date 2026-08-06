@@ -15,6 +15,8 @@ use crate::versions::{MINOTARI_CLI_REV, PAYMENT_PROCESSOR_REV, TARI_CONSOLE_WALL
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub provenance: ProvenanceConfig,
     pub benchmark: BenchmarkConfig,
     pub paths: PathConfig,
     pub seeds: SeedConfig,
@@ -24,6 +26,20 @@ pub struct Config {
     pub funding: FundingConfig,
     #[serde(default)]
     pub timeouts: TimeoutConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenancePolicy {
+    #[default]
+    Canonical,
+    Local,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProvenanceConfig {
+    #[serde(default)]
+    pub policy: ProvenancePolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,6 +221,7 @@ impl Config {
         };
         let protocol = serde_json::json!({
             "network": self.network,
+            "provenance": self.provenance,
             "benchmark": self.benchmark,
             "paths": self.paths,
             "seeds": self.seeds,
@@ -270,25 +287,26 @@ impl Config {
             {
                 bail!("canonical live runs require a distinct remote authority_http_url");
             }
-            if parse_amount(&self.benchmark.a_fund)?.0 != parse_amount("10000 T")?.0
-                || self.benchmark.c_min != 3
-                || self.benchmark.volume_target != 512
-                || self.benchmark.doubling_rounds != 6
-                || self.benchmark.fanout_outputs_per_tx != 8
-                || self.benchmark.concurrent_batches != [8, 16, 32, 64, 128]
-                || self.benchmark.s4_t_budget_secs != 900
-                || self.benchmark.s5_m != 100
-                || self.benchmark.s5_k != 10
-                || self.fee_rate()?.0 != 5
-                || self.benchmark.mode1_live_max_s1_txs != 0
-                || self.benchmark.mode1_live_max_s4_batch != 0
-                || self.benchmark.mode1_live_max_s5_items != 0
-                || self.benchmark.mode2_live_max_s1_txs != 0
-                || self.benchmark.mode2_live_max_s4_batch != 0
-                || self.benchmark.mode2_live_max_s5_txs != 0
-                || self.benchmark.mode3_live_max_s1_batches != 0
-                || self.benchmark.mode3_live_max_s4_batch != 0
-                || self.benchmark.mode3_live_max_s5_items != 0
+            if self.provenance.policy == ProvenancePolicy::Canonical
+                && (parse_amount(&self.benchmark.a_fund)?.0 != parse_amount("10000 T")?.0
+                    || self.benchmark.c_min != 3
+                    || self.benchmark.volume_target != 512
+                    || self.benchmark.doubling_rounds != 6
+                    || self.benchmark.fanout_outputs_per_tx != 8
+                    || self.benchmark.concurrent_batches != [8, 16, 32, 64, 128]
+                    || self.benchmark.s4_t_budget_secs != 900
+                    || self.benchmark.s5_m != 100
+                    || self.benchmark.s5_k != 10
+                    || self.fee_rate()?.0 != 5
+                    || self.benchmark.mode1_live_max_s1_txs != 0
+                    || self.benchmark.mode1_live_max_s4_batch != 0
+                    || self.benchmark.mode1_live_max_s5_items != 0
+                    || self.benchmark.mode2_live_max_s1_txs != 0
+                    || self.benchmark.mode2_live_max_s4_batch != 0
+                    || self.benchmark.mode2_live_max_s5_txs != 0
+                    || self.benchmark.mode3_live_max_s1_batches != 0
+                    || self.benchmark.mode3_live_max_s4_batch != 0
+                    || self.benchmark.mode3_live_max_s5_items != 0)
             {
                 bail!("canonical live runs require the uncapped reference benchmark parameters");
             }
@@ -386,6 +404,10 @@ impl Config {
 
     pub fn scenario_defaults(&self) -> BTreeMap<String, serde_json::Value> {
         let mut defaults = BTreeMap::from([
+            (
+                "provenance_policy".to_string(),
+                serde_json::json!(self.provenance.policy),
+            ),
             (
                 "A_fund".to_string(),
                 serde_json::json!(self.benchmark.a_fund),
@@ -539,6 +561,7 @@ impl Default for Config {
                 authority_http_url: default_authority_http_url(),
                 mode1_base_node_service_peer: None,
             },
+            provenance: ProvenanceConfig::default(),
             benchmark: BenchmarkConfig {
                 a_fund: "10000 T".to_string(),
                 c_min: 3,
@@ -897,6 +920,26 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("uncapped reference benchmark parameters")
+        );
+    }
+
+    #[test]
+    fn local_live_shape_allows_non_reference_parameters() {
+        let mut cfg = Config::default();
+        cfg.provenance.policy = ProvenancePolicy::Local;
+        cfg.benchmark.mode1_live_topology = true;
+        cfg.benchmark.mode2_live_scenarios = true;
+        cfg.benchmark.mode3_live_topology = true;
+        cfg.benchmark.live_fresh_scan_cells = true;
+        cfg.benchmark.mode1_live_max_s1_txs = 1;
+        cfg.network.base_node_http_url = "http://127.0.0.1:18142".to_string();
+        cfg.network.mode1_base_node_service_peer =
+            Some("abc::/ip4/127.0.0.1/tcp/18189".to_string());
+
+        cfg.validate_prefunding_b0().unwrap();
+        assert_eq!(
+            cfg.scenario_defaults()["provenance_policy"],
+            serde_json::json!("local")
         );
     }
 

@@ -139,6 +139,41 @@ closed on missing, extra, reordered, or changed claims.
 On macOS, the fetchers ad-hoc re-sign copied executables before hashing them so
 the manifest binds the runnable artifact bytes accepted by kernel code signing.
 
+### Alternate Stack Baselines
+
+The canonical policy verifies the exact embedded submission provenance. It is
+the default and is required for `validate-profile --submission`. A partial repin
+must fail: otherwise a profile could name new dependencies while using stale
+source trees, patches, or runtime binaries.
+
+For a separate local baseline, use this workflow:
+
+1. Pin exact commits for Minotari, the console wallet, node, and payment
+   processor. Commit any compatibility changes to a fork or branch.
+2. Build the four runtime binaries and update their `[paths]` and exact
+   `[versions]` values in `harness.toml`.
+3. Set `[provenance] policy = "local"` and use a fresh `paths.data_dir`.
+4. Generate the configured build manifest:
+
+```sh
+cargo run -- create-local-manifest \
+  --config harness.toml \
+  --minotari-source /path/to/minotari-cli \
+  --console-wallet-source /path/to/tari-console-wallet-checkout \
+  --node-source /path/to/tari-node-checkout \
+  --payment-processor-source /path/to/minotari-payment-processor
+```
+
+5. Run `baseline-workflow` normally. It applies final-profile validation and
+   writes the summary, but does not apply submission-only reference pins.
+
+The manifest command requires clean checkouts and verifies that each configured
+revision resolves to the checkout's `HEAD`. It records repository URLs, commits,
+trees, and executable SHA-256 values. Local preflight then checks the manifest's
+internal source/artifact relationships and hashes the binaries again. A local
+profile records `provenance_policy: local`, so later submission validation
+rejects it even if its benchmark parameters happen to match the reference run.
+
 ### Source Wallet
 
 The only manually funded wallet is a `minotari` signing-wallet SQLite DB. It must

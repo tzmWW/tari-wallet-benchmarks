@@ -28,7 +28,7 @@ pub struct S0FundingEvidence {
 }
 
 use crate::{
-    config::Config,
+    config::{Config, ProvenancePolicy},
     env_capture,
     modes::{ModeName, ScenarioName},
     payment_processor,
@@ -339,7 +339,10 @@ async fn run_profile_inner(
         profile.mark_final();
     }
     profile.refresh_computed_deltas();
-    profile.write_validated_atomic(profile_path, true)?;
+    profile.write_validated_atomic(
+        profile_path,
+        config.provenance.policy == ProvenancePolicy::Canonical,
+    )?;
     println!("wrote {}", profile_path.display());
     Ok(())
 }
@@ -659,7 +662,10 @@ pub async fn run_baseline_workflow(
     prepare_b0_profile_inner(config, b0_profile_path, false).await?;
     fund_s0_from_checkpoint_inner(config, source_db, b0_profile_path, evidence_path, false).await?;
     run_profile_inner(config, profile_path, b0_profile_path, evidence_path, false).await?;
-    profile_validation::validate_path(profile_path, true)?;
+    profile_validation::validate_path(
+        profile_path,
+        config.provenance.policy == ProvenancePolicy::Canonical,
+    )?;
     println!("profile PASS: {}", profile_path.display());
     profile_validation::write_summary(profile_path, summary_path)?;
     println!("wrote {}", summary_path.display());

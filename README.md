@@ -72,6 +72,40 @@ ordered patches, result trees, and every runtime artifact SHA-256 match the
 provenance embedded by `build.rs`. CI performs the source checks without building
 large binaries via each script's `--verify-only` mode.
 
+### Local Baselines
+
+The published baseline uses `provenance.policy = "canonical"` and the immutable
+revisions above. To benchmark a different Tari/Minotari stack, set
+`provenance.policy = "local"`, pin exact commits in `[versions]`, and point
+`[paths]` at binaries built from those commits. Do not use a moving branch or
+`HEAD` as a recorded revision.
+
+After building all four runtime artifacts, generate their manifest from clean,
+committed source checkouts:
+
+```sh
+cargo run -- create-local-manifest \
+  --config harness.toml \
+  --minotari-source /path/to/minotari-cli \
+  --console-wallet-source /path/to/tari-console-wallet-checkout \
+  --node-source /path/to/tari-node-checkout \
+  --payment-processor-source /path/to/minotari-payment-processor
+```
+
+The command resolves every configured revision to its checkout commit, records
+the repository and Git tree, hashes each runtime artifact, and writes
+`paths.build_manifest`. Committed compatibility changes should live in a fork or
+branch so the selected commit and tree capture them. Separate Tari checkouts are
+needed when the console wallet and node use different revisions. Commit the
+harness dependency/API adaptation as well; measured runs reject a dirty harness
+checkout.
+
+Local runs still fail on dirty source checkouts, revision mismatches, stale
+manifests, changed artifact bytes, unsafe network topology, or invalid result
+data. They produce final profiles and deterministic summaries using normal
+validation, but are explicitly marked `provenance_policy: local` and cannot pass
+`validate-profile --submission`. The canonical policy remains the default.
+
 For a local node, set `network.base_node_http_url` to its HTTP endpoint and set
 `network.mode1_base_node_service_peer` to `public_key::multiaddr`. Keep
 `network.authority_http_url` on public Esmeralda. The harness requires an

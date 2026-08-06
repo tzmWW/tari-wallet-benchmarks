@@ -4,6 +4,11 @@ base_node_http_url = "http://127.0.0.1:18142"
 authority_http_url = "https://rpc.esmeralda.tari.com"
 mode1_base_node_service_peer = "REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY::/ip4/127.0.0.1/tcp/18189"
 
+[provenance]
+# Use "local" for a new baseline built from revisions and artifacts recorded in
+# your own build manifest. Local profiles cannot pass --submission validation.
+policy = "canonical"
+
 [benchmark]
 a_fund = "10000 T"
 c_min = 3

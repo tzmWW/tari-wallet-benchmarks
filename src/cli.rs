@@ -145,6 +145,20 @@ pub enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Create a schema-v2 manifest for an explicitly local baseline from clean,
+    /// committed source checkouts and the configured runtime binaries.
+    CreateLocalManifest {
+        #[arg(long, default_value = "harness.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        minotari_source: PathBuf,
+        #[arg(long)]
+        console_wallet_source: PathBuf,
+        #[arg(long)]
+        node_source: PathBuf,
+        #[arg(long)]
+        payment_processor_source: PathBuf,
+    },
 }
 
 #[cfg(test)]
