@@ -97,8 +97,13 @@ fn preflight_checks(
     require_env(&config.seeds.wallet_password_env)?;
     let mut missing = Vec::new();
     if !config.paths.minotari_console_wallet.exists() || !config.paths.minotari_binary.exists() {
+        let fetcher = if config.provenance.policy == ProvenancePolicy::Dev {
+            "scripts/fetch-dev-stack.sh"
+        } else {
+            "scripts/fetch-minotari-cli.sh"
+        };
         println!(
-            "minotari binaries missing; fetch/build with: scripts/fetch-minotari-cli.sh {} tools",
+            "minotari binaries missing; fetch/build with: {fetcher} {} tools",
             config.paths.cache_dir.display()
         );
     }
@@ -121,7 +126,10 @@ fn preflight_checks(
         println!(
             "payment processor binary missing: {}\nfetch/build with: {}",
             config.paths.payment_processor_binary.display(),
-            payment_processor::build_fetch_command(&config.paths.cache_dir)
+            payment_processor::build_fetch_command(
+                &config.paths.cache_dir,
+                config.provenance.policy == ProvenancePolicy::Dev,
+            )
         );
         missing.push(error.to_string());
     }
@@ -255,7 +263,7 @@ async fn run_profile_inner(
         config,
         env_capture::capture_for_network_with_data_dir(
             &config.network.base_node_http_url,
-            &config.network.authority_http_url,
+            config.network.authority_http_url.as_deref(),
             config.network.mode1_base_node_service_peer.as_deref(),
             Some(&config.paths.data_dir),
         ),
@@ -268,9 +276,10 @@ async fn run_profile_inner(
             .build()?;
         let tip = fetch_chain_tip(&client, &config.network.base_node_http_url).await?;
         profile.set_tip_start(tip.height, Some(hex::encode(&tip.hash)));
-        let authority = fetch_chain_tip(&client, &config.network.authority_http_url).await?;
-        profile.base_node.authority_tip_start_height = Some(authority.height);
-        profile.base_node.authority_tip_start_hash = Some(hex::encode(authority.hash));
+        if let Some(authority) = fetch_authority_tip(config, &client).await? {
+            profile.base_node.authority_tip_start_height = Some(authority.height);
+            profile.base_node.authority_tip_start_hash = Some(hex::encode(authority.hash));
+        }
         profile.base_node.pruning_horizon = Some(tip.pruning_horizon);
         profile.base_node.is_synced = Some(tip.is_synced);
     }
@@ -331,9 +340,10 @@ async fn run_profile_inner(
             .build()?;
         let tip = fetch_chain_tip(&client, &config.network.base_node_http_url).await?;
         profile.set_tip_end(tip.height, Some(hex::encode(&tip.hash)));
-        let authority = fetch_chain_tip(&client, &config.network.authority_http_url).await?;
-        profile.base_node.authority_tip_end_height = Some(authority.height);
-        profile.base_node.authority_tip_end_hash = Some(hex::encode(authority.hash));
+        if let Some(authority) = fetch_authority_tip(config, &client).await? {
+            profile.base_node.authority_tip_end_height = Some(authority.height);
+            profile.base_node.authority_tip_end_hash = Some(hex::encode(authority.hash));
+        }
         profile.base_node.pruning_horizon = Some(tip.pruning_horizon);
         profile.base_node.is_synced = Some(tip.is_synced);
         profile.mark_final();
@@ -373,7 +383,7 @@ async fn prepare_b0_profile_inner(
         config,
         env_capture::capture_for_network_with_data_dir(
             &config.network.base_node_http_url,
-            &config.network.authority_http_url,
+            config.network.authority_http_url.as_deref(),
             config.network.mode1_base_node_service_peer.as_deref(),
             Some(&config.paths.data_dir),
         ),
@@ -386,9 +396,10 @@ async fn prepare_b0_profile_inner(
         bail!("prepare-b0 requires a base node synchronized to tip");
     }
     profile.set_tip_start(tip.height, Some(hex::encode(&tip.hash)));
-    let authority = fetch_chain_tip(&client, &config.network.authority_http_url).await?;
-    profile.base_node.authority_tip_start_height = Some(authority.height);
-    profile.base_node.authority_tip_start_hash = Some(hex::encode(authority.hash));
+    if let Some(authority) = fetch_authority_tip(config, &client).await? {
+        profile.base_node.authority_tip_start_height = Some(authority.height);
+        profile.base_node.authority_tip_start_hash = Some(hex::encode(authority.hash));
+    }
     profile.base_node.pruning_horizon = Some(tip.pruning_horizon);
     profile.base_node.is_synced = Some(tip.is_synced);
     for mode in ModeName::ALL {
@@ -407,9 +418,10 @@ async fn prepare_b0_profile_inner(
     check_endpoint_authority(config).await?;
     let tip = fetch_chain_tip(&client, &config.network.base_node_http_url).await?;
     profile.set_tip_end(tip.height, Some(hex::encode(&tip.hash)));
-    let authority = fetch_chain_tip(&client, &config.network.authority_http_url).await?;
-    profile.base_node.authority_tip_end_height = Some(authority.height);
-    profile.base_node.authority_tip_end_hash = Some(hex::encode(authority.hash));
+    if let Some(authority) = fetch_authority_tip(config, &client).await? {
+        profile.base_node.authority_tip_end_height = Some(authority.height);
+        profile.base_node.authority_tip_end_hash = Some(hex::encode(authority.hash));
+    }
     profile.base_node.is_synced = Some(tip.is_synced);
     profile.refresh_computed_deltas();
     validate_prefunding_b0_metrics(&profile)?;
@@ -454,7 +466,7 @@ async fn fund_s0_from_checkpoint_inner(
         config,
         env_capture::capture_for_network_with_data_dir(
             &config.network.base_node_http_url,
-            &config.network.authority_http_url,
+            config.network.authority_http_url.as_deref(),
             config.network.mode1_base_node_service_peer.as_deref(),
             Some(&config.paths.data_dir),
         ),
@@ -1270,6 +1282,16 @@ struct FundingOutputProof {
     height: u64,
 }
 
+async fn fetch_authority_tip(
+    config: &Config,
+    client: &reqwest::Client,
+) -> anyhow::Result<Option<ChainTip>> {
+    let Some(authority_url) = config.network.authority_http_url.as_deref() else {
+        return Ok(None);
+    };
+    fetch_chain_tip(client, authority_url).await.map(Some)
+}
+
 #[cfg(feature = "live-minotari")]
 async fn check_endpoint_authority(config: &Config) -> anyhow::Result<()> {
     check_local_node_process_identity(config)?;
@@ -1277,12 +1299,17 @@ async fn check_endpoint_authority(config: &Config) -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
     let selected = fetch_chain_tip(&client, &config.network.base_node_http_url).await?;
-    let authority = fetch_chain_tip(&client, &config.network.authority_http_url).await?;
-    if !selected.is_synced || !authority.is_synced {
-        bail!("selected and authority endpoints must both report is_synced=true");
+    if !selected.is_synced {
+        bail!("selected endpoint must report is_synced=true");
     }
     if selected.pruning_horizon != 0 {
         bail!("selected scan endpoint must be archival (pruning_horizon=0)");
+    }
+    let Some(authority) = fetch_authority_tip(config, &client).await? else {
+        return Ok(());
+    };
+    if !authority.is_synced {
+        bail!("authority endpoint must report is_synced=true");
     }
     if selected.height.abs_diff(authority.height) > config.benchmark.c_min {
         bail!("selected scan endpoint is stale relative to the authority endpoint");
@@ -1299,7 +1326,11 @@ async fn check_endpoint_authority(config: &Config) -> anyhow::Result<()> {
     .await?;
     let authority_hash = fetch_header_hash(
         &client,
-        &config.network.authority_http_url,
+        config
+            .network
+            .authority_http_url
+            .as_deref()
+            .expect("authority checked above"),
         finalized_height,
     )
     .await?;
@@ -1365,40 +1396,45 @@ async fn check_selected_chain_readiness(
             tip.hash.len()
         );
     }
-    let authority_tip = fetch_chain_tip(&client, &config.network.authority_http_url)
+    if let Some(authority_tip) = fetch_authority_tip(config, &client).await? {
+        if !authority_tip.is_synced {
+            bail!("independent Esmeralda authority reports is_synced=false");
+        }
+        if tip.height.abs_diff(authority_tip.height) > config.benchmark.c_min {
+            bail!(
+                "selected base-node tip {} differs from authority tip {} by more than C_min={}",
+                tip.height,
+                authority_tip.height,
+                config.benchmark.c_min
+            );
+        }
+        let finalized_height = tip
+            .height
+            .min(authority_tip.height)
+            .saturating_sub(config.benchmark.c_min);
+        let selected_finalized_hash = fetch_header_hash(
+            &client,
+            &config.network.base_node_http_url,
+            finalized_height,
+        )
         .await
-        .context("querying independent Esmeralda authority tip")?;
-    if !authority_tip.is_synced {
-        bail!("independent Esmeralda authority reports is_synced=false");
-    }
-    if tip.height.abs_diff(authority_tip.height) > config.benchmark.c_min {
-        bail!(
-            "selected base-node tip {} differs from authority tip {} by more than C_min={}",
-            tip.height,
-            authority_tip.height,
-            config.benchmark.c_min
-        );
-    }
-    let finalized_height = tip
-        .height
-        .min(authority_tip.height)
-        .saturating_sub(config.benchmark.c_min);
-    let selected_finalized_hash = fetch_header_hash(
-        &client,
-        &config.network.base_node_http_url,
-        finalized_height,
-    )
-    .await
-    .context("querying selected base-node finalized header")?;
-    let authority_finalized_hash = fetch_header_hash(
-        &client,
-        &config.network.authority_http_url,
-        finalized_height,
-    )
-    .await
-    .context("querying authority finalized header")?;
-    if selected_finalized_hash != authority_finalized_hash {
-        bail!("selected base node and authority disagree at finalized height {finalized_height}");
+        .context("querying selected base-node finalized header")?;
+        let authority_finalized_hash = fetch_header_hash(
+            &client,
+            config
+                .network
+                .authority_http_url
+                .as_deref()
+                .expect("authority checked above"),
+            finalized_height,
+        )
+        .await
+        .context("querying authority finalized header")?;
+        if selected_finalized_hash != authority_finalized_hash {
+            bail!(
+                "selected base node and authority disagree at finalized height {finalized_height}"
+            );
+        }
     }
 
     let checks = [
@@ -1486,13 +1522,11 @@ async fn check_selected_chain_readiness(
         bail!("selected-chain preflight failed:\n{}", errors.join("\n"));
     }
     println!(
-        "selected-chain proof PASS: tip={} hash={} pruning_horizon={} authority_tip={} finalized_height={} finalized_hash={} is_synced=true",
+        "selected-chain proof PASS: tip={} hash={} pruning_horizon={} authority_configured={} is_synced=true",
         tip.height,
         hex::encode(tip.hash),
         tip.pruning_horizon,
-        authority_tip.height,
-        finalized_height,
-        hex::encode(selected_finalized_hash)
+        config.network.authority_http_url.is_some()
     );
     Ok(())
 }

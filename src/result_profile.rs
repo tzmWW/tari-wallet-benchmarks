@@ -16,7 +16,7 @@ use crate::{
 #[path = "profile_validation/mod.rs"]
 pub mod profile_validation;
 
-pub const RESULT_SCHEMA_VERSION: u32 = 6;
+pub const RESULT_SCHEMA_VERSION: u32 = 7;
 pub const REFERENCE_BASE_NODE_REVISION: &str = "v5.4.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,7 +138,7 @@ pub struct ResultProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaseNodeMetadata {
     pub endpoint: String,
-    pub authority_endpoint: String,
+    pub authority_endpoint: Option<String>,
     pub configured_revision: String,
     pub observed_version: Option<String>,
     pub version_observable: bool,

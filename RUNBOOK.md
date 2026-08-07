@@ -15,10 +15,10 @@
 
 ## Topology
 
-The preferred final topology uses a pinned unpruned local Esmeralda node for
-wallet scans and operations, plus public Esmeralda as independent authority.
-The local node only reduces request latency; it cannot accelerate blocks or
-`C_min`.
+The required topology uses one unpruned local Esmeralda node for wallet scans,
+wallet operations, and harness verification. An independent public authority is
+optional. The local node only reduces request latency; it cannot accelerate
+blocks or `C_min`.
 
 Set:
 
@@ -26,13 +26,14 @@ Set:
 [network]
 name = "esmeralda"
 base_node_http_url = "http://127.0.0.1:18142"
-authority_http_url = "https://rpc.esmeralda.tari.com"
 mode1_base_node_service_peer = "PUBLIC_KEY::/ip4/127.0.0.1/tcp/18189"
 ```
 
-Strict checks require `pruning_horizon=0`, selected/authority tip distance at
-most `C_min`, matching finalized hashes, queryable funding headers, selected-
-chain unspent funding outputs, and current wallet scanner heights.
+Strict checks require `pruning_horizon=0`, queryable funding headers, selected-
+chain unspent funding outputs, and current wallet scanner heights. To retain
+cross-node checks, add `authority_http_url = "https://rpc.esmeralda.tari.com"`;
+the harness then requires tip distance at most `C_min` and matching finalized
+hashes.
 
 ### Local Node Setup
 
@@ -76,24 +77,46 @@ tools/minotari_node \
 
 At the node prompt, run `whoami` and copy the displayed public key into
 `network.mode1_base_node_service_peer`. Wait for the node to synchronize fully.
-Compare `http://127.0.0.1:18142/get_tip_info` with
-`https://rpc.esmeralda.tari.com/get_tip_info`; `baseline-workflow` then performs
-the authoritative archival, process-hash, tip-distance, and finalized-hash
-checks. A stale node that reports `is_synced=true` still fails these checks.
+`baseline-workflow` verifies the selected node's archival state, process hash,
+funding outputs, and scanner heights. When an authority is configured it also
+performs tip-distance and finalized-hash checks.
 
 ## Build and Verify
 
-Install the dependencies listed in `README.md`, then run:
+Install the dependencies listed in `README.md`. For the rolling development
+stack, run:
 
 ```sh
-scripts/fetch-minotari-cli.sh .bench-cache tools
-scripts/fetch-payment-processor.sh .bench-cache tools
+cp examples/harness-dev.toml harness.toml
+scripts/fetch-dev-stack.sh .bench-cache/dev tools
+cargo run -- verify-build-manifest --config harness.toml
 cargo fmt --check
 cargo check --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo test --all-features
 ast-grep scan
+```
+
+The dev fetcher resolves Minotari `main`, the newest Tari prerelease, and
+payment-processor `main`. `MINOTARI_DEV_REF`, `TARI_DEV_REF`, and `PP_DEV_REF`
+override those selectors. It updates Cargo's Minotari lock, checks the harness
+against that resolution, builds all runtime artifacts, and writes a `channel:
+dev` manifest containing the resolution timestamp and exact commits. Commit the
+resulting `Cargo.lock` and any API adaptation before a measured run.
+
+Patch application, compilation, and tests are compatibility gates for dev. They
+are not rejected merely because a moving ref no longer equals the historical
+baseline pins. Runtime preflight still rejects a manifest whose resolved source
+relationships or artifact bytes are inconsistent.
+
+### Historical Canonical Build
+
+The published baseline used:
+
+```sh
+scripts/fetch-minotari-cli.sh .bench-cache tools
+scripts/fetch-payment-processor.sh .bench-cache tools
 ```
 
 The fetch scripts pin upstream bases and verify their exact Git trees:
@@ -104,7 +127,7 @@ The fetch scripts pin upstream bases and verify their exact Git trees:
 - node: `tari-project/tari@v5.4.0`
 - payment processor: `tari-project/minotari_payment_processor@f0572c98cbfac7377412dc6d4094c7d7dfc5de2c`
 
-Cargo links the public scanner-fix compatibility commit. It differs from the
+The published harness linked the public scanner-fix compatibility commit. It differs from the
 upstream base only by `patches/minotari-fixed-range-scan.patch`, which prevents a
 download-completion marker from overtaking queued block batches and fixes the
 inclusive partial-scan stop height. Mode 2 S1 still uses upstream's ordinary
@@ -141,10 +164,12 @@ the manifest binds the runnable artifact bytes accepted by kernel code signing.
 
 ### Alternate Stack Baselines
 
-The canonical policy verifies the exact embedded submission provenance. It is
-the default and is required for `validate-profile --submission`. A partial repin
-must fail: otherwise a profile could name new dependencies while using stale
-source trees, patches, or runtime binaries.
+The canonical policy and `harness-prefunding.toml` are retained for auditing the
+published schema-v6 result. This development-linked harness deliberately refuses
+to start a new canonical measurement, preventing current Mode 2 code from being
+mislabeled as the historical stack. `validate-profile --submission` continues to
+validate the immutable published profile. Use `dev` for upstream compatibility
+runs or `local` for an explicitly selected stack.
 
 For a separate local baseline, use this workflow:
 

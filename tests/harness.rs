@@ -39,6 +39,18 @@ fn canonical_template_uses_harness_defaults() {
 }
 
 #[test]
+fn development_template_uses_single_node_and_moving_refs() {
+    let config = Config::load_prefunding_b0(Path::new("examples/harness-dev.toml")).unwrap();
+    assert_eq!(
+        config.provenance.policy,
+        wallet_bench::config::ProvenancePolicy::Dev
+    );
+    assert!(config.network.authority_http_url.is_none());
+    assert_eq!(config.versions.minotari_cli_rev, "main");
+    assert_eq!(config.versions.tari_console_wallet_rev, "latest-prerelease");
+}
+
+#[test]
 fn source_provenance_inputs_are_verifiable() {
     assert_eq!(BUILD_MANIFEST_SCHEMA_VERSION, 2);
     for path in [
@@ -84,6 +96,17 @@ fn source_provenance_inputs_are_verifiable() {
 }
 
 #[test]
+fn development_fetcher_resolves_before_verifying() {
+    let contents = fs::read_to_string("scripts/fetch-dev-stack.sh").unwrap();
+    assert!(contents.contains("cargo update -p minotari"));
+    assert!(contents.contains("LOCKED_MINOTARI_COMMIT"));
+    assert!(contents.contains("\"channel\": \"dev\""));
+    assert!(contents.contains("\"resolved_at\""));
+    assert!(contents.contains("source_revision\": \"${MINOTARI_COMMIT}"));
+    assert!(!contents.contains("MINOTARI_BASE_TREE="));
+}
+
+#[test]
 fn schema_command_writes_json() {
     let tempdir = tempfile::tempdir().unwrap();
     let schema_path = tempdir.path().join("schema.json");
@@ -102,8 +125,8 @@ fn schema_command_writes_json() {
         "https://json-schema.org/draft/2020-12/schema"
     );
     assert_eq!(
-        json["properties"]["schema_version"]["const"],
-        RESULT_SCHEMA_VERSION
+        json["properties"]["schema_version"]["enum"],
+        serde_json::json!([6, RESULT_SCHEMA_VERSION])
     );
     assert_eq!(
         json["$defs"]["verified_transaction"]["properties"]["status_value"]["const"],

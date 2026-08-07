@@ -94,11 +94,17 @@ false.
 
 ## Review And Provenance
 
-The authoritative application order, expected hashes, and result trees are in:
+The historical canonical application order, expected hashes, and result trees are in:
 
 - `scripts/fetch-minotari-cli.sh`
 - `scripts/fetch-payment-processor.sh`
 - `build.rs`
+
+Rolling development runs use `scripts/fetch-dev-stack.sh`. That script resolves
+moving refs first, then records the actual patch hashes, result trees, complete
+diff hashes, resolved commits, and built artifact hashes. A patch that no longer
+applies is reported as a development compatibility break rather than disguised
+as a canonical provenance mismatch.
 
 The generated runtime manifest records the exact upstream revisions, ordered
 patches, result trees, complete-diff hashes, and artifact hashes. Removing or

@@ -13,11 +13,37 @@ use crate::config::{Config, ProvenancePolicy};
 
 pub const BUILD_MANIFEST_SCHEMA_VERSION: u32 = 2;
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const DEV_SOURCE_BINDINGS: [(&str, &str, &str); 4] = [
+    (
+        "minotari",
+        "minotari_cli",
+        "https://github.com/tari-project/minotari-cli.git",
+    ),
+    (
+        "minotari_console_wallet",
+        "tari_console_wallet",
+        "https://github.com/tari-project/tari.git",
+    ),
+    (
+        "minotari_node",
+        "minotari_node",
+        "https://github.com/tari-project/tari.git",
+    ),
+    (
+        "minotari_payment_processor",
+        "payment_processor",
+        "https://github.com/tari-project/minotari_payment_processor.git",
+    ),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildManifest {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<chrono::DateTime<chrono::Utc>>,
     pub sources: BTreeMap<String, SourceProvenance>,
     pub artifacts: BTreeMap<String, BuildArtifact>,
 }
@@ -106,19 +132,31 @@ pub fn verify(config: &Config) -> anyhow::Result<()> {
                 &artifact_paths,
                 Path::new(env!("CARGO_MANIFEST_DIR")),
             )?;
-            println!(
-                "build manifest PASS: canonical schema v2 provenance and runtime artifact SHA-256 values match"
+            bail!(
+                "this harness build follows the development stack; the canonical policy is retained only for historical schema-v6 profile validation"
             );
         }
-        ProvenancePolicy::Local => {
-            verify_local_configured_revisions(config, &manifest)?;
+        ProvenancePolicy::Local | ProvenancePolicy::Dev => {
+            match config.provenance.policy {
+                ProvenancePolicy::Local => verify_local_configured_revisions(config, &manifest)?,
+                ProvenancePolicy::Dev => verify_dev_configured_revisions(config, &manifest)?,
+                ProvenancePolicy::Canonical => unreachable!(),
+            }
+            if config.provenance.policy == ProvenancePolicy::Dev {
+                verify_dev_source_checkouts(
+                    config,
+                    &manifest,
+                    Path::new(env!("CARGO_MANIFEST_DIR")),
+                )?;
+            }
             verify_local_manifest(
                 &manifest,
                 &artifact_paths,
                 Path::new(env!("CARGO_MANIFEST_DIR")),
             )?;
             println!(
-                "build manifest PASS: local schema v2 provenance is internally consistent and runtime artifact SHA-256 values match"
+                "build manifest PASS: {:?} schema v2 provenance is internally consistent and runtime artifact SHA-256 values match",
+                config.provenance.policy
             );
         }
     }
@@ -211,6 +249,8 @@ pub fn create_local(
         .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
     let manifest = BuildManifest {
         schema_version: BUILD_MANIFEST_SCHEMA_VERSION,
+        channel: None,
+        resolved_at: None,
         sources,
         artifacts,
     };
@@ -360,6 +400,216 @@ fn verify_local_configured_revisions(
     Ok(())
 }
 
+fn verify_dev_configured_revisions(
+    config: &Config,
+    manifest: &BuildManifest,
+) -> anyhow::Result<()> {
+    if manifest.channel.as_deref() != Some("dev") || manifest.resolved_at.is_none() {
+        bail!("dev provenance requires channel=dev and a resolution timestamp");
+    }
+    let configured = BTreeMap::from(configured_revisions(config));
+    for (artifact_name, source_name, repository) in DEV_SOURCE_BINDINGS {
+        let requested_revision = configured[artifact_name];
+        let artifact = manifest
+            .artifacts
+            .get(artifact_name)
+            .with_context(|| format!("build manifest is missing artifact {artifact_name}"))?;
+        if artifact.source != source_name {
+            bail!("artifact {artifact_name} must be built from dev source {source_name}");
+        }
+        let source = manifest.sources.get(&artifact.source).with_context(|| {
+            format!(
+                "artifact {artifact_name} references missing source {}",
+                artifact.source
+            )
+        })?;
+        if source.repository.trim_end_matches(".git") != repository.trim_end_matches(".git") {
+            bail!("dev source {source_name} repository is not the expected Tari repository");
+        }
+        if requested_revision != source.upstream.revision {
+            bail!(
+                "configured {artifact_name} dev ref {requested_revision} does not match resolved manifest ref {}",
+                source.upstream.revision
+            );
+        }
+        if artifact.source_revision != source.upstream.commit {
+            bail!(
+                "artifact {artifact_name} must record the exact resolved dev commit {}",
+                source.upstream.commit
+            );
+        }
+    }
+    Ok(())
+}
+
+fn verify_dev_source_checkouts(
+    config: &Config,
+    manifest: &BuildManifest,
+    source_root: &Path,
+) -> anyhow::Result<()> {
+    let source_paths = BTreeMap::from([
+        ("minotari_cli", config.paths.cache_dir.join("minotari-cli")),
+        ("tari_console_wallet", config.paths.cache_dir.join("tari")),
+        ("minotari_node", config.paths.cache_dir.join("tari")),
+        (
+            "payment_processor",
+            config.paths.cache_dir.join("minotari_payment_processor"),
+        ),
+    ]);
+    if manifest.sources.len() != source_paths.len() {
+        bail!("dev build manifest source set is not exact");
+    }
+
+    for (name, checkout) in source_paths {
+        let source = manifest
+            .sources
+            .get(name)
+            .with_context(|| format!("dev build manifest is missing source {name}"))?;
+        if !checkout.join(".git").exists() {
+            bail!("dev source checkout {} is missing", checkout.display());
+        }
+        if !git_output(
+            &checkout,
+            &["status", "--porcelain", "--untracked-files=all"],
+        )?
+        .is_empty()
+        {
+            bail!("dev source checkout {} is dirty", checkout.display());
+        }
+        let repository = git_output(&checkout, &["remote", "get-url", "origin"])?;
+        if repository.trim_end_matches(".git") != source.repository.trim_end_matches(".git") {
+            bail!("dev source {name} repository does not match its checkout origin");
+        }
+        if git_output(&checkout, &["rev-parse", "HEAD"])? != source.upstream.commit
+            || git_output(&checkout, &["rev-parse", "HEAD^{tree}"])? != source.upstream.tree
+        {
+            bail!("dev source {name} commit/tree does not match its checkout");
+        }
+        verify_requested_ref(&checkout, name, source)?;
+
+        let index_dir = tempfile::tempdir()?;
+        let index_path = index_dir.path().join("index");
+        git_with_index(
+            &checkout,
+            &index_path,
+            &["read-tree", &source.upstream.commit],
+        )?;
+        for patch in &source.patches {
+            let patch_path = source_root.join(&patch.path);
+            git_with_index(
+                &checkout,
+                &index_path,
+                &["apply", "--cached", patch_path.to_string_lossy().as_ref()],
+            )?;
+            let result_tree = git_with_index(&checkout, &index_path, &["write-tree"])?;
+            if result_tree != patch.result_tree {
+                bail!(
+                    "dev source {name} patch {} result tree does not match",
+                    patch.path
+                );
+            }
+        }
+        let result_tree = git_with_index(&checkout, &index_path, &["write-tree"])?;
+        if result_tree != source.result_tree {
+            bail!("dev source {name} final result tree does not match");
+        }
+        let diff = git_bytes_with_index(
+            &checkout,
+            &index_path,
+            &[
+                "-c",
+                "diff.algorithm=myers",
+                "diff",
+                "--cached",
+                "--full-index",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                &source.upstream.commit,
+            ],
+        )?;
+        if hex::encode(Sha256::digest(diff)) != source.complete_diff_sha256 {
+            bail!("dev source {name} complete diff SHA-256 does not match");
+        }
+    }
+    Ok(())
+}
+
+fn verify_requested_ref(
+    checkout: &Path,
+    name: &str,
+    source: &SourceProvenance,
+) -> anyhow::Result<()> {
+    let requested = source.upstream.revision.as_str();
+    if requested == "latest-prerelease" {
+        let tags = git_output(checkout, &["tag", "--points-at", &source.upstream.commit])?;
+        if !tags
+            .lines()
+            .any(|tag| tag.starts_with('v') && tag.contains("-pre."))
+        {
+            bail!("dev source {name} commit is not tagged as a prerelease");
+        }
+        return Ok(());
+    }
+
+    let remote_ref = format!("origin/{requested}^{{commit}}");
+    if git_output(checkout, &["rev-parse", "--verify", &remote_ref]).is_ok() {
+        if !git_succeeds(
+            checkout,
+            &[
+                "merge-base",
+                "--is-ancestor",
+                &source.upstream.commit,
+                remote_ref.trim_end_matches("^{commit}"),
+            ],
+        )? {
+            bail!("dev source {name} commit is not reachable from origin/{requested}");
+        }
+        return Ok(());
+    }
+
+    let tag_ref = format!("refs/tags/{requested}^{{commit}}");
+    if git_output(checkout, &["rev-parse", "--verify", &tag_ref])? != source.upstream.commit {
+        bail!("dev source {name} tag {requested} does not resolve to the recorded commit");
+    }
+    Ok(())
+}
+
+fn git_succeeds(path: &Path, args: &[&str]) -> anyhow::Result<bool> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .status()
+        .with_context(|| format!("running git in {}", path.display()))?;
+    Ok(status.success())
+}
+
+fn git_with_index(path: &Path, index: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let bytes = git_bytes_with_index(path, index, args)?;
+    Ok(String::from_utf8(bytes)?.trim().to_string())
+}
+
+fn git_bytes_with_index(path: &Path, index: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .output()
+        .with_context(|| format!("running git in {}", path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed in {}: {}",
+            args.join(" "),
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output.stdout)
+}
+
 fn verify_canonical_manifest(
     manifest: &BuildManifest,
     artifact_paths: &BTreeMap<String, PathBuf>,
@@ -449,8 +699,10 @@ fn verify_local_manifest(
             )
         })?;
         referenced_sources.insert(artifact.source.as_str());
-        if artifact.source_revision != source.upstream.revision {
-            bail!("artifact {name} revision does not match its source revision");
+        if artifact.source_revision != source.upstream.revision
+            && artifact.source_revision != source.upstream.commit
+        {
+            bail!("artifact {name} revision does not match its source ref or resolved commit");
         }
         if artifact.source_tree != source.result_tree {
             bail!("artifact {name} source tree does not match its source result tree");
@@ -659,6 +911,40 @@ mod tests {
     }
 
     #[test]
+    fn dev_manifest_freezes_requested_refs_to_exact_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manifest, paths) = manifest_fixture(dir.path());
+        manifest.channel = Some("dev".to_string());
+        manifest.resolved_at = Some(chrono::Utc::now());
+        let mut config = Config::default();
+        config.provenance.policy = ProvenancePolicy::Dev;
+
+        for (artifact_name, requested_ref) in configured_revisions(&config) {
+            let artifact = manifest.artifacts.get_mut(artifact_name).unwrap();
+            let source = manifest.sources.get_mut(&artifact.source).unwrap();
+            source.upstream.revision = requested_ref.to_string();
+            artifact.source_revision = source.upstream.commit.clone();
+        }
+        for (_, source_name, repository) in DEV_SOURCE_BINDINGS {
+            manifest.sources.get_mut(source_name).unwrap().repository = repository.to_string();
+        }
+
+        verify_dev_configured_revisions(&config, &manifest).unwrap();
+        verify_local_manifest(&manifest, &paths, Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+
+        manifest.artifacts.get_mut("minotari").unwrap().source = "payment_processor".to_string();
+        assert!(verify_dev_configured_revisions(&config, &manifest).is_err());
+        manifest.artifacts.get_mut("minotari").unwrap().source = "minotari_cli".to_string();
+
+        manifest
+            .artifacts
+            .get_mut("minotari")
+            .unwrap()
+            .source_revision = "0000000000000000000000000000000000000000".to_string();
+        assert!(verify_dev_configured_revisions(&config, &manifest).is_err());
+    }
+
+    #[test]
     fn manifest_rejects_unknown_fields() {
         let json = r#"{
             "schema_version": 2,
@@ -774,6 +1060,8 @@ mod tests {
         (
             BuildManifest {
                 schema_version: BUILD_MANIFEST_SCHEMA_VERSION,
+                channel: None,
+                resolved_at: None,
                 sources,
                 artifacts,
             },

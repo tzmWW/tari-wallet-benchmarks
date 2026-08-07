@@ -1,15 +1,10 @@
 [network]
 name = "esmeralda"
 base_node_http_url = "http://127.0.0.1:18142"
-authority_http_url = "https://rpc.esmeralda.tari.com"
 mode1_base_node_service_peer = "REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY::/ip4/127.0.0.1/tcp/18189"
 
 [provenance]
-# Historical published-baseline policy. The current development-linked harness
-# will validate the published profile but refuses to start a new canonical run.
-# Use "local" for a new baseline built from revisions and artifacts recorded in
-# your own build manifest. Local profiles cannot pass --submission validation.
-policy = "canonical"
+policy = "dev"
 
 [benchmark]
 a_fund = "10000 T"
@@ -43,8 +38,8 @@ mode3_live_max_s5_items = 0
 mode3_worker_sleep_secs = 10
 
 [paths]
-data_dir = ".bench-data/candidate"
-cache_dir = ".bench-cache"
+data_dir = ".bench-data/dev-candidate"
+cache_dir = ".bench-cache/dev"
 minotari_console_wallet = "tools/minotari_console_wallet"
 minotari_binary = "tools/minotari"
 minotari_node = "tools/minotari_node"
@@ -59,18 +54,18 @@ wallet_password_env = "HARNESS_WALLET_PW"
 
 [modes]
 old_wallet_grpc_address = "http://127.0.0.1:18143"
-new_wallet_database = ".bench-data/candidate/new-wallet/wallet.db"
+new_wallet_database = ".bench-data/dev-candidate/new-wallet/wallet.db"
 payment_processor_listen = "127.0.0.1:9145"
 payment_receiver_listen = "127.0.0.1:9146"
 
 [versions]
-minotari_cli_rev = "c2b8d7b65a3b4320d85b7ba118145d190c264777"
-tari_console_wallet_rev = "9f5adb7183dc2ec285f5c8fae05f4be9735d9749"
-payment_processor_rev = "f0572c98cbfac7377412dc6d4094c7d7dfc5de2c"
-base_node_rev = "v5.4.0"
+minotari_cli_rev = "main"
+tari_console_wallet_rev = "latest-prerelease"
+payment_processor_rev = "main"
+base_node_rev = "latest-prerelease"
 
 [timeouts]
-startup_secs = 21600
-confirmation_secs = 1800
-scan_batch_secs = 600
+startup_secs = 1800
+confirmation_secs = 1200
+scan_batch_secs = 300
 transaction_lock_secs = 60

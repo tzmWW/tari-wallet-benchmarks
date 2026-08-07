@@ -17,7 +17,7 @@ use minotari::{
     transactions::{
         fund_locker::FundLocker,
         manager::TransactionSender,
-        one_sided_transaction::{OneSidedTransaction, Recipient},
+        one_sided_transaction::{OneSidedTransaction, Recipient, unsigned_transaction_binding},
     },
     utils::init_wallet::{init_with_seed_words, init_with_view_key},
 };
@@ -3800,13 +3800,21 @@ async fn construct_sign_broadcast_one_sided_recipient_amounts(
             .context("multi-recipient amount overflowed u64")?,
     );
     let idempotency_key = uuid_like_idempotency();
+    let idempotency = unsigned_transaction_binding(
+        Some(idempotency_key.clone()),
+        account.id,
+        &recipients,
+        request.fee_rate,
+        request.seconds_to_lock,
+        request.confirmation_window,
+    );
     let locked_funds = FundLocker::new(pool.clone()).lock(
         account.id,
         amount,
         recipients.len(),
         request.fee_rate,
         None,
-        Some(idempotency_key.clone()),
+        idempotency,
         request.seconds_to_lock,
         request.confirmation_window,
     )?;
@@ -3893,13 +3901,21 @@ async fn construct_sign_broadcast_normal_split_owned(
             .context("normal-selection split amount overflowed u64")?,
     );
     let idempotency_key = uuid_like_idempotency();
+    let idempotency = unsigned_transaction_binding(
+        Some(idempotency_key.clone()),
+        account.id,
+        &recipients,
+        request.fee_rate,
+        request.seconds_to_lock,
+        request.confirmation_window,
+    );
     let locked_funds = FundLocker::new(pool.clone()).lock(
         account.id,
         amount,
         recipients.len(),
         request.fee_rate,
         None,
-        Some(idempotency_key.clone()),
+        idempotency,
         request.seconds_to_lock,
         request.confirmation_window,
     )?;

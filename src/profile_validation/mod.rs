@@ -38,7 +38,7 @@ pub fn schema_document() -> Value {
             "computed_deltas", "findings", "chain_verification"
         ],
         "properties": {
-            "schema_version": {"const": RESULT_SCHEMA_VERSION},
+            "schema_version": {"enum": [6, RESULT_SCHEMA_VERSION]},
             "run_id": {"type": "string", "minLength": 1},
             "profile_kind": {"enum": ["checkpoint", "final"]},
             "run_complete": {"type": "boolean"},
@@ -61,6 +61,33 @@ pub fn schema_document() -> Value {
             "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
             "chain_verification": {"$ref": "#/$defs/chain_verification"}
         },
+        "allOf": [
+            {
+                "if": {"properties": {"schema_version": {"const": 6}}},
+                "then": {
+                    "properties": {
+                        "base_node": {
+                            "properties": {
+                                "authority_endpoint": {"type": "string", "minLength": 1}
+                            }
+                        },
+                        "config": {
+                            "properties": {
+                                "provenance_policy": {"enum": ["canonical", "local"]}
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                "if": {"properties": {"schema_version": {"const": RESULT_SCHEMA_VERSION}}},
+                "then": {
+                    "properties": {
+                        "config": {"required": ["provenance_policy"]}
+                    }
+                }
+            }
+        ],
         "$defs": {
             "nullable_string": {"type": ["string", "null"]},
             "nullable_integer": {"type": ["integer", "null"], "minimum": 0},
@@ -101,7 +128,7 @@ pub fn schema_document() -> Value {
                 ],
                 "properties": {
                     "endpoint": {"type": "string", "minLength": 1},
-                    "authority_endpoint": {"type": "string", "minLength": 1},
+                    "authority_endpoint": {"$ref": "#/$defs/nullable_string"},
                     "configured_revision": {"type": "string", "minLength": 1},
                     "observed_version": {"$ref": "#/$defs/nullable_string"},
                     "version_observable": {"type": "boolean"},
@@ -143,7 +170,7 @@ pub fn schema_document() -> Value {
                     "protocol_fingerprint"
                 ],
                 "properties": {
-                    "provenance_policy": {"enum": ["canonical", "local"]},
+                    "provenance_policy": {"enum": ["canonical", "local", "dev"]},
                     "A_fund": {"type": "string"},
                     "C_min": {"type": "integer", "minimum": 1},
                     "volume_target": {"type": "integer", "minimum": 1},
@@ -457,8 +484,8 @@ fn validate_schema(document: &Value) -> anyhow::Result<()> {
 }
 
 fn validate_identity(profile: &ResultProfile) -> anyhow::Result<()> {
-    if profile.schema_version != RESULT_SCHEMA_VERSION {
-        bail!("schema_version must be {RESULT_SCHEMA_VERSION}");
+    if !matches!(profile.schema_version, 6 | RESULT_SCHEMA_VERSION) {
+        bail!("schema_version must be 6 or {RESULT_SCHEMA_VERSION}");
     }
     for mode in ModeName::ALL {
         let key = mode.as_str();
@@ -593,8 +620,26 @@ fn validate_reference_configuration(
     document: &Value,
 ) -> anyhow::Result<()> {
     let config = &document["config"];
-    if config["provenance_policy"] == "local" {
-        bail!("a local baseline cannot pass submission validation");
+    if matches!(config["provenance_policy"].as_str(), Some("local" | "dev")) {
+        bail!("only a canonical baseline can pass submission validation");
+    }
+    if profile.schema_version == 6
+        && (profile.environment.authority_network_path != "remote"
+            || profile.base_node.authority_endpoint.is_none()
+            || profile.base_node.authority_tip_start_height.is_none()
+            || profile
+                .base_node
+                .authority_tip_start_hash
+                .as_deref()
+                .is_none_or(str::is_empty)
+            || profile.base_node.authority_tip_end_height.is_none()
+            || profile
+                .base_node
+                .authority_tip_end_hash
+                .as_deref()
+                .is_none_or(str::is_empty))
+    {
+        bail!("schema-v6 submission requires independent authority anchors");
     }
     let exact = [
         ("A_fund", json!("10000 T")),
@@ -696,9 +741,6 @@ fn validate_reference_configuration(
     {
         bail!("submission profile must record build-manifest and seed fingerprints");
     }
-    if profile.environment.authority_network_path != "remote" {
-        bail!("submission requires an independent remote Esmeralda authority endpoint");
-    }
     if profile.environment.base_node_network_path != "local"
         || profile.environment.mode1_base_node_service_peer.is_none()
     {
@@ -722,18 +764,6 @@ fn validate_reference_configuration(
         || profile
             .base_node
             .tip_end_hash
-            .as_deref()
-            .is_none_or(str::is_empty)
-        || profile.base_node.authority_tip_start_height.is_none()
-        || profile
-            .base_node
-            .authority_tip_start_hash
-            .as_deref()
-            .is_none_or(str::is_empty)
-        || profile.base_node.authority_tip_end_height.is_none()
-        || profile
-            .base_node
-            .authority_tip_end_hash
             .as_deref()
             .is_none_or(str::is_empty)
     {
@@ -2200,11 +2230,15 @@ pub fn render_summary(document: &Value) -> anyhow::Result<String> {
         markdown_text(&document["base_node"]["configured_revision"]),
         markdown_text(&document["environment"]["base_node_network_path"])
     ));
-    output.push_str(&format!(
-        "- Independent authority: `{}` (`{}`)\n\n",
-        markdown_text(&document["base_node"]["authority_endpoint"]),
-        markdown_text(&document["environment"]["authority_network_path"])
-    ));
+    if document["base_node"]["authority_endpoint"].is_null() {
+        output.push_str("- Independent authority: not configured\n\n");
+    } else {
+        output.push_str(&format!(
+            "- Independent authority: `{}` (`{}`)\n\n",
+            markdown_text(&document["base_node"]["authority_endpoint"]),
+            markdown_text(&document["environment"]["authority_network_path"])
+        ));
+    }
     output.push_str("| Mode | Scenario | Execution | Outcome | Median ms (ok) | Median ms (all) | API accepted | Chain confirmed | Rejected | Stalled | Timed out | Successes | Failures |\n");
     output.push_str("|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for mode in ModeName::ALL {
@@ -2306,14 +2340,36 @@ mod tests {
     }
 
     #[test]
-    fn local_profile_is_never_submission_eligible() {
-        let mut document = profile_document();
-        document["config"]["provenance_policy"] = json!("local");
-        let profile: ResultProfile = serde_json::from_value(document.clone()).unwrap();
-        let error = validate_reference_configuration(&profile, &document)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("local baseline"));
+    fn schema_versions_keep_distinct_topology_and_policy_contracts() {
+        let mut v7_without_policy = profile_document();
+        v7_without_policy["config"]
+            .as_object_mut()
+            .unwrap()
+            .remove("provenance_policy");
+        assert!(validate_document(&v7_without_policy, false).is_err());
+
+        let mut v6_without_authority = profile_document();
+        v6_without_authority["schema_version"] = json!(6);
+        v6_without_authority["base_node"]["authority_endpoint"] = Value::Null;
+        assert!(validate_document(&v6_without_authority, false).is_err());
+
+        let mut v6_dev = profile_document();
+        v6_dev["schema_version"] = json!(6);
+        v6_dev["config"]["provenance_policy"] = json!("dev");
+        assert!(validate_document(&v6_dev, false).is_err());
+    }
+
+    #[test]
+    fn noncanonical_profiles_are_never_submission_eligible() {
+        for policy in ["local", "dev"] {
+            let mut document = profile_document();
+            document["config"]["provenance_policy"] = json!(policy);
+            let profile: ResultProfile = serde_json::from_value(document.clone()).unwrap();
+            let error = validate_reference_configuration(&profile, &document)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("only a canonical baseline"));
+        }
     }
 
     #[test]
@@ -2798,7 +2854,7 @@ mod tests {
     fn realistic_submission_accepts_honest_wallet_failure_and_blocked_dependents() {
         let mut config = Config::default();
         config.network.base_node_http_url = "http://127.0.0.1:18142".to_string();
-        config.network.authority_http_url = "https://rpc.esmeralda.tari.com".to_string();
+        config.network.authority_http_url = Some("https://rpc.esmeralda.tari.com".to_string());
         config.network.mode1_base_node_service_peer =
             Some("abc::/ip4/127.0.0.1/tcp/18189".to_string());
         config.benchmark.mode1_live_topology = true;
@@ -2829,7 +2885,7 @@ mod tests {
             &config,
             env_capture::capture_for_network(
                 &config.network.base_node_http_url,
-                &config.network.authority_http_url,
+                config.network.authority_http_url.as_deref(),
                 config.network.mode1_base_node_service_peer.as_deref(),
             ),
         );

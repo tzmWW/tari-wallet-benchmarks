@@ -238,6 +238,11 @@ async fn execute(cli: Cli) -> anyhow::Result<()> {
             profile_validation::write_summary(&profile, &out)?;
             println!("wrote {}", out.display());
         }
+        Command::VerifyBuildManifest { config } => {
+            let config = Config::load_prefunding_b0(&config)
+                .with_context(|| format!("loading {}", config.display()))?;
+            wallet_bench::build_manifest::verify(&config)?;
+        }
         Command::CreateLocalManifest {
             config,
             minotari_source,

@@ -22,17 +22,17 @@ adjacent generated summary and the
 ## Prerequisites
 
 - Rustup; `rust-toolchain.toml` installs the pinned Rust toolchain, `rustfmt`, and `clippy`
-- Git, Bash, `curl`, `lsof`, `sqlite3`, `protobuf-compiler`, and standard C/C++ build tools
+- Git, Bash, `curl`, `jq`, `lsof`, `sqlite3`, `protobuf-compiler`, and standard C/C++ build tools
 - Node.js/npm only for installing `@ast-grep/cli`
 - An unpruned, synchronized Esmeralda HTTP wallet-query endpoint
-- A public Esmeralda authority endpoint
+- Optionally, a second public Esmeralda endpoint for cross-node anchor checks
 - A separate funded source wallet DB for the one external S0 funding transaction
 
 macOS:
 
 ```sh
 xcode-select --install
-brew install rustup git protobuf sqlite3 node
+brew install rustup git jq protobuf sqlite3 node
 npm install --global @ast-grep/cli
 ```
 
@@ -40,7 +40,7 @@ Ubuntu/Debian:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y build-essential clang cmake git curl lsof protobuf-compiler sqlite3 nodejs npm
+sudo apt-get install -y build-essential clang cmake git curl jq lsof protobuf-compiler sqlite3 nodejs npm
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 npm install --global @ast-grep/cli
 ```
@@ -50,27 +50,41 @@ npm install --global @ast-grep/cli
 ```sh
 git clone https://github.com/tzmWW/tari-wallet-benchmarks.git
 cd tari-wallet-benchmarks
-scripts/fetch-minotari-cli.sh .bench-cache tools
-scripts/fetch-payment-processor.sh .bench-cache tools
+cp examples/harness-dev.toml harness.toml
+scripts/fetch-dev-stack.sh .bench-cache/dev tools
+cargo run -- verify-build-manifest --config harness.toml
 cargo build --release --features live-minotari
-cp harness-prefunding.toml harness.toml
 ```
 
 Before using the template, follow `RUNBOOK.md` to initialize and synchronize the
-pinned local node, then replace `REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY` with its
-`whoami` public key. Canonical live configuration rejects a remote scan endpoint,
-a local authority endpoint, or identical scan/authority URLs.
+local node, then replace `REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY` with its `whoami`
+public key. The wallet surfaces and harness use that same node. An optional
+`authority_http_url` may be added for cross-node tip and finalized-hash checks.
 
-The harness links upstream Minotari plus a fixed-range scanner completion patch;
-the public compatibility commit is `c2b8d7b`. The runtime Minotari CLI also adds
-an environment-password patch, and the payment processor adds its required
-fee-rate patch. None changes Mode 2 wallet transaction selection.
-The fetchers verify immutable patch SHA-256 values, final Git trees, and complete
-diffs before building. The second fetcher writes typed schema-v2
-`tools/build-manifest.json`; preflight fails closed unless its upstream bases,
-ordered patches, result trees, and every runtime artifact SHA-256 match the
-provenance embedded by `build.rs`. CI performs the source checks without building
-large binaries via each script's `--verify-only` mode.
+The development fetcher resolves Minotari `main`, the newest Tari prerelease, and
+payment-processor `main` once per invocation. It records their exact commits and
+trees, applies only the password-input and fee-rate integration patches, builds
+the runtime binaries, and writes their artifact hashes to
+`tools/build-manifest.json`. Moving development refs are expected; a patch,
+compile, or test failure is a compatibility result rather than a canonical pin
+violation. The frozen manifest still prevents source or binary substitution
+within a run.
+
+The published baseline remains immutable historical schema-v6 evidence. Its
+original fixed sources and patch hashes remain available through the legacy
+canonical fetch scripts and embedded provenance checks.
+
+### Development Baselines
+
+Use `provenance.policy = "dev"` with `examples/harness-dev.toml`. Dev manifests
+record the requested moving refs, resolution timestamp, exact resolved commits,
+result trees, patch hashes, and runtime artifact hashes. They are validated as
+internally consistent but are not compared with the published baseline pins.
+New profiles use schema v7, which permits the single-node topology; validation
+continues to accept the historical schema-v6 baseline.
+Commit `Cargo.lock` and any required harness API adaptation produced by a new
+resolution before starting a measured run; measured candidates reject dirty
+harness checkouts.
 
 ### Local Baselines
 
@@ -100,17 +114,18 @@ needed when the console wallet and node use different revisions. Commit the
 harness dependency/API adaptation as well; measured runs reject a dirty harness
 checkout.
 
-Local runs still fail on dirty source checkouts, revision mismatches, stale
+Local and dev runs still fail on dirty source checkouts, revision mismatches, stale
 manifests, changed artifact bytes, unsafe network topology, or invalid result
 data. They produce final profiles and deterministic summaries using normal
-validation, but are explicitly marked `provenance_policy: local` and cannot pass
-`validate-profile --submission`. The canonical policy remains the default.
+validation, but are explicitly marked `provenance_policy: local` or `dev` and
+cannot pass `validate-profile --submission`. The canonical policy is retained only for the
+historical published profile; this development-linked harness refuses new
+canonical measurements.
 
 For a local node, set `network.base_node_http_url` to its HTTP endpoint and set
-`network.mode1_base_node_service_peer` to `public_key::multiaddr`. Keep
-`network.authority_http_url` on public Esmeralda. The harness requires an
-archival selected endpoint, compares its finalized hash with the authority, and
-rejects stale local nodes.
+`network.mode1_base_node_service_peer` to `public_key::multiaddr`. The harness
+requires an archival synchronized selected endpoint. If `authority_http_url` is
+configured, it additionally compares tip distance and finalized hashes.
 
 ## Candidate Workflow
 

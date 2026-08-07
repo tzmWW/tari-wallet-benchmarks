@@ -1,0 +1,27 @@
+name: Development Stack Compatibility
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+jobs:
+  dev-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake jq lsof protobuf-compiler sqlite3
+      - name: Resolve and build latest development stack
+        run: scripts/fetch-dev-stack.sh .bench-cache/dev tools
+      - name: Verify frozen source and artifact provenance
+        run: cargo run -- verify-build-manifest --config examples/harness-dev.toml
+      - name: Test resolved harness
+        run: cargo test --all-features
+      - name: Upload frozen development manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-build-manifest
+          path: tools/build-manifest.json

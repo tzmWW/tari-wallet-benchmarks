@@ -29,7 +29,7 @@ pub fn capture() -> Environment {
 
 pub fn capture_for_network(
     base_node_url: &str,
-    authority_url: &str,
+    authority_url: Option<&str>,
     mode1_base_node_service_peer: Option<&str>,
 ) -> Environment {
     capture_for_network_with_data_dir(
@@ -42,13 +42,13 @@ pub fn capture_for_network(
 
 pub fn capture_for_network_with_data_dir(
     base_node_url: &str,
-    authority_url: &str,
+    authority_url: Option<&str>,
     mode1_base_node_service_peer: Option<&str>,
     data_dir: Option<&std::path::Path>,
 ) -> Environment {
     capture_with_network(
         Some(base_node_url),
-        Some(authority_url),
+        authority_url,
         mode1_base_node_service_peer,
         data_dir,
     )

@@ -986,13 +986,18 @@ fn structured_batch_id(value: Option<&serde_json::Value>) -> Option<String> {
     })
 }
 
-pub fn build_fetch_command(cache_dir: &Path) -> String {
-    format!("scripts/fetch-payment-processor.sh {}", cache_dir.display(),)
+pub fn build_fetch_command(cache_dir: &Path, development: bool) -> String {
+    let script = if development {
+        "scripts/fetch-dev-stack.sh"
+    } else {
+        "scripts/fetch-payment-processor.sh"
+    };
+    format!("{script} {} tools", cache_dir.display())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path};
 
     use crate::{
         config::Config,
@@ -1002,9 +1007,16 @@ mod tests {
     use tari_common_types::seeds::cipher_seed::CipherSeed;
 
     use super::{
-        build_env, inspect_payment_processor_db, payment_processor_db_path,
+        build_env, build_fetch_command, inspect_payment_processor_db, payment_processor_db_path,
         payment_receiver_command, payment_receiver_db_path,
     };
+
+    #[test]
+    fn fetch_command_tracks_the_provenance_channel() {
+        let cache = Path::new(".bench-cache/dev");
+        assert!(build_fetch_command(cache, true).contains("fetch-dev-stack.sh"));
+        assert!(build_fetch_command(cache, false).contains("fetch-payment-processor.sh"));
+    }
 
     #[test]
     fn pp_env_uses_private_view_key() {

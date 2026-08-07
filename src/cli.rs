@@ -145,6 +145,11 @@ pub enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Verify configured source checkouts, manifest claims, and runtime bytes.
+    VerifyBuildManifest {
+        #[arg(long, default_value = "harness.toml")]
+        config: PathBuf,
+    },
     /// Create a schema-v2 manifest for an explicitly local baseline from clean,
     /// committed source checkouts and the configured runtime binaries.
     CreateLocalManifest {

@@ -4,8 +4,7 @@
       "additionalProperties": false,
       "properties": {
         "authority_endpoint": {
-          "minLength": 1,
-          "type": "string"
+          "$ref": "#/$defs/nullable_string"
         },
         "authority_tip_end_hash": {
           "$ref": "#/$defs/nullable_string"
@@ -239,7 +238,8 @@
         "provenance_policy": {
           "enum": [
             "canonical",
-            "local"
+            "local",
+            "dev"
           ]
         },
         "scan_repetitions": {
@@ -1059,6 +1059,57 @@
   "$id": "https://github.com/tzmWW/tari-wallet-benchmarks/blob/main/RESULT_PROFILE_SCHEMA.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 6
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "base_node": {
+            "properties": {
+              "authority_endpoint": {
+                "minLength": 1,
+                "type": "string"
+              }
+            }
+          },
+          "config": {
+            "properties": {
+              "provenance_policy": {
+                "enum": [
+                  "canonical",
+                  "local"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 7
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "config": {
+            "required": [
+              "provenance_policy"
+            ]
+          }
+        }
+      }
+    }
+  ],
   "properties": {
     "base_node": {
       "$ref": "#/$defs/base_node"
@@ -1120,7 +1171,10 @@
       "type": "string"
     },
     "schema_version": {
-      "const": 6
+      "enum": [
+        6,
+        7
+      ]
     },
     "versions": {
       "additionalProperties": {

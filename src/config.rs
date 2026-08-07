@@ -34,6 +34,7 @@ pub enum ProvenancePolicy {
     #[default]
     Canonical,
     Local,
+    Dev,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -46,8 +47,8 @@ pub struct ProvenanceConfig {
 pub struct NetworkConfig {
     pub name: String,
     pub base_node_http_url: String,
-    #[serde(default = "default_authority_http_url")]
-    pub authority_http_url: String,
+    #[serde(default)]
+    pub authority_http_url: Option<String>,
     #[serde(default)]
     pub mode1_base_node_service_peer: Option<String>,
 }
@@ -270,7 +271,12 @@ impl Config {
         }
         let scan_url = url::Url::parse(&self.network.base_node_http_url)
             .context("network.base_node_http_url")?;
-        let authority_url = url::Url::parse(&self.network.authority_http_url)
+        let authority_url = self
+            .network
+            .authority_http_url
+            .as_deref()
+            .map(url::Url::parse)
+            .transpose()
             .context("network.authority_http_url")?;
         let canonical_live_shape = self.benchmark.mode1_live_topology
             && self.benchmark.mode2_live_scenarios
@@ -280,12 +286,13 @@ impl Config {
             if !matches!(scan_url.host_str(), Some("localhost" | "127.0.0.1" | "::1")) {
                 bail!("canonical live runs require a local archival base_node_http_url");
             }
-            if matches!(
-                authority_url.host_str(),
-                Some("localhost" | "127.0.0.1" | "::1")
-            ) || self.network.authority_http_url == self.network.base_node_http_url
+            if let Some(authority_url) = authority_url.as_ref()
+                && (matches!(
+                    authority_url.host_str(),
+                    Some("localhost" | "127.0.0.1" | "::1")
+                ) || authority_url.as_str() == self.network.base_node_http_url)
             {
-                bail!("canonical live runs require a distinct remote authority_http_url");
+                bail!("authority_http_url must be remote and distinct when configured");
             }
             if self.provenance.policy == ProvenancePolicy::Canonical
                 && (parse_amount(&self.benchmark.a_fund)?.0 != parse_amount("10000 T")?.0
@@ -558,7 +565,7 @@ impl Default for Config {
             network: NetworkConfig {
                 name: "esmeralda".to_string(),
                 base_node_http_url: "https://rpc.esmeralda.tari.com".to_string(),
-                authority_http_url: default_authority_http_url(),
+                authority_http_url: None,
                 mode1_base_node_service_peer: None,
             },
             provenance: ProvenanceConfig::default(),
@@ -652,10 +659,6 @@ fn default_mode3_worker_sleep_secs() -> u64 {
 
 fn default_base_node_rev() -> String {
     "v5.4.0".to_string()
-}
-
-fn default_authority_http_url() -> String {
-    "https://rpc.esmeralda.tari.com".to_string()
 }
 
 fn default_build_manifest() -> PathBuf {
@@ -900,6 +903,27 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("funding.old_wallet")
+        );
+    }
+
+    #[test]
+    fn authority_is_optional_but_must_be_distinct_when_present() {
+        let mut cfg = Config::default();
+        cfg.benchmark.mode1_live_topology = true;
+        cfg.benchmark.mode2_live_scenarios = true;
+        cfg.benchmark.mode3_live_topology = true;
+        cfg.benchmark.live_fresh_scan_cells = true;
+        cfg.network.base_node_http_url = "http://127.0.0.1:18142".to_string();
+        cfg.network.mode1_base_node_service_peer =
+            Some("abc::/ip4/127.0.0.1/tcp/18189".to_string());
+
+        cfg.validate_prefunding_b0().unwrap();
+        cfg.network.authority_http_url = Some(cfg.network.base_node_http_url.clone());
+        assert!(
+            cfg.validate_prefunding_b0()
+                .unwrap_err()
+                .to_string()
+                .contains("remote and distinct")
         );
     }
 
