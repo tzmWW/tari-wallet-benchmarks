@@ -1,5 +1,9 @@
 # Baseline 2026-07-31 Audit
 
+This audit describes the immutable historical schema-v6 publication. Current
+schema-v7 development methodology is documented in `README.md` and `RUNBOOK.md`;
+it does not alter the measurements below.
+
 ## Verdict
 
 The uncapped `baseline-20260730T220138Z` run completed all 27 cells. The

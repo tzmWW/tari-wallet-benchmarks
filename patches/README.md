@@ -1,9 +1,12 @@
 # Tracked Patches
 
-This directory contains the three source patches used to build the benchmark's
-pinned runtime artifacts. The fetch scripts verify each patch's SHA-256, the
-resulting Git tree, and the complete source diff before building. Runtime
-preflight then verifies the built artifacts against `tools/build-manifest.json`.
+This directory contains three tracked integration patches. The historical
+canonical build uses all three. Current dev builds resolve Minotari `main`, the
+latest Tari prerelease, and payment-processor `main`, then apply only the wallet
+password and payment-processor fee-rate patches. Fetchers record each applied
+patch's SHA-256, resulting Git tree, and complete source diff. Runtime preflight
+replays those patches and verifies the built artifacts against
+`tools/build-manifest.json`.
 
 None of these patches changes wallet input selection or engineers around
 contention, locking, transaction-shape failures, or other behavior that the
@@ -28,18 +31,20 @@ height of a partial scan incorrectly.
 - Calculates an inclusive `N`-block range as `start + N - 1`, with saturating
   arithmetic and focused tests.
 
-**Benchmark impact:** This is a correctness patch required for deterministic
-fixed-range B0 and recovery scans. It does not change transaction construction,
-selection, signing, or broadcasting.
+**Historical benchmark impact:** The canonical schema-v6 build required this
+correctness patch for deterministic fixed-range B0 and recovery scans. It does
+not change transaction construction, selection, signing, or broadcasting.
+Current dev builds do not apply it; they test the scanner resolved from Minotari
+`main`, and scanner regressions surface through fixed-target checks and CI.
 
-**If removed:** A scan can finish at a batch boundary before all downloaded
-blocks are persisted, so the harness cannot reliably prove the requested scan
-anchor or wallet state.
+**Historical removal impact:** On the published source revision, removing it lets
+a scan finish at a batch boundary before all downloaded blocks are persisted, so
+the harness cannot reliably prove the requested scan anchor or wallet state.
 
 ## `minotari-wallet-password-env.patch`
 
-**Source:** the same pinned Minotari CLI source, applied after the fixed-range
-scan patch for the runtime binary only.
+**Source:** resolved Minotari `main` for dev runs. In the historical canonical
+build it is applied after the fixed-range scan patch to the runtime binary only.
 
 **Why it exists:** Upstream requires the wallet password as `--password`. The
 harness manages the Mode 3 payment-receiver process and should not expose that
@@ -63,8 +68,9 @@ command diagnostics.
 
 ## `payment-processor-fee-rate.patch`
 
-**Source:**
-`tari-project/minotari_payment_processor@f0572c98cbfac7377412dc6d4094c7d7dfc5de2c`
+**Source:** Dev builds apply it to payment-processor `main` as resolved for that
+run. The historical canonical source was
+`tari-project/minotari_payment_processor@f0572c98cbfac7377412dc6d4094c7d7dfc5de2c`.
 
 **Why it exists:** Upstream hard-codes a fee rate of `5` microTari per gram. The
 bounty requires the harness to expose and record a pinned `fee_rate`, and to pass

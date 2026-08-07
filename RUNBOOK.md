@@ -37,7 +37,7 @@ hashes.
 
 ### Local Node Setup
 
-Initialize the pinned node in its own base path:
+Initialize the node built from the resolved dev stack in its own base path:
 
 ```sh
 tools/minotari_node \
@@ -127,13 +127,14 @@ The fetch scripts pin upstream bases and verify their exact Git trees:
 - node: `tari-project/tari@v5.4.0`
 - payment processor: `tari-project/minotari_payment_processor@f0572c98cbfac7377412dc6d4094c7d7dfc5de2c`
 
-The published harness linked the public scanner-fix compatibility commit. It differs from the
-upstream base only by `patches/minotari-fixed-range-scan.patch`, which prevents a
-download-completion marker from overtaking queued block batches and fixes the
-inclusive partial-scan stop height. Mode 2 S1 still uses upstream's ordinary
-`FundLocker` selection and wallet change path: each transaction requests `N-1`
-self-payment outputs, change supplies output `N`, and the harness records any
-multi-input selection or shape failure without retry.
+The published harness linked the public scanner-fix compatibility commit. It
+differs from the upstream base only by
+`patches/minotari-fixed-range-scan.patch`, which prevents a download-completion
+marker from overtaking queued block batches and fixes the inclusive partial-scan
+stop height. Mode 2 S1 still uses upstream's ordinary `FundLocker` selection and
+wallet change path: each transaction requests `N-1` self-payment outputs, change
+supplies output `N`, and the harness records any multi-input selection or shape
+failure without retry.
 
 The runtime Minotari CLI applies one additional operational patch:
 
@@ -241,12 +242,13 @@ addresses: `baseline-workflow` does that only after B0 succeeds.
 
 ## B0 and Funding
 
-Start from `harness-prefunding.toml`. Change the candidate `paths.data_dir` and
+Start from `examples/harness-dev.toml`. Change the candidate `paths.data_dir` and
 the matching `modes.new_wallet_database`; set the local-node identity above. Do
-not add funding records.
+not add funding records. `harness-prefunding.toml` is retained only as the
+historical schema-v6 canonical fixture.
 
 ```sh
-cp harness-prefunding.toml harness.toml
+cp examples/harness-dev.toml harness.toml
 mkdir -p .secrets candidates
 cargo run --release -- addresses --config harness.toml --out .secrets/candidate.env
 set -a; . .secrets/candidate.env; set +a
@@ -258,8 +260,8 @@ caffeinate -dimsu -- cargo run --release --features live-minotari -- baseline-wo
   --source-db /absolute/path/to/source-wallet.db \
   --b0-profile candidates/prefunding-b0.json \
   --s0-evidence candidates/s0-funding.json \
-  --profile candidates/esmeralda-baseline.json \
-  --summary candidates/esmeralda-baseline.md
+  --profile candidates/esmeralda-dev.json \
+  --summary candidates/esmeralda-dev.md
 ```
 
 `baseline-workflow` runs launch-invariant disk and build-manifest verification
@@ -307,7 +309,7 @@ diagnosis and documented interrupted-funding recovery; each performs its own
 launch checks when invoked separately.
 
 Each non-B0 scan captures one immutable target height/hash. Library-backed scans
-continue toward that same target when the pinned scanner returns before queued
+continue toward that same target if the resolved scanner returns before queued
 blocks are persisted; they never replace it with a newer tip. Continuation is
 bounded by the original deadline and three consecutive no-progress returns.
 Overshoot, cursor-hash mismatch, target reorganization, or deadline expiry fails
@@ -323,28 +325,48 @@ reason; scenario wall time is never substituted.
 
 ## Publication
 
+Development results are compatibility evidence, not replacements for the
+published canonical baseline:
+
 ```sh
 cargo run --release -- validate-profile \
-  --profile candidates/esmeralda-baseline.json --submission
+  --profile candidates/esmeralda-dev.json
 cargo run --release -- summarize-profile \
-  --profile candidates/esmeralda-baseline.json \
-  --out candidates/esmeralda-baseline.md
+  --profile candidates/esmeralda-dev.json \
+  --out candidates/esmeralda-dev.md
 ```
 
-Submission validation requires successful B0 and S0, all cells present, no
-harness errors, exact canonical configuration, coherent blocked prerequisites,
-recomputed deltas, realistic transaction shapes, and complete provenance. Honest
-downstream wallet failure is valid evidence.
+Normal validation requires coherent schema-v7 structure, completed B0/S0 gates,
+all cells, no harness errors, recomputed deltas, realistic transaction shapes,
+and complete frozen dev provenance. Honest downstream wallet failure remains
+valid evidence.
 
-Only after validation should the candidate JSON and summary replace the files in
-`baselines/`. Never promote partial checkpoints or combine modes from separate
-runs.
+Keep dev profiles and summaries under `candidates/` or another clearly labeled
+compatibility-results location. Do not replace
+`baselines/esmeralda_baseline.json`, its summary, or its audit: they are immutable
+schema-v6 evidence from the published canonical run. Never promote partial
+checkpoints or combine modes from separate runs.
+
+To re-verify that historical publication, use:
+
+```sh
+cargo run --release -- validate-profile \
+  --profile baselines/esmeralda_baseline.json --submission
+cargo run --release -- summarize-profile \
+  --profile baselines/esmeralda_baseline.json \
+  --out /tmp/esmeralda_baseline.summary.md
+cmp baselines/esmeralda_baseline.summary.md /tmp/esmeralda_baseline.summary.md
+```
 
 ### Evidence and Logs
 
-The canonical result is the validated profile, its deterministic summary, and
-its dated audit. Keep operator and child-process logs under the matching
-candidate namespace and correlate them with its B0/S0 checkpoints and profile.
+The historical canonical result is the validated profile, its deterministic
+summary, and its dated audit. Keep operator and child-process logs for new dev
+runs under the matching candidate namespace and correlate them with its B0/S0
+checkpoints and profile.
+Logs remain local and ignored; do not commit wallet, node, payment-processor, or
+operator logs because they can contain environment-specific paths or sensitive
+diagnostics.
 
 The current published profile is from candidate
 `baseline-20260730T220138Z`, measurement commit

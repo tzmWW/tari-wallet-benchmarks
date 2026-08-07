@@ -72,7 +72,8 @@ within a run.
 
 The published baseline remains immutable historical schema-v6 evidence. Its
 original fixed sources and patch hashes remain available through the legacy
-canonical fetch scripts and embedded provenance checks.
+canonical fetch scripts and the provenance recorded in `build.rs`. They are
+historical audit inputs, not the current build path.
 
 ### Development Baselines
 
@@ -86,10 +87,17 @@ Commit `Cargo.lock` and any required harness API adaptation produced by a new
 resolution before starting a measured run; measured candidates reject dirty
 harness checkouts.
 
+At this revision, `Cargo.lock` resolves Minotari `main` to `322a901c` and the Tari
+API/runtime line is `v5.6.0-pre.1`. The last verified dev build on 2026-08-07
+resolved payment-processor `main` to `f0572c9`. These are not permanent allowlist
+pins; the dev fetcher resolves the moving refs again and freezes their full
+commits in each run manifest.
+
 ### Local Baselines
 
 The published baseline uses `provenance.policy = "canonical"` and the immutable
-revisions above. To benchmark a different Tari/Minotari stack, set
+historical revisions documented in `RUNBOOK.md`. To benchmark a different
+explicitly selected Tari/Minotari stack, set
 `provenance.policy = "local"`, pin exact commits in `[versions]`, and point
 `[paths]` at binaries built from those commits. Do not use a moving branch or
 `HEAD` as a recorded revision.
@@ -118,9 +126,9 @@ Local and dev runs still fail on dirty source checkouts, revision mismatches, st
 manifests, changed artifact bytes, unsafe network topology, or invalid result
 data. They produce final profiles and deterministic summaries using normal
 validation, but are explicitly marked `provenance_policy: local` or `dev` and
-cannot pass `validate-profile --submission`. The canonical policy is retained only for the
-historical published profile; this development-linked harness refuses new
-canonical measurements.
+cannot pass `validate-profile --submission`. The canonical policy is retained
+only for the historical published profile; this development-linked harness
+refuses new canonical measurements.
 
 For a local node, set `network.base_node_http_url` to its HTTP endpoint and set
 `network.mode1_base_node_service_peer` to `public_key::multiaddr`. The harness
@@ -148,15 +156,17 @@ cargo run --release --features live-minotari -- baseline-workflow \
   --source-db /absolute/path/to/source-wallet.db \
   --b0-profile candidates/prefunding-b0.json \
   --s0-evidence candidates/s0-funding.json \
-  --profile candidates/esmeralda-baseline.json \
-  --summary candidates/esmeralda-baseline.md
+  --profile candidates/esmeralda-dev.json \
+  --summary candidates/esmeralda-dev.md
 ```
 
 The workflow performs disk/build-manifest checks once, then runs B0, resumable S0
-funding, recipient synchronization/readiness, the benchmark, submission
-validation, and summary generation in one process. `fund-s0` still writes a
-broadcast checkpoint atomically before waiting for `C_min`; the standalone stage
-commands remain available for diagnosis and interrupted-funding recovery.
+funding, recipient synchronization/readiness, the benchmark, policy-aware final
+validation, and summary generation in one process. Dev and local profiles receive
+normal schema validation; only the immutable historical canonical profile is
+eligible for `--submission`. `fund-s0` still writes a broadcast checkpoint
+atomically before waiting for `C_min`; the standalone stage commands remain
+available for diagnosis and interrupted-funding recovery.
 
 The operator funds exactly one source wallet, not any benchmark-mode address.
 After all three empty-wallet B0 scans pass, the harness automatically broadcasts

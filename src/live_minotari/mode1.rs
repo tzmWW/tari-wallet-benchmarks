@@ -732,7 +732,7 @@ async fn run_mode1_s1(
         if spendable_amounts.len() != round.tx_count as usize {
             total.failure_count = total.failure_count.saturating_add(1);
             total.errors.push(format!(
-                "mode1 S1 round {} expected {} spendable inputs before dispatch, observed {}; refusing noncanonical state",
+                "mode1 S1 round {} expected {} spendable inputs before dispatch, observed {}; refusing protocol-incompatible state",
                 round.round_index,
                 round.tx_count,
                 spendable_amounts.len()
@@ -1310,13 +1310,13 @@ async fn mode1_balance_components(
     }))
 }
 
-/// Pinned transaction weights: one kernel (10), one input (8), and 53 per output.
+/// Fee-model assumptions: one kernel (10), one input (8), and 53 per output.
 /// A stealth output with default features/script/covenant and an empty memo rounds to
 /// four feature/script grams, for 57 grams total per output.
 pub(super) const STEALTH_OUTPUT_GRAMS: u64 = 57;
 
 /// Console-wallet `send_one_sided_multi_recipient_transaction` adds the sender address
-/// to every memo. The pinned MemoField is padded to 130 bytes, making each output's
+/// to every memo. The current MemoField is padded to 130 bytes, making each output's
 /// rounded feature/script contribution 12 grams and its total weight 65 grams.
 pub(super) const CONSOLE_SELF_OUTPUT_GRAMS: u64 = 65;
 
@@ -1382,8 +1382,9 @@ pub(super) fn exact_pp_split_with_change(
         bail!("PP exact split requires at least two child outputs");
     }
     let payment_count = u64::from(child_count - 1);
-    // Pinned PP f0572c9 unsigned_tx_creator: one kernel/input, explicit empty-memo
-    // stealth outputs (57g each), and one padded change output (65g).
+    // The resolved PP builder uses one kernel/input, explicit empty-memo stealth
+    // outputs (57g each), and one padded change output (65g). Shape and fee
+    // reconciliation surface incompatible changes in later dev resolutions.
     let weight = 18u64
         .checked_add(
             STEALTH_OUTPUT_GRAMS
@@ -1410,7 +1411,7 @@ pub(super) fn exact_pp_split_with_change(
         .checked_add(PP_LOCK_FEE_BUFFER)
         .is_none_or(|required| required > input_microtari)
     {
-        bail!("PP exact split cannot satisfy the pinned 200000 µT lock buffer");
+        bail!("PP exact split cannot satisfy the required 200000 µT lock buffer");
     }
     let change_microtari = input_microtari
         .checked_sub(explicit_total)

@@ -529,7 +529,7 @@ async fn run_mode2_s1_rounds(
         if spendable_amounts.len() != round.tx_count as usize {
             round_summary.failure_count = round_summary.failure_count.saturating_add(1);
             round_summary.errors.push(format!(
-                "mode2 S1 round {} expected {} spendable inputs before dispatch, observed {}; refusing noncanonical state",
+                "mode2 S1 round {} expected {} spendable inputs before dispatch, observed {}; refusing protocol-incompatible state",
                 round.round_index,
                 round.tx_count,
                 spendable_amounts.len()
@@ -715,7 +715,7 @@ fn normal_change_split_amounts(
         bail!("normal split requires at least two child outputs");
     }
     let explicit_count = child_count - 1;
-    // Reserve the larger pinned self-output weight for every child. FundLocker
+    // Reserve the conservative self-output weight for every child. FundLocker
     // computes the real fee; this only keeps the requested amount below every
     // available one-input parent so ordinary wallet change remains possible.
     let fee_reserve_weight = 18u64

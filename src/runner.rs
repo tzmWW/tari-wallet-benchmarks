@@ -1923,7 +1923,7 @@ fn check_harness_worktree_clean() -> anyhow::Result<()> {
         bail!("could not verify the harness git worktree state");
     }
     if !output.stdout.is_empty() {
-        bail!("canonical candidate commands require a clean git worktree");
+        bail!("measured candidate commands require a clean git worktree");
     }
     Ok(())
 }

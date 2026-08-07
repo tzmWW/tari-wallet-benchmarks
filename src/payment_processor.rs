@@ -141,7 +141,7 @@ pub async fn ensure_console_wallet_base(
     let base_path = console_wallet_base_path(config);
     if console_wallet_db_path(&base_path).exists() {
         bail!(
-            "payment-processor signer DB already exists at {}; canonical runs require pristine signer state",
+            "payment-processor signer DB already exists at {}; measured runs require pristine signer state",
             console_wallet_db_path(&base_path).display()
         );
     }

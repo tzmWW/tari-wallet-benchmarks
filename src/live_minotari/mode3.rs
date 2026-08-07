@@ -570,7 +570,7 @@ async fn run_pp_s1_rounds(
         if spendable_amounts.len() != round.tx_count as usize {
             total.failed_batches = total.failed_batches.saturating_add(1);
             total.errors.push(format!(
-                "PP S1 round {} expected {} spendable inputs before dispatch, observed {}; refusing noncanonical state",
+                "PP S1 round {} expected {} spendable inputs before dispatch, observed {}; refusing protocol-incompatible state",
                 round.round_index,
                 round.tx_count,
                 spendable_amounts.len()

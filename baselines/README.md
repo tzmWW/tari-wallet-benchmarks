@@ -6,6 +6,8 @@ submission validation. Failed cells are retained as measured wallet outcomes.
 `esmeralda_baseline.summary.md` is its deterministic human-readable summary.
 The profile run ID is `run-1785451471350207000-66061`; its SHA-256 is
 `e00d8f9ea4711f825bb81e8af3abfc3a02a9831cc3f3030483aea0b39400a024`.
+These files are immutable historical publication evidence. Current schema-v7
+development results stay outside `baselines/` and do not replace them.
 
 ```sh
 cargo run --release -- validate-profile --profile baselines/esmeralda_baseline.json --submission

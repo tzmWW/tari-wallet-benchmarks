@@ -7,8 +7,9 @@ mode1_base_node_service_peer = "REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY::/ip4/127.0.0
 [provenance]
 # Historical published-baseline policy. The current development-linked harness
 # will validate the published profile but refuses to start a new canonical run.
-# Use "local" for a new baseline built from revisions and artifacts recorded in
-# your own build manifest. Local profiles cannot pass --submission validation.
+# Use examples/harness-dev.toml for ordinary compatibility runs. Use "local"
+# only for a custom stack built from explicitly selected source checkouts.
+# Dev and local profiles cannot pass --submission validation.
 policy = "canonical"
 
 [benchmark]

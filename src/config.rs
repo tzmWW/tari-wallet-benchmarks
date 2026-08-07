@@ -278,13 +278,13 @@ impl Config {
             .map(url::Url::parse)
             .transpose()
             .context("network.authority_http_url")?;
-        let canonical_live_shape = self.benchmark.mode1_live_topology
+        let full_live_shape = self.benchmark.mode1_live_topology
             && self.benchmark.mode2_live_scenarios
             && self.benchmark.mode3_live_topology
             && self.benchmark.live_fresh_scan_cells;
-        if canonical_live_shape {
+        if full_live_shape {
             if !matches!(scan_url.host_str(), Some("localhost" | "127.0.0.1" | "::1")) {
-                bail!("canonical live runs require a local archival base_node_http_url");
+                bail!("full live runs require a local archival base_node_http_url");
             }
             if let Some(authority_url) = authority_url.as_ref()
                 && (matches!(
