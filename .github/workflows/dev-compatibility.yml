@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake jq lsof protobuf-compiler sqlite3
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake jq lsof protobuf-compiler sqlite3 libudev-dev
       - name: Resolve and build latest development stack
         run: scripts/fetch-dev-stack.sh .bench-cache/dev tools
       - name: Verify frozen source and artifact provenance
@@ -21,6 +21,7 @@ jobs:
       - name: Test resolved harness
         run: cargo test --all-features
       - name: Upload frozen development manifest
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dev-build-manifest
