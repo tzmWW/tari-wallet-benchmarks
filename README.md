@@ -92,12 +92,14 @@ Commit `Cargo.lock` and any required harness API adaptation produced by a new
 resolution before starting a measured run; measured candidates reject dirty
 harness checkouts.
 
+<!-- dev-stack-snapshot:start -->
 At this revision, `Cargo.lock` resolves Minotari `main` to `84c79e9c` and the Tari
 API/runtime line is `v5.6.0-pre.1`. The last verified dev build on 2026-08-22
-selected Tari prerelease `v5.6.0-pre.1` at `bad94f9` and resolved
-payment-processor `main` to `f0572c9`. These are not permanent allowlist
+selected Tari prerelease `v5.6.0-pre.1` at `bad94f90` and resolved
+payment-processor `main` to `f0572c98`. These are not permanent allowlist
 pins; the dev fetcher resolves the moving refs again and freezes their full
 commits in each run manifest.
+<!-- dev-stack-snapshot:end -->
 
 ### Local Baselines
 

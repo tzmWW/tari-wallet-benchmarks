@@ -5,6 +5,14 @@ on:
   schedule:
     - cron: "17 3 * * 1"
 
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dev-compatibility
+  cancel-in-progress: false
+
 jobs:
   dev-stack:
     runs-on: ubuntu-latest
@@ -26,3 +34,19 @@ jobs:
         with:
           name: dev-build-manifest
           path: tools/build-manifest.json
+      - name: Refresh documentation snapshot
+        if: success()
+        run: scripts/update-dev-stack-docs.sh tools/build-manifest.json README.md Cargo.lock .bench-cache/dev/tari
+      - name: Create documentation refresh pull request
+        if: success()
+        uses: peter-evans/create-pull-request@v7
+        with:
+          add-paths: README.md
+          branch: docs/dev-stack-snapshot
+          delete-branch: true
+          commit-message: Refresh development stack snapshot
+          title: Refresh development stack snapshot
+          body: |
+            Automated refresh of the README development stack snapshot from a
+            fully verified development stack resolution (build, provenance, and
+            tests all passed). Prose outside the snapshot markers is unchanged.
