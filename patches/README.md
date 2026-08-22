@@ -2,10 +2,11 @@
 
 This directory contains three tracked integration patches. The historical
 canonical build uses all three. Current dev builds resolve Minotari `main`, the
-latest Tari prerelease, and payment-processor `main`, then apply only the wallet
-password and payment-processor fee-rate patches. Fetchers record each applied
-patch's SHA-256, resulting Git tree, and complete source diff. Runtime preflight
-replays those patches and verifies the built artifacts against
+newest Tari prerelease compatible with the locked harness stack, and
+payment-processor `main`, then apply only the wallet password and
+payment-processor fee-rate patches. Fetchers record each applied patch's
+SHA-256, resulting Git tree, and complete source diff. Runtime preflight replays
+those patches and verifies the built artifacts against
 `tools/build-manifest.json`.
 
 None of these patches changes wallet input selection or engineers around
@@ -108,7 +109,9 @@ The historical canonical application order, expected hashes, and result trees ar
 
 Rolling development runs use `scripts/fetch-dev-stack.sh`. That script resolves
 moving refs first, then records the actual patch hashes, result trees, complete
-diff hashes, resolved commits, and built artifact hashes. A patch that no longer
+diff hashes, resolved commits, and built artifact hashes. When upstream tags a
+Tari prerelease that minotari-cli cannot consume yet, it selects the newest
+prerelease consistent with the locked harness stack instead. A patch that no longer
 applies is reported as a development compatibility break rather than disguised
 as a canonical provenance mismatch.
 

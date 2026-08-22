@@ -40,7 +40,7 @@ Ubuntu/Debian:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y build-essential clang cmake git curl jq lsof protobuf-compiler sqlite3 nodejs npm
+sudo apt-get install -y build-essential clang cmake git curl jq lsof protobuf-compiler sqlite3 libudev-dev nodejs npm
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 npm install --global @ast-grep/cli
 ```
@@ -61,8 +61,13 @@ local node, then replace `REPLACE_WITH_LOCAL_NODE_PUBLIC_KEY` with its `whoami`
 public key. The wallet surfaces and harness use that same node. An optional
 `authority_http_url` may be added for cross-node tip and finalized-hash checks.
 
-The development fetcher resolves Minotari `main`, the newest Tari prerelease, and
-payment-processor `main` once per invocation. It records their exact commits and
+The development fetcher resolves Minotari `main`, the newest Tari prerelease
+whose in-tree `tari_common` version matches the locked harness stack, and
+payment-processor `main` once per invocation; `MINOTARI_DEV_REF`, `TARI_DEV_REF`,
+and `PP_DEV_REF` override those selectors with any branch or tag. When upstream
+Tari tags ahead of the crates.io line minotari-cli consumes, the fetcher walks
+prerelease tags newest-first and selects the newest buildable runtime instead of
+failing. It records their exact commits and
 trees, applies only the password-input and fee-rate integration patches, builds
 the runtime binaries, and writes their artifact hashes to
 `tools/build-manifest.json`. Moving development refs are expected; a patch,
@@ -87,9 +92,10 @@ Commit `Cargo.lock` and any required harness API adaptation produced by a new
 resolution before starting a measured run; measured candidates reject dirty
 harness checkouts.
 
-At this revision, `Cargo.lock` resolves Minotari `main` to `322a901c` and the Tari
-API/runtime line is `v5.6.0-pre.1`. The last verified dev build on 2026-08-07
-resolved payment-processor `main` to `f0572c9`. These are not permanent allowlist
+At this revision, `Cargo.lock` resolves Minotari `main` to `84c79e9c` and the Tari
+API/runtime line is `v5.6.0-pre.1`. The last verified dev build on 2026-08-22
+selected Tari prerelease `v5.6.0-pre.1` at `bad94f9` and resolved
+payment-processor `main` to `f0572c9`. These are not permanent allowlist
 pins; the dev fetcher resolves the moving refs again and freezes their full
 commits in each run manifest.
 
@@ -120,7 +126,10 @@ the repository and Git tree, hashes each runtime artifact, and writes
 branch so the selected commit and tree capture them. Separate Tari checkouts are
 needed when the console wallet and node use different revisions. Commit the
 harness dependency/API adaptation as well; measured runs reject a dirty harness
-checkout.
+checkout. Local manifests carry no patches, so the tracked integration patches
+are not replayed; bake them into your own checkouts if your stack needs them,
+and regenerate the manifest after replacing any binary because every artifact
+SHA-256 is bound into it.
 
 Local and dev runs still fail on dirty source checkouts, revision mismatches, stale
 manifests, changed artifact bytes, unsafe network topology, or invalid result
