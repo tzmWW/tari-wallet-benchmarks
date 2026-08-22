@@ -98,12 +98,26 @@ cargo test --all-features
 ast-grep scan
 ```
 
-The dev fetcher resolves Minotari `main`, the newest Tari prerelease, and
-payment-processor `main`. `MINOTARI_DEV_REF`, `TARI_DEV_REF`, and `PP_DEV_REF`
-override those selectors. It updates Cargo's Minotari lock, checks the harness
-against that resolution, builds all runtime artifacts, and writes a `channel:
-dev` manifest containing the resolution timestamp and exact commits. Commit the
-resulting `Cargo.lock` and any API adaptation before a measured run.
+The dev fetcher resolves Minotari `main`, the newest Tari prerelease whose
+in-tree `tari_common` version matches the locked harness stack, and
+payment-processor `main`. Upstream can tag ahead of the published crates.io
+line that minotari-cli consumes; in that case the fetcher walks prerelease
+tags newest-first and degrades to the newest buildable runtime instead of
+failing. It exits with an error only when none of the newest 25 prereleases
+matches, which means the harness pins must be advanced together with
+Minotari's dependency move. `MINOTARI_DEV_REF`, `TARI_DEV_REF`, and
+`PP_DEV_REF` override those selectors with any branch or tag. The fetcher
+updates Cargo's Minotari lock, checks the harness against that resolution,
+builds all runtime artifacts, and writes a `channel: dev` manifest containing
+the resolution timestamp and exact commits. Commit the resulting `Cargo.lock`
+and any API adaptation before a measured run.
+
+The harness itself compiles against Minotari `main` (a Git branch dependency)
+and exact-pinned crates.io Tari API crates. Targeting a different stack
+version therefore also requires bumping those pins in `Cargo.toml` and
+adapting any API drift before the harness builds; the dev gate additionally
+requires the locked `tari_common` to equal the selected runtime source-tree
+version.
 
 Patch application, compilation, and tests are compatibility gates for dev. They
 are not rejected merely because a moving ref no longer equals the historical
@@ -199,6 +213,13 @@ trees, and executable SHA-256 values. Local preflight then checks the manifest's
 internal source/artifact relationships and hashes the binaries again. A local
 profile records `provenance_policy: local`, so later submission validation
 rejects it even if its benchmark parameters happen to match the reference run.
+
+Two further constraints apply to local baselines. Local manifests record no
+patches: the historical fixed-range scanner, wallet-password environment, and
+payment-processor fee-rate patches are not replayed, so bake them into your own
+checkouts if your stack needs them. And because every artifact SHA-256 is bound
+into the manifest, replacing a runtime binary without regenerating the manifest
+fails preflight closed.
 
 ### Source Wallet
 
