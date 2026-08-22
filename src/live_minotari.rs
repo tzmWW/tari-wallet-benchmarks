@@ -3730,7 +3730,7 @@ pub async fn construct_sign_broadcast_one_sided(
     let mut sender = TransactionSender::new(
         pool,
         "default".to_string(),
-        request.password.to_string(),
+        request.password.to_string().into(),
         Network::Esmeralda,
         request.confirmation_window,
     )?;
@@ -3808,7 +3808,9 @@ async fn construct_sign_broadcast_one_sided_recipient_amounts(
         request.seconds_to_lock,
         request.confirmation_window,
     );
-    let locked_funds = FundLocker::new(pool.clone()).lock(
+    let mut conn = pool.get()?;
+    let locked_funds = FundLocker::new().lock(
+        &mut conn,
         account.id,
         amount,
         recipients.len(),
@@ -3829,7 +3831,7 @@ async fn construct_sign_broadcast_one_sided_recipient_amounts(
     let one_sided_tx = OneSidedTransaction::new(
         pool.clone(),
         Network::Esmeralda,
-        request.password.to_string(),
+        request.password.to_string().into(),
     );
     let unsigned = match one_sided_tx.create_unsigned_transaction(
         &account,
@@ -3909,7 +3911,9 @@ async fn construct_sign_broadcast_normal_split_owned(
         request.seconds_to_lock,
         request.confirmation_window,
     );
-    let locked_funds = FundLocker::new(pool.clone()).lock(
+    let mut conn = pool.get()?;
+    let locked_funds = FundLocker::new().lock(
+        &mut conn,
         account.id,
         amount,
         recipients.len(),
@@ -3927,8 +3931,11 @@ async fn construct_sign_broadcast_normal_split_owned(
                 format!("pending transaction missing for idempotency key {idempotency_key}")
             })?
     };
-    let one_sided_tx =
-        OneSidedTransaction::new(pool.clone(), Network::Esmeralda, request.password.clone());
+    let one_sided_tx = OneSidedTransaction::new(
+        pool.clone(),
+        Network::Esmeralda,
+        request.password.clone().into(),
+    );
     let unsigned = one_sided_tx
         .create_unsigned_transaction(&account, locked_funds, recipients, request.fee_rate)
         .context("creating normal-selection split transaction")?;

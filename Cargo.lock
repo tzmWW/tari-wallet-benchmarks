@@ -2887,7 +2887,7 @@ dependencies = [
 [[package]]
 name = "minotari"
 version = "0.2.0"
-source = "git+https://github.com/tari-project/minotari-cli?branch=main#322a901cdd7bed42fe47b24fe6dc3ca0946f3643"
+source = "git+https://github.com/tari-project/minotari-cli?branch=main#84c79e9c0f322746ad089e6f09241dced3198aa2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2940,7 +2940,7 @@ dependencies = [
 [[package]]
 name = "minotari-scanning"
 version = "0.2.0"
-source = "git+https://github.com/tari-project/minotari-cli?branch=main#322a901cdd7bed42fe47b24fe6dc3ca0946f3643"
+source = "git+https://github.com/tari-project/minotari-cli?branch=main#84c79e9c0f322746ad089e6f09241dced3198aa2"
 dependencies = [
  "anyhow",
  "async-trait",
