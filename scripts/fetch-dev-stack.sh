@@ -81,16 +81,8 @@ if [ ! -d "${TARI_DIR}/.git" ]; then
 fi
 git -C "${TARI_DIR}" remote set-url origin "${TARI_REPO}"
 git -C "${TARI_DIR}" fetch --prune --prune-tags --tags origin
-if [ -z "${TARI_REF}" ]; then
-  TARI_REF="$(git -C "${TARI_DIR}" tag --list 'v*-pre.*' --sort=-version:refname | perl -ne 'print; exit')"
-fi
-if [ -z "${TARI_REF}" ]; then
-  printf 'no Tari development prerelease tag was found\n' >&2
-  exit 1
-fi
 
 MINOTARI_COMMIT="$(prepare_checkout "${MINOTARI_REPO}" "${MINOTARI_DIR}" "${MINOTARI_REF}" "minotari-cli")"
-TARI_COMMIT="$(prepare_checkout "${TARI_REPO}" "${TARI_DIR}" "${TARI_REF}" "Tari")"
 PP_COMMIT="$(prepare_checkout "${PP_REPO}" "${PP_DIR}" "${PP_REF}" "payment processor")"
 
 cleanup_sources() {
@@ -109,8 +101,34 @@ if [ "${LOCKED_MINOTARI_COMMIT}" != "${MINOTARI_COMMIT}" ]; then
     "${LOCKED_MINOTARI_COMMIT}" "${MINOTARI_REF}" "${MINOTARI_COMMIT}" >&2
   exit 1
 fi
-SOURCE_TARI_VERSION="$(cargo metadata --manifest-path "${TARI_DIR}/Cargo.toml" --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tari_common") | .version')"
 LOCKED_TARI_VERSION="$(cargo metadata --all-features --format-version 1 --locked | jq -r '.packages[] | select(.name == "tari_common" and (.source // "" | startswith("registry+"))) | .version')"
+
+# Upstream Tari can tag ahead of the crates.io line that Minotari's development
+# branch and this harness consume. Walk prerelease tags newest first and select
+# the newest one whose in-tree tari_common matches the locked harness stack so a
+# tag skew degrades to the newest consistent runtime instead of failing.
+if [ -z "${TARI_REF}" ]; then
+  TARI_REF="$(git -C "${TARI_DIR}" tag --list 'v*-pre.*' --sort=-version:refname | perl -ne 'print if $. <= 25' | while IFS= read -r candidate; do
+    [ -n "${candidate}" ] || continue
+    candidate_version="$(
+      git -C "${TARI_DIR}" checkout --quiet --detach "refs/tags/${candidate}" 2>/dev/null || true
+      cargo metadata --manifest-path "${TARI_DIR}/Cargo.toml" --no-deps --format-version 1 2>/dev/null |
+        jq -r '.packages[] | select(.name == "tari_common") | .version' 2>/dev/null || true
+    )"
+    if [ -n "${candidate_version}" ] && [ "${candidate_version}" = "${LOCKED_TARI_VERSION}" ]; then
+      printf '%s' "${candidate}"
+      break
+    fi
+  done)"
+fi
+if [ -z "${TARI_REF}" ]; then
+  printf 'no Tari development prerelease tag matches locked tari_common %s; update Cargo.toml and adapt the harness\n' \
+    "${LOCKED_TARI_VERSION}" >&2
+  exit 1
+fi
+
+TARI_COMMIT="$(prepare_checkout "${TARI_REPO}" "${TARI_DIR}" "${TARI_REF}" "Tari")"
+SOURCE_TARI_VERSION="$(cargo metadata --manifest-path "${TARI_DIR}/Cargo.toml" --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tari_common") | .version')"
 if [ "${LOCKED_TARI_VERSION}" != "${SOURCE_TARI_VERSION}" ]; then
   printf 'harness Tari API crates are %s but resolved runtime source is %s; update Cargo.toml and adapt the harness\n' \
     "${LOCKED_TARI_VERSION}" "${SOURCE_TARI_VERSION}" >&2
