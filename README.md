@@ -94,7 +94,7 @@ harness checkouts.
 
 <!-- dev-stack-snapshot:start -->
 At this revision, `Cargo.lock` resolves Minotari `main` to `84c79e9c` and the Tari
-API/runtime line is `v5.6.0-pre.1`. The last verified dev build on 2026-08-22
+API/runtime line is `v5.6.0-pre.1`. The last verified dev build on 2026-08-31
 selected Tari prerelease `v5.6.0-pre.1` at `bad94f90` and resolved
 payment-processor `main` to `f0572c98`. These are not permanent allowlist
 pins; the dev fetcher resolves the moving refs again and freezes their full
